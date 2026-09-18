@@ -1,0 +1,62 @@
+# Environments
+.env
+.env.*
+!.env.example
+CRUSH.md
+memory-bank/
+GEMINI.md
+# VSCode / JetBrains
+.vscode/
+.idea/
+.cursor/
+.crush/
+_output_/
+data/
+
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# Build and distribution
+/dist/
+/build/
+
+# Log files
+*.log
+
+# Data files
+# Игнорируем все файлы БД и CSV в директории data, но не сами файлы-списки
+data/*.db
+data/*.csv
+data/*.xlsx
+
+# Temp files
+*.tmp
+debug_*.html
+
+*.xlsx
+*.csv
+*.html
+*.json
+*.txt
+!requirements.txt
+*.yaml
+*.yml
+*.jsonl
+*.jsonl.gz
+*.jsonl.gz.part
+*.jsonl.gz.part.1
+node_modules/
+
+
+
+ratings.db
+*.egg-info/
