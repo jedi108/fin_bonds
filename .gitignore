@@ -5,6 +5,8 @@
 CRUSH.md
 memory-bank/
 GEMINI.md
+# Симлинк на приватный AGENTS.md внутри сабмодуля workspace — не коммитить в публичный репозиторий
+AGENTS.md
 # VSCode / JetBrains
 .vscode/
 .idea/

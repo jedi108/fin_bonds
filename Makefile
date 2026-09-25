@@ -10,8 +10,10 @@ DEPLOY_DIR      ?= /home/$(DEPLOY_USER)/prod/fin_bonds
 DEPLOY_SERVICE  ?= fin_bonds
 DEPLOY_ENC_FILE ?= $(ENV_DIR)/.env.prod.enc
 DEPLOY_CONF_DIR ?= ./workspace/deploy
+SKILLS_DIR ?= ./workspace/fin_bonds/skills_hermes
+VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
-.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env
+.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills hooks-install migrate-remote
 
 check-deploy-env:
 	@if [ "$(DEPLOY_HOST)" = "your-server" ] || [ -z "$(DEPLOY_HOST)" ]; then \
@@ -33,6 +35,9 @@ help:
 	@echo "  make ssh            - Войти по SSH в директорию проекта на сервере"
 	@echo "  make timer-install  - Установить systemd service и timer на сервере"
 	@echo "  make timer-status   - Проверить статус systemd таймера"
+	@echo "  make migrate-remote - Применить миграции БД на сервере (PostgreSQL; идемпотентно)"
+	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills_hermes)"
+	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов в сабмодуль workspace"
 
 # Первичная инициализация на сервере
 deploy-init:
@@ -92,7 +97,30 @@ deploy: deploy-init env-push
 	@echo "==> Обновление зависимостей pip..."
 	ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "$(DEPLOY_DIR)/venv/bin/pip install --upgrade pip && $(DEPLOY_DIR)/venv/bin/pip install -r $(DEPLOY_DIR)/requirements.txt && $(DEPLOY_DIR)/venv/bin/pip install --no-deps 'git+https://github.com/RussianInvestments/invest-python.git'"
 	ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "chmod +x $(DEPLOY_DIR)/run_update.sh"
+	@$(MAKE) --no-print-directory migrate-remote
 	@echo "==> Деплой успешно завершен!"
+
+# Применение миграций БД на сервере. Идемпотентно; на сервере без
+# PostgreSQL (POSTGRES_DSN пуст в .env) шаг пропускается с сообщением.
+migrate-remote:
+	@echo "==> Применение миграций БД на $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "cd $(DEPLOY_DIR) && set -a && . ./.env && set +a && \
+		if [ -n \"\$${POSTGRES_DSN:-}\" ]; then \
+			venv/bin/python main.py migrate-db; \
+		else \
+			echo 'POSTGRES_DSN не задан - миграции пропущены (SQLite).'; \
+		fi"
+
+# Валидация frontmatter скиллов HERMES перед коммитом/деплоем
+validate-skills:
+	@test -d $(SKILLS_DIR) || { echo "Ошибка: нет $(SKILLS_DIR) (инициализируйте сабмодуль: git submodule update --init workspace)"; exit 1; }
+	$(VENV_PY) $(SKILLS_DIR)/scripts/validate_skills.py
+
+# Однократная установка pre-commit hook валидации скиллов в сабмодуль fin_tasks
+hooks-install:
+	@test -d workspace/.git -o -f workspace/.git || { echo "Ошибка: сабмодуль workspace не инициализирован"; exit 1; }
+	git -C workspace config core.hooksPath fin_bonds/skills_hermes/hooks
+	@echo "==> pre-commit hook установлен (git -C workspace config core.hooksPath)"
 
 # Ручной запуск обновления на сервере
 run-remote:
