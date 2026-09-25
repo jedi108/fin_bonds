@@ -28,6 +28,7 @@ from src.use_cases.export_bonds import ExportBondsUseCase
 from src.use_cases.export_monitoring_results import ExportMonitoringResultsUseCase
 from src.use_cases.export_portfolio import ExportPortfolioUseCase
 from src.use_cases.generate_plots import GeneratePlotsUseCase
+from src.use_cases.migrate_db import MigrateDbUseCase
 from src.use_cases.seed_data import SeedDataUseCase
 from src.use_cases.set_spread import SetSpreadUseCase
 from src.use_cases.sync_offers_to_calendar import SyncOffersToCalendarUseCase
@@ -195,6 +196,7 @@ class UseCaseFactory:
             'seed-data': SeedDataUseCase,
             'clear-data': ClearDataUseCase,
             'check-db': CheckDbUseCase,
+            'migrate-db': MigrateDbUseCase,
             'export-bonds': ExportBondsUseCase,
             'export-portfolio': ExportPortfolioUseCase,
             'sync-portfolio': SyncPortfolioUseCase,
