@@ -175,7 +175,9 @@ TABLE_SPECS: Tuple[TableSpec, ...] = (
             _to_ts, _to_ts, _to_decimal,
             _to_decimal,
         ),
-        conflict_sql='ON CONFLICT (isin, broker_name) DO NOTHING',
+        # account_id в INSERT не входит: в SQLite-схеме его нет, PG подставит
+        # DEFAULT '', а inference по трёхколоночному индексу работает и без него.
+        conflict_sql='ON CONFLICT (isin, broker_name, account_id) DO NOTHING',
     ),
     # SQLite-колонки rating_agency/rating_value в PG-схеме отсутствуют —
     # не переносятся.

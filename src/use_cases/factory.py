@@ -71,6 +71,17 @@ class UseCaseFactory:
             raise ValueError("Токен TBank (INVEST_TOKEN) не найден или используется значение по умолчанию.")
         return token
 
+    def _get_tbank_account_ids(self) -> Optional[List[str]]:
+        """Список счетов TBank из TBANK_ACCOUNT_IDS (через запятую).
+
+        Пусто/не задано → None (обход всех счетов токена, обратная совместимость).
+        ID счетов — персональные данные, поэтому env/SOPS, а не config.yaml.
+        """
+        raw = os.getenv('TBANK_ACCOUNT_IDS', '')
+        if not raw.strip():
+            return None
+        return raw.split(',')
+
     def get_db_connection(self) -> PortfolioStorage:
         """Единственная точка создания хранилища: DSN берётся из POSTGRES_DSN."""
         if self._db_connection is None:
@@ -120,7 +131,10 @@ class UseCaseFactory:
     def get_tbank_api_client(self) -> 'TbankApiClient':
         from src.tbank.api_client import TbankApiClient
         if self._tbank_api_client is None:
-            self._tbank_api_client = TbankApiClient(self.tinkoff_token)
+            self._tbank_api_client = TbankApiClient(
+                self.tinkoff_token,
+                account_ids=self._get_tbank_account_ids(),
+            )
         return self._tbank_api_client
 
     def _get_alor_tokens(self) -> Dict[str, str]:

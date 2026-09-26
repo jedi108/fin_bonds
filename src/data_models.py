@@ -145,6 +145,7 @@ class PortfolioPosition:
     instrument_type: Optional[str] = None
     liquidity_loss_ratio: Optional[Decimal] = None # Новое поле для коэффициента потерь ликвидности
     coupon_rate_percent: Optional[Decimal] = None # Новое поле для купонной доходности
+    account_id: str = "" # Идентификатор счёта у брокера; '' для Excel-импорта и старых строк
 
     @classmethod
     def from_tinkoff_api(cls, position: TinkoffPortfolioPosition, instrument: TinkoffInstrument) -> "PortfolioPosition":

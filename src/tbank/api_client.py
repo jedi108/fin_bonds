@@ -13,17 +13,53 @@ logger = logging.getLogger(__name__)
 
 
 class TbankApiClient(ITbankApiClient):
-    def __init__(self, token: str):
+    def __init__(self, token: str, account_ids: Optional[List[str]] = None):
         if not token:
             raise ValueError("TBank API token is required.")
         self.token = token
+        # Нормализация: strip, без пустых, дубликаты убираем с сохранением порядка
+        # (дубликат из env даёт двойной обход счёта и лишние API-вызовы).
+        if account_ids:
+            self.account_ids = list(dict.fromkeys(a.strip() for a in account_ids if a.strip()))
+        else:
+            self.account_ids = []
+
+    def get_accounts(self) -> List[Dict[str, str]]:
+        """Возвращает список счетов токена: id, name, type."""
+        accounts: List[Dict[str, str]] = []
+        with Client(self.token) as client:
+            for account in client.users.get_accounts().accounts:
+                accounts.append({
+                    'id': account.id,
+                    'name': account.name,
+                    'type': account.type.name,
+                })
+        return accounts
 
     def get_portfolio_positions(self) -> List[PortfolioPosition]:
-        """Получает и преобразует все позиции по всем счетам в DTO."""
+        """Получает и преобразует все позиции по всем счетам в DTO.
+
+        Если список счетов задан (account_ids), обходятся только они;
+        ни один не найден — ValueError (fail-fast, чтобы sync не записал
+        пустой портфель поверх существующего).
+        """
         positions = []
         with Client(self.token) as client:
             accounts = client.users.get_accounts().accounts
+            if self.account_ids:
+                known_ids = {a.id for a in accounts}
+                missing = [a for a in self.account_ids if a not in known_ids]
+                if missing:
+                    logger.warning("Заданные счета не найдены среди счетов токена: %s", ", ".join(missing))
+                if not any(a.id in self.account_ids for a in accounts):
+                    raise ValueError(
+                        "Ни один из заданных счетов TBank не найден по токену. "
+                        f"Заданные account_id: {', '.join(self.account_ids)}. "
+                        "Проверьте TBANK_ACCOUNT_IDS (python3 main.py test-tbank accounts)."
+                    )
             for account in accounts:
+                if self.account_ids and account.id not in self.account_ids:
+                    continue
                 logger.info(f"Загрузка портфеля для счета: {account.name} ({account.id})")
                 portfolio: PortfolioResponse = client.operations.get_portfolio(account_id=account.id)
                 
@@ -57,6 +93,7 @@ class TbankApiClient(ITbankApiClient):
                         portfolio_percent=Decimal(0),
                         current_value=Decimal(0),
                         instrument_type=instrument.instrument_type, # Добавлено: передаем instrument_type
+                        account_id=account.id,
                     ))
         return positions
 

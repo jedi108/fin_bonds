@@ -166,6 +166,7 @@ class AlorApiClient(IAlorApiClient):
                         currency=pos.get('currency'),
                         instrument_type="corp_bond" if symbol.startswith("RU") and len(symbol) == 12 else None,
                         liquidity_loss_ratio=None,
+                        account_id=portfolio_id,
                     ))
                 except Exception as e:
                     logger.error(f"Ошибка преобразования позиции Alor: {e}")

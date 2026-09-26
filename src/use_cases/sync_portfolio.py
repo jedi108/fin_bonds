@@ -82,8 +82,8 @@ class SyncPortfolioUseCase(UseCase):
 
         # Получаем старый портфель для сравнения (до изменений)
         old_positions = self.db.get_portfolio_positions()
-        old_keys = set((p.isin, p.broker_name) for p in old_positions)
-        new_keys = set((p.isin, p.broker_name) for p in positions_to_save)
+        old_keys = set((p.isin, p.broker_name, p.account_id) for p in old_positions)
+        new_keys = set((p.isin, p.broker_name, p.account_id) for p in positions_to_save)
 
         if args.upsert:
             logger.info(f"Upsert-режим: добавляем/обновляем {len(positions_to_save)} позиций, не удаляя остальные.")
@@ -110,12 +110,12 @@ class SyncPortfolioUseCase(UseCase):
             self.db.add_portfolio_positions(positions_to_save)
             # После очистки и добавления — сравниваем, что исчезло
             updated_positions = self.db.get_portfolio_positions()
-            updated_keys = set((p.isin, p.broker_name) for p in updated_positions)
+            updated_keys = set((p.isin, p.broker_name, p.account_id) for p in updated_positions)
             disappeared = old_keys - updated_keys
             if disappeared:
                 logger.warning(f"ВНИМАНИЕ: Следующие бумаги исчезли из портфеля после синхронизации (были, но не пришли из источника):")
-                for isin, broker in disappeared:
-                    logger.warning(f"  ISIN: {isin}, broker: {broker}")
+                for isin, broker, account_id in disappeared:
+                    logger.warning(f"  ISIN: {isin}, broker: {broker}, account: {account_id}")
 
         logger.info(f"Проверка: Фактически в БД сохранено {len(self.db.get_portfolio_positions())} позиций.")
         logger.info(f"Синхронизация портфеля успешно завершена. Сохранено позиций: {len(positions_to_save)}")
@@ -127,6 +127,10 @@ class SyncPortfolioUseCase(UseCase):
             positions = self.tbank_api_client.get_portfolio_positions()
             logger.info(f"Получено {len(positions)} позиций из TBank.")
             return positions
+        except ValueError:
+            # Fail-fast по списку счетов (TBANK_ACCOUNT_IDS): прерываем sync
+            # ДО очистки/записи, иначе при --source all очистятся TBank-позиции.
+            raise
         except Exception as e:
             logger.error(f"Не удалось получить портфель из TBank API: {e}", exc_info=True)
             return []

@@ -36,6 +36,8 @@ class TestTbankApiUseCase(UseCase):
         coupons_parser = subparsers.add_parser('get-bond-coupons', help='Получить график купонов по FIGI.')
         coupons_parser.add_argument('figi', type=str, help='FIGI облигации')
 
+        subparsers.add_parser('accounts', help='Получить список счетов токена (id, name, type). ВНИМАНИЕ: содержит ID счетов — не публиковать.')
+
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'TestTbankApiUseCase':
         """Создает экземпляр с зависимостями из фабрики."""
@@ -53,6 +55,12 @@ class TestTbankApiUseCase(UseCase):
             result = self.tbank_client.get_instrument_by_figi(args.figi)
         elif args.tbank_command == 'get-bond-coupons':
             result = self.tbank_client.get_bond_coupons(args.figi)
+        elif args.tbank_command == 'accounts':
+            result = self.tbank_client.get_accounts()
+
+        if args.tbank_command == 'accounts':
+            self._print_accounts_table(result or [])
+            return
 
         if result:
             # Для all_bonds_with_risk не выводим содержимое, т.к. оно слишком большое
@@ -62,4 +70,16 @@ class TestTbankApiUseCase(UseCase):
                 pretty_result = pprint.pformat(result)
                 logger.info(f"Успешный ответ от API:\n{pretty_result}")
         else:
-            logger.warning("Ответ от API не получен или пуст.") 
+            logger.warning("Ответ от API не получен или пуст.")
+
+    @staticmethod
+    def _print_accounts_table(accounts: list):
+        """Печатает счета таблицей. Вывод содержит ID счетов — приватные данные."""
+        if not accounts:
+            logger.warning("Счета по токену не найдены.")
+            return
+        header = f"{'#':<3} {'id':<40} {'type':<15} name"
+        print(header)
+        print("-" * len(header))
+        for i, acc in enumerate(accounts, 1):
+            print(f"{i:<3} {acc.get('id', ''):<40} {acc.get('type', ''):<15} {acc.get('name', '')}") 

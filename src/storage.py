@@ -85,7 +85,8 @@ def _row_to_portfolio_position(row: Mapping[str, Any]) -> Optional[PortfolioPosi
         'isin', 'ticker', 'name', 'quantity', 'average_price',
         'current_price', 'currency', 'yield_to_maturity',
         'portfolio_percent', 'current_value', 'broker_name',
-        'instrument_type', 'figi', 'liquidity_loss_ratio', 'coupon_rate_percent'
+        'instrument_type', 'figi', 'liquidity_loss_ratio', 'coupon_rate_percent',
+        'account_id'
     }
 
     # Фильтруем строку, оставляя только ожидаемые и непустые поля
@@ -648,7 +649,7 @@ class PortfolioStorage:
     def add_portfolio_positions(self, positions: List['PortfolioPosition']):
         """
         Сохраняет или обновляет позиции в портфеле.
-        Конфликт по (isin, broker_name) разрешается полным обновлением записи.
+        Конфликт по (isin, broker_name, account_id) разрешается полным обновлением записи.
         """
         if not positions:
             return
@@ -658,6 +659,8 @@ class PortfolioStorage:
         for p in positions:
             pos_dict = p.to_db_dict()
             pos_dict.pop('figi', None)  # Безопасно удаляем figi
+            # NULL в account_id невидим для ON CONFLICT (NULL != NULL) — нормализуем в ''
+            pos_dict['account_id'] = pos_dict.get('account_id') or ''
             positions_to_save.append(pos_dict)
 
         if not positions_to_save:
@@ -672,7 +675,7 @@ class PortfolioStorage:
             query = f"""
                 INSERT INTO portfolio_positions ({columns})
                 VALUES ({placeholders})
-                ON CONFLICT (isin, broker_name) DO UPDATE SET
+                ON CONFLICT (isin, broker_name, account_id) DO UPDATE SET
                     ticker = excluded.ticker,
                     name = excluded.name,
                     quantity = excluded.quantity,
@@ -714,6 +717,7 @@ class PortfolioStorage:
                 p.current_value,
                 p.broker_name,
                 p.instrument_type,
+                p.account_id,
                 b.figi
             FROM portfolio_positions p
             LEFT JOIN bonds_catalog b ON p.isin = b.isin
@@ -748,6 +752,7 @@ class PortfolioStorage:
                 p.current_value,
                 p.broker_name,
                 p.instrument_type,
+                p.account_id,
                 b.figi
             FROM portfolio_positions p
             LEFT JOIN bonds_catalog b ON p.isin = b.isin
