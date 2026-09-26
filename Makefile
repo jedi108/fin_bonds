@@ -6,10 +6,13 @@ export SOPS_CONFIG ?= $(ENV_DIR)/.sops.yaml
 
 DEPLOY_HOST     ?= your-server
 DEPLOY_USER     ?= app
-DEPLOY_DIR      ?= /home/$(DEPLOY_USER)/prod/fin_bonds
+DEPLOY_DIR      ?= /home/$(DEPLOY_USER)/fin_bonds
 DEPLOY_SERVICE  ?= fin_bonds
 DEPLOY_ENC_FILE ?= $(ENV_DIR)/.env.prod.enc
-DEPLOY_CONF_DIR ?= ./workspace/deploy
+# Каталог на сервере для git safe.directory (фикс "dubious ownership";
+# задаётся в .env.deploy, пусто — шаг пропускается)
+DEPLOY_GIT_SAFE_DIR ?=
+DEPLOY_CONF_DIR ?= ./workspace/fin_bonds/deploy
 SKILLS_DIR ?= ./workspace/fin_bonds/skills_hermes
 VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
@@ -43,6 +46,10 @@ help:
 deploy-init:
 	@echo "==> Инициализация каталога $(DEPLOY_DIR) на $(DEPLOY_HOST)..."
 	ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "mkdir -p $(DEPLOY_DIR)/data $(DEPLOY_DIR)/plots"
+	@if [ -n "$(DEPLOY_GIT_SAFE_DIR)" ]; then \
+		echo "==> git safe.directory=$(DEPLOY_GIT_SAFE_DIR) на сервере (идемпотентно)..."; \
+		ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "git config --global --get-all safe.directory 2>/dev/null | grep -qxF '$(DEPLOY_GIT_SAFE_DIR)' || git config --global --add safe.directory '$(DEPLOY_GIT_SAFE_DIR)'"; \
+	fi
 	@echo "==> Создание виртуального окружения python venv..."
 	ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "test -f $(DEPLOY_DIR)/venv/bin/pip || (rm -rf $(DEPLOY_DIR)/venv && python3 -m venv $(DEPLOY_DIR)/venv)"
 	@echo "==> Успешно инициализировано!"
