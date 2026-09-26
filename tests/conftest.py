@@ -42,10 +42,19 @@ def db() -> PortfolioStorage:
 
 
 @pytest.fixture(autouse=True)
-def _clean_tables(db):
-    """Чистая база перед каждым тестом: никаких остатков чужих данных."""
-    with db.conn.cursor() as cursor:
+def _clean_tables(request):
+    """Чистая база перед каждым тестом, использующим хранилище.
+
+    Активируется только для тестов, которые запрашивают фикстуру db:
+    чистые юнит-тесты без БД не зависят от POSTGRES_DSN_TEST (не
+    пропускаются, если он не задан) и очистки не требуют.
+    """
+    if 'db' not in request.fixturenames:
+        yield
+        return
+    storage = request.getfixturevalue('db')
+    with storage.conn.cursor() as cursor:
         for table in _TABLES:
             cursor.execute(f'TRUNCATE TABLE {table} RESTART IDENTITY CASCADE')
-    db.conn.commit()
+    storage.conn.commit()
     yield

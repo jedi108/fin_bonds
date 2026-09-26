@@ -141,5 +141,14 @@ def main() -> int:
     return 0
 
 
+def test_normalization_cases():
+    """Обёртка для pytest: кейсы запускаются и в составе `make test`.
+
+    Чистые юнит-тесты без БД — фикстуры db из conftest.py не требуют.
+    """
+    failures = run_normalization_cases() + run_override_cases()
+    assert failures == 0, f"{failures} кейс(ов) провалено (см. FAIL в выводе)"
+
+
 if __name__ == '__main__':
     sys.exit(main())

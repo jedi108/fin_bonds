@@ -37,42 +37,50 @@
     ```bash
     cp env.example .env
     ```
-    Откройте `.env` в текстовом редакторе и укажите `INVEST_TOKEN` (токен от TBank API) и, при необходимости, `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`.
+    Откройте `.env` в текстовом редакторе и укажите `INVEST_TOKEN` (токен от TBank API) и, при необходимости, `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`. Переменные подключения к базе данных (`POSTGRES_DSN`) описаны в разделе [«Настройка БД»](#настройка-бд).
 
-## Работа с базой данных
+## Настройка БД
 
-Проект использует SQLite в качестве базы данных. Файл базы данных по умолчанию находится в `data/ratings.db`. Для прямого взаимодействия с базой данных (выполнения SQL-запросов) можно использовать стандартную утилиту командной строки `sqlite3`.
+Проект использует PostgreSQL как единственную базу данных. Параметры подключения задаются переменной окружения `POSTGRES_DSN` в `.env` (формат — см. `env.example`):
 
-**Установка `sqlite3` (если не установлена):**
-*   **macOS (через Homebrew):** `brew install sqlite`
-*   **Debian/Ubuntu:** `sudo apt-get install sqlite3`
+```
+# .env
+POSTGRES_DSN="postgresql://user:password@host:port/dbname"
+```
 
-**Примеры использования:**
+Схему базы создаёт ранер SQL-миграций из каталога `migrations/postgres/` — при подключении код схему не создаёт и не меняет. Применение миграций идемпотентно:
 
-1.  **Подключиться к базе данных:**
-    ```bash
-    sqlite3 data/ratings.db
-    ```
+```bash
+python3 main.py migrate-db            # применить неприменённые миграции
+python3 main.py migrate-db --status   # какие миграции применены
+python3 main.py migrate-db --dry-run  # показать план без записи
+# или локально через make:
+make migrate
+```
 
-2.  **Выполнить команды в интерактивном режиме:**
-    После подключения вы попадете в командную оболочку `sqlite3`. Вот несколько полезных команд:
-    *   Показать все таблицы: `.tables`
-    *   Показать структуру таблицы: `.schema portfolio_positions`
-    *   Выйти из оболочки: `.exit` или `.quit`
+Посмотреть таблицы и применённые миграции можно через `psql`:
 
-3.  **Выполнить SQL-запрос:**
-    ```sql
-    -- Посмотреть все позиции в портфеле
-    SELECT * FROM portfolio_positions;
+```bash
+psql "$POSTGRES_DSN" -c '\dt'
+psql "$POSTGRES_DSN" -c 'SELECT version, name, applied_at FROM schema_migrations ORDER BY version;'
+```
 
-    -- Найти облигацию по ISIN
-    SELECT isin, name, figi, offer_date FROM bonds_catalog WHERE isin = 'RU000A1084K3';
-    ```
+**Развертывание с нуля (свежая база):**
 
-4. ** show tables
-    ```sql
-    SELECT name FROM sqlite_master WHERE type='table';
-    ```
+```bash
+python3 main.py migrate-db      # 1. создать схему
+python3 main.py sync-portfolio  # 2. загрузить состав портфеля (TBank/Excel/Alor)
+python3 main.py update-bonds    # 3. собрать каталог облигаций
+```
+
+**Перенос данных со старой базы SQLite (one-off):** если сохранилась старая база `data/ratings.db`, её содержимое переносится в PostgreSQL командой `import-from-sqlite`. SQLite используется только этой командой и только на чтение; повторный запуск идемпотентен:
+
+```bash
+python3 main.py import-from-sqlite --dry-run  # сверка counts обеих баз без записи
+python3 main.py import-from-sqlite            # перенос данных (POSTGRES_DSN из .env)
+```
+
+**Тесты** идут на отдельной тестовой базе: задайте в `.env` переменную `POSTGRES_DSN_TEST` (закомментированный пример формата — в `env.example`), установите dev-зависимости (`pip install -r requirements-dev.txt` — включает pytest; прод-деплой ставит только `requirements.txt`) и запустите `make test`.
 
 ## Основные команды
 

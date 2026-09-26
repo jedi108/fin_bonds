@@ -16,7 +16,7 @@ DEPLOY_CONF_DIR ?= ./workspace/fin_bonds/deploy
 SKILLS_DIR ?= ./workspace/fin_bonds/skills_hermes
 VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
-.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills hooks-install migrate-remote
+.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills hooks-install migrate-remote migrate test
 
 check-deploy-env:
 	@if [ "$(DEPLOY_HOST)" = "your-server" ] || [ -z "$(DEPLOY_HOST)" ]; then \
@@ -38,7 +38,9 @@ help:
 	@echo "  make ssh            - Войти по SSH в директорию проекта на сервере"
 	@echo "  make timer-install  - Установить systemd service и timer на сервере"
 	@echo "  make timer-status   - Проверить статус systemd таймера"
+	@echo "  make migrate        - Применить миграции БД локально (PostgreSQL; идемпотентно)"
 	@echo "  make migrate-remote - Применить миграции БД на сервере (PostgreSQL; идемпотентно)"
+	@echo "  make test           - Запустить тесты (pytest; нужна тестовая БД POSTGRES_DSN_TEST)"
 	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills_hermes)"
 	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов в сабмодуль workspace"
 
@@ -117,6 +119,17 @@ migrate-remote:
 		else \
 			echo 'POSTGRES_DSN не задан - миграции пропущены (SQLite).'; \
 		fi"
+
+# Локальное применение миграций БД (PostgreSQL; идемпотентно).
+# Для прогона миграций на сервере при деплое см. migrate-remote.
+migrate:
+	@echo "==> Локальное применение миграций БД..."
+	$(VENV_PY) main.py migrate-db
+
+# Запуск тестов (pytest). Тестовая база — POSTGRES_DSN_TEST в .env
+# (пример формата в env.example); без неё тесты хранилища пропускаются.
+test:
+	$(VENV_PY) -m pytest tests/
 
 # Валидация frontmatter скиллов HERMES перед коммитом/деплоем
 validate-skills:

@@ -50,6 +50,7 @@ debug_*.html
 *.json
 *.txt
 !requirements.txt
+!requirements-dev.txt
 *.yaml
 *.yml
 *.jsonl
