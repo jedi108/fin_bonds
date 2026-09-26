@@ -28,6 +28,7 @@ from src.use_cases.export_bonds import ExportBondsUseCase
 from src.use_cases.export_monitoring_results import ExportMonitoringResultsUseCase
 from src.use_cases.export_portfolio import ExportPortfolioUseCase
 from src.use_cases.generate_plots import GeneratePlotsUseCase
+from src.use_cases.import_from_sqlite import ImportFromSqliteUseCase
 from src.use_cases.link_companies import LinkCompaniesUseCase
 from src.use_cases.migrate_db import MigrateDbUseCase
 from src.use_cases.seed_data import SeedDataUseCase
@@ -206,6 +207,7 @@ class UseCaseFactory:
             'clear-data': ClearDataUseCase,
             'check-db': CheckDbUseCase,
             'migrate-db': MigrateDbUseCase,
+            'import-from-sqlite': ImportFromSqliteUseCase,
             'export-bonds': ExportBondsUseCase,
             'export-portfolio': ExportPortfolioUseCase,
             'sync-portfolio': SyncPortfolioUseCase,
