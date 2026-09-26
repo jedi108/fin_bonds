@@ -17,6 +17,7 @@ from tinkoff.invest.utils import quotation_to_decimal
 
 from src.use_cases.interfaces import IMoexApiClient
 from src.use_cases.interfaces import IPortfolioStorage
+from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
 from src.use_cases.link_companies import link_bonds_to_companies
 from src.data_models import Bond as BondDTO
@@ -233,10 +234,8 @@ class UpdateBondsCatalogUseCase(UseCase):
         
         # Получаем FIGI для облигаций
         figi_by_isin = {}
-        cursor = self.db.conn.cursor()
-        cursor.execute("SELECT isin, figi FROM bonds_catalog WHERE isin IN ({})".format(
-            ','.join(['?' for _ in all_bonds_to_update])
-        ), all_bonds_to_update)
+        cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT isin, figi FROM bonds_catalog WHERE isin = ANY(%s)", (all_bonds_to_update,))
         
         for row in cursor.fetchall():
             if row['figi']:  # Пропускаем облигации без FIGI

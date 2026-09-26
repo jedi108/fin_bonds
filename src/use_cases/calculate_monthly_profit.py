@@ -5,10 +5,10 @@ import logging
 import argparse
 from typing import TYPE_CHECKING, List, Dict, Any
 from decimal import Decimal
-import sqlite3
 
+from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 class CalculateMonthlyProfitUseCase(UseCase):
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod
@@ -54,7 +54,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 bc.ticker,
                 bc.name,
                 bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.coupon_quantity_per_year,
                 bc.risk_level,
                 pp.average_price,
@@ -64,7 +64,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Купонный доход за месяц
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
                     2
                 ) as monthly_coupon_income,
                 
@@ -76,14 +76,14 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Общая ежемесячная прибыль
                 ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
                     ((pp.current_price - pp.average_price) * pp.quantity), 
                     2
                 ) as total_monthly_profit,
                 
                 -- Процентная доходность (годовая)
                 ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price) * 100, 
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price) * 100, 
                     2
                 ) as annual_yield_percent
                 
@@ -103,14 +103,14 @@ class CalculateMonthlyProfitUseCase(UseCase):
             WHERE bc.currency = 'rub'
                 AND pp.current_price > 0
                 AND pp.quantity > 0
-                AND ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                    ((pp.current_price - pp.average_price) * pp.quantity) >= ?
+                AND ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((pp.current_price - pp.average_price) * pp.quantity) >= %s
             ORDER BY total_monthly_profit DESC
-            LIMIT ?
+            LIMIT %s
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [args.min_profit, args.limit])
             rows = cursor.fetchall()
             
@@ -130,7 +130,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Общий купонный доход за месяц
                 ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
                     2
                 ) as total_monthly_coupon_income,
                 
@@ -142,14 +142,14 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Общая ежемесячная прибыль
                 ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
                         ((pp.current_price - pp.average_price) * pp.quantity)), 
                     2
                 ) as total_monthly_profit,
                 
                 -- Средняя годовая доходность портфеля
                 ROUND(
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price * 100), 
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100), 
                     2
                 ) as avg_annual_yield_percent
                 
@@ -172,7 +172,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query)
             row = cursor.fetchone()
             
@@ -191,7 +191,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Купонный доход за месяц
                 ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
                     2
                 ) as monthly_coupon_income,
                 
@@ -203,7 +203,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Общая ежемесячная прибыль
                 ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
                         ((pp.current_price - pp.average_price) * pp.quantity)), 
                     2
                 ) as total_monthly_profit
@@ -229,7 +229,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query)
             rows = cursor.fetchall()
             
@@ -248,7 +248,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Купонный доход за месяц
                 ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
                     2
                 ) as monthly_coupon_income,
                 
@@ -260,14 +260,14 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
                 -- Общая ежемесячная прибыль
                 ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
                         ((pp.current_price - pp.average_price) * pp.quantity)), 
                     2
                 ) as total_monthly_profit,
                 
                 -- Средняя годовая доходность
                 ROUND(
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price * 100), 
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100), 
                     2
                 ) as avg_annual_yield_percent
                 
@@ -292,7 +292,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query)
             rows = cursor.fetchall()
             
@@ -309,21 +309,21 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 bc.isin,
                 bc.ticker,
                 bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.risk_level,
                 pp.quantity,
                 pp.broker_name,
                 
                 -- Ежемесячная прибыль
                 ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
                     ((pp.current_price - pp.average_price) * pp.quantity), 
                     2
                 ) as monthly_profit,
                 
                 -- Купонная часть
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
                     2
                 ) as coupon_part,
                 
@@ -354,7 +354,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [args.limit])
             rows = cursor.fetchall()
             
@@ -364,7 +364,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
             
         self._print_top_table(rows)
 
-    def _print_detailed_table(self, rows: List[sqlite3.Row]):
+    def _print_detailed_table(self, rows: List[Dict[str, Any]]):
         """Выводит детальную таблицу прибыли."""
         print(f"\n{'='*120}")
         print(f"📊 Детальная ежемесячная прибыль по облигациям")
@@ -401,7 +401,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         print(f"💡 Купон - купонный доход за месяц, Цена - прибыль от изменения цены, Итого - общая прибыль")
         print(f"{'='*120}\n")
 
-    def _print_summary_table(self, row: sqlite3.Row):
+    def _print_summary_table(self, row: Dict[str, Any]):
         """Выводит сводную таблицу прибыли."""
         print(f"\n{'='*80}")
         print(f"📊 Сводка ежемесячной прибыли портфеля")
@@ -423,7 +423,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
         print(f"💡 Ежемесячная доходность: {avg_yield/12:.1f}%")
         print(f"{'='*80}\n")
 
-    def _print_broker_table(self, rows: List[sqlite3.Row]):
+    def _print_broker_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу прибыли по брокерам."""
         print(f"\n{'='*80}")
         print(f"📊 Ежемесячная прибыль по брокерам")
@@ -449,7 +449,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
         print(f"{'='*80}\n")
 
-    def _print_risk_table(self, rows: List[sqlite3.Row]):
+    def _print_risk_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу прибыли по уровням риска."""
         print(f"\n{'='*90}")
         print(f"📊 Ежемесячная прибыль по уровням риска")
@@ -477,7 +477,7 @@ class CalculateMonthlyProfitUseCase(UseCase):
                 
         print(f"{'='*90}\n")
 
-    def _print_top_table(self, rows: List[sqlite3.Row]):
+    def _print_top_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу топ-облигаций."""
         print(f"\n{'='*100}")
         print(f"📊 Топ-{len(rows)} облигаций по ежемесячной прибыли")

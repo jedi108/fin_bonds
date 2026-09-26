@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from src.use_cases.base import UseCase
 from src.monitoring.adapters.factory import AdapterFactory
-from src.monitoring.storage import Database
 
 logger = logging.getLogger(__name__)
 

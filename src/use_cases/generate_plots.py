@@ -2,7 +2,7 @@ import logging
 import argparse
 from typing import Dict, Any, TYPE_CHECKING
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.monitoring.plotter import plot_ratings_history, plot_risk_history, plot_listlevel_history, plot_liquidity_history
 from src.utils import load_isins_from_file
 from src.use_cases.base import UseCase
@@ -22,7 +22,7 @@ class GeneratePlotsUseCase(UseCase):
     
     Логика зависит от выбранного в конфиге адаптера мониторинга.
     """
-    def __init__(self, config: Dict[str, Any], db: Database):
+    def __init__(self, config: Dict[str, Any], db: PortfolioStorage):
         self.config = config
         self.db = db
 

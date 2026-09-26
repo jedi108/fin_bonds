@@ -7,7 +7,7 @@ import random
 import argparse
 from typing import Dict, Any, TYPE_CHECKING
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.monitoring.data_fetcher import get_bond_details
 from src.utils import load_isins_from_file
 from src.use_cases.base import UseCase
@@ -41,7 +41,7 @@ class SeedDataUseCase(UseCase):
             tinkoff_token=factory.tinkoff_token
         )
 
-    def __init__(self, config: Dict[str, Any], db: Database, tinkoff_token: str):
+    def __init__(self, config: Dict[str, Any], db: PortfolioStorage, tinkoff_token: str):
         self.config = config
         self.db = db
         self.tinkoff_token = tinkoff_token

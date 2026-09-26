@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Dict, Any
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 
 # Предотвращаем циклический импорт для type hints
@@ -21,7 +21,7 @@ class ExportMonitoringResultsUseCase(UseCase):
     """
     Экспортирует результаты мониторинга в консоль и Excel файл.
     """
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod

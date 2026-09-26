@@ -275,8 +275,8 @@ class LiquidityAnalyzerAdapter(BaseAdapter):
             cursor = self.db.conn.cursor()
             cursor.execute("""
                 INSERT INTO liquidity_history (timestamp, isin, base_volume, market_exit_value, loss_ratio, depth_level, data_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (datetime.now().isoformat(), isin, str(base_volume), str(market_exit_value), str(loss_ratio), self.depth, 'TBank_API'))
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (datetime.now(), isin, base_volume, market_exit_value, loss_ratio, self.depth, 'TBank_API'))
             self.db.conn.commit()
             logger.debug(f"Сохранены данные о ликвидности для {isin}")
         except Exception as e:

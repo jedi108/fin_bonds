@@ -7,7 +7,7 @@ import os
 import argparse
 from typing import TYPE_CHECKING
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 
 # Предотвращаем циклический импорт для type hints
@@ -21,7 +21,7 @@ class ExportBondsUseCase(UseCase):
     """
     Фильтрует облигации по заданным критериям и выгружает их в CSV файл.
     """
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod

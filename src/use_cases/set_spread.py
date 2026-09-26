@@ -3,7 +3,7 @@ import argparse
 from typing import TYPE_CHECKING, Dict, Any
 
 from src.use_cases.base import UseCase
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class SetSpreadUseCase(UseCase):
     """Устанавливает спред для облигации с плавающим купоном."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod

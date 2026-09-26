@@ -2,7 +2,7 @@ import logging
 import argparse
 from typing import Dict, Any, TYPE_CHECKING
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.monitoring.plotter import filter_rating_changes
 from src.utils import load_isins_from_file
 from src.use_cases.base import UseCase
@@ -19,7 +19,7 @@ class CheckChangesUseCase(UseCase):
     Сценарий: проверка изменений в рейтингах без полного обновления.
     """
 
-    def __init__(self, config: Dict[str, Any], db: Database):
+    def __init__(self, config: Dict[str, Any], db: PortfolioStorage):
         self.config = config
         self.db = db
 

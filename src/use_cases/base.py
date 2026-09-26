@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
 
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 
 
 class UseCase(ABC):
@@ -14,7 +14,7 @@ class UseCase(ABC):
 
     def __init__(self, factory: 'UseCaseFactory'):
         self.factory = factory
-        self.storage: IPortfolioStorage = factory.get_db_connection()
+        self.storage: PortfolioStorage = factory.get_db_connection()
 
     @staticmethod
     @abstractmethod

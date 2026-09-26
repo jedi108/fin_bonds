@@ -9,7 +9,6 @@ from .credit_rating import CreditRatingAdapter
 from .floater_coupon_calculator import FloaterCouponCalculatorAdapter
 from .liquidity_analyzer import LiquidityAnalyzerAdapter
 
-from src.monitoring.storage import Database
 from src.use_cases.interfaces import IMoexApiClient
 from src.use_cases.interfaces import ICbrApiClient
 from src.use_cases.interfaces import ITbankApiClient

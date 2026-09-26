@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional, TYPE_CHECKING
 from .base import BaseAdapter, MonitoringResult
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.interfaces import ICbrApiClient
 
 if TYPE_CHECKING:
@@ -17,7 +17,7 @@ class FloaterCouponCalculatorAdapter(BaseAdapter):
     Адаптер-калькулятор для прогнозирования ставки купона у флоатеров.
     Использует ставку RUONIA от ЦБ и спред из локальной БД.
     """
-    def __init__(self, db: Database, config: dict, bond_data: 'PortfolioBond', **dependencies):
+    def __init__(self, db: PortfolioStorage, config: dict, bond_data: 'PortfolioBond', **dependencies):
         super().__init__(db, config, bond_data, **dependencies)
         self.cbr_client: ICbrApiClient = self.dependencies['cbr_client']
         self.verbose_name = "Расчетный купон флоатера"

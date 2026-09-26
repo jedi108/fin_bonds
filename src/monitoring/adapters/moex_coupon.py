@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 
 from .base import BaseAdapter, MonitoringResult
 from src.use_cases.interfaces import IMoexApiClient
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class MoexCouponAdapter(BaseAdapter):
     def name(self) -> str:
         return 'moex_coupon'
 
-    def __init__(self, db: Database, config: dict, bond_data, **dependencies):
+    def __init__(self, db: PortfolioStorage, config: dict, bond_data, **dependencies):
         super().__init__(db, config, bond_data, **dependencies)
         self.moex_client: IMoexApiClient = self.dependencies['moex_client']
         self.verbose_name = "Ставка купона MOEX"

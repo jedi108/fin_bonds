@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 from tinkoff.invest import Client, InstrumentIdType
 from src.moex.api_client import MoexApiClient
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.data_models import Bond
 from src.use_cases.update_bonds_catalog import fetch_and_prepare_bond_details
@@ -39,7 +39,7 @@ class AddBondToCatalogUseCase(UseCase):
     3. Пытается обогатить их данными из Tinkoff API (FIGI, риск-уровень и т.д.).
     4. Сохраняет результат в БД.
     """
-    def __init__(self, config, db: Database, tinkoff_token: str, moex_client: MoexApiClient):
+    def __init__(self, config, db: PortfolioStorage, tinkoff_token: str, moex_client: MoexApiClient):
         self.config = config
         self.db = db
         self.tinkoff_token = tinkoff_token

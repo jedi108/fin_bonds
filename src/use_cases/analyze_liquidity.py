@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from src.use_cases.base import UseCase
 from src.monitoring.adapters.factory import AdapterFactory
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.data_models import Bond, PortfolioPosition
 from src.utils import get_trading_session_info
 
@@ -20,7 +20,7 @@ class AnalyzeLiquidityUseCase(UseCase):
     потенциальных потерь при выходе из позиции по рыночной цене.
     """
 
-    def __init__(self, config: Dict[str, Any], db: Database, adapter_factory: AdapterFactory) -> None:
+    def __init__(self, config: Dict[str, Any], db: PortfolioStorage, adapter_factory: AdapterFactory) -> None:
         """
         Инициализирует UseCase.
         

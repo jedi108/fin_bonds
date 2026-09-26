@@ -3,7 +3,7 @@ import argparse
 from typing import TYPE_CHECKING, List
 
 from .base import UseCase
-from ..monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class ClearDataUseCase(UseCase):
     def __init__(self, factory: 'UseCaseFactory'):
         super().__init__(factory)
-        self.db: Database = self.factory.get_db_connection()
+        self.db: PortfolioStorage = self.factory.get_db_connection()
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
@@ -54,16 +54,12 @@ class ClearDataUseCase(UseCase):
             cursor = conn.cursor()
             for table in tables:
                 try:
-                    # Проверяем, существует ли таблица
-                    cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}';")
-                    if cursor.fetchone():
-                        logger.debug(f"Очистка таблицы '{table}'...")
-                        cursor.execute(f"DELETE FROM {table};")
-                        logger.info(f"Таблица '{table}' успешно очищена.")
-                    else:
-                        logger.warning(f"Таблица '{table}' не найдена в базе данных. Пропускаем.")
+                    # Наличие таблиц гарантируют миграции — проверка не нужна
+                    logger.debug(f"Очистка таблицы '{table}'...")
+                    cursor.execute(f"DELETE FROM {table};")
+                    logger.info(f"Таблица '{table}' успешно очищена.")
                 except Exception as e:
                     logger.error(f"Ошибка при очистке таблицы '{table}': {e}")
                     conn.rollback()
                     raise
-            conn.commit() 
+            conn.commit()

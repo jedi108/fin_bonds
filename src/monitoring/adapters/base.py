@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 import logging
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 if TYPE_CHECKING:
     from src.data_models import PortfolioBond
@@ -26,7 +26,7 @@ class MonitoringResult:
 class BaseAdapter(ABC):
     """Абстрактный базовый класс для всех адаптеров мониторинга."""
 
-    def __init__(self, db: Database, config: Dict[str, Any], bond_data: Optional['PortfolioBond'] = None, **dependencies):
+    def __init__(self, db: PortfolioStorage, config: Dict[str, Any], bond_data: Optional['PortfolioBond'] = None, **dependencies):
         self.db = db
         self.config = config
         self.bond_data = bond_data  # Новое поле для хранения данных облигации

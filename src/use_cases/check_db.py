@@ -3,7 +3,7 @@ import argparse
 from typing import Dict, Any, TYPE_CHECKING
 import logging
 
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 
 # Предотвращаем циклический импорт для type hints
@@ -31,7 +31,7 @@ class CheckDbUseCase(UseCase):
         """Создает экземпляр use case с зависимостями из фабрики."""
         return cls(config=factory.config, db=factory.get_db_connection())
 
-    def __init__(self, config: Dict[str, Any], db: Database):
+    def __init__(self, config: Dict[str, Any], db: PortfolioStorage):
         self.config = config
         self.db = db
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -69,12 +69,16 @@ class CheckDbUseCase(UseCase):
             LEFT JOIN LatestListLevel ll ON lr.isin = ll.isin AND ll.rn = 1
             WHERE lr.rn = 1
             ORDER BY lr.last_update DESC
-            LIMIT ?;
+            LIMIT %s;
             """
             params = (args.limit,)
 
         try:
-            df = pd.read_sql_query(query, self.db.conn, params=params)
+            cursor = self.db.conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            df = pd.DataFrame(rows, columns=[c.name for c in cursor.description])
+            cursor.close()
 
             if df.empty:
                 self.logger.info("No data found in the database matching the criteria.")

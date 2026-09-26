@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any
 from decimal import Decimal
 import requests
 from src.use_cases.interfaces import IAlorApiClient
@@ -8,7 +8,15 @@ from src.data_models import PortfolioPosition, Bond
 logger = logging.getLogger(__name__)
 
 class AlorApiClient(IAlorApiClient):
-    def __init__(self, token: str, refresh_token: str, client_id: str, client_secret: str, login: str = None, db_path: str = None):
+    def __init__(
+        self,
+        token: str,
+        refresh_token: str,
+        client_id: str,
+        client_secret: str,
+        login: str = None,
+        get_nominal: Optional[Callable[[str], Optional[Decimal]]] = None,
+    ):
         if not token:
             raise ValueError("Alor API token is required.")
         self.token = token
@@ -17,7 +25,8 @@ class AlorApiClient(IAlorApiClient):
         self.client_secret = client_secret
         self.base_url = "https://api.alor.ru"  # Боевой контур
         self.login = login
-        self.db_path = db_path
+        # Колбэк получения номинала по ISIN; API-клиент не знает о БД
+        self.get_nominal = get_nominal
         
     def _refresh_access_token(self) -> bool:
         """Обновляет access-токен через refresh-токен. Возвращает True если успешно."""
@@ -192,17 +201,12 @@ class AlorApiClient(IAlorApiClient):
         return True
     
     def _get_bond_nominal(self, isin: str) -> Optional[Decimal]:
-        """Получает номинал облигации из БД."""
+        """Получает номинал облигации через колбэк get_nominal (фабрика)."""
+        if self.get_nominal is None:
+            logger.warning(f"Колбэк get_nominal не передан, используется номинал по умолчанию для {isin}")
+            return None
         try:
-            # Импортируем здесь, чтобы избежать циклических импортов
-            from src.monitoring.storage import Database
-            if self.db_path:
-                db = Database(self.db_path)
-                bond_data = db.get_bond_by_isin(isin)
-                if bond_data and bond_data.nominal:
-                    return Decimal(str(bond_data.nominal))
-            else:
-                logger.warning(f"db_path не установлен, не удалось получить номинал для {isin}")
+            return self.get_nominal(isin)
         except Exception as e:
             logger.warning(f"Не удалось получить номинал для {isin}: {e}")
-        return None 
+        return None

@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from .base import BaseAdapter, MonitoringResult
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.use_cases.interfaces import ITbankApiClient
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ class TinkoffRiskLevelAdapter(BaseAdapter):
     def name(self) -> str:
         return 'tinkoff.risk_level'
 
-    def __init__(self, db: Database, config: dict, bond_data: 'PortfolioBond', tbank_api_client: ITbankApiClient, **kwargs):
+    def __init__(self, db: PortfolioStorage, config: dict, bond_data: 'PortfolioBond', tbank_api_client: ITbankApiClient, **kwargs):
         super().__init__(db, config, bond_data, **kwargs)
         self.tbank_api_client: ITbankApiClient = tbank_api_client
         self.verbose_name = "Уровень риска (Tinkoff)"

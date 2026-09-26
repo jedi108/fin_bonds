@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .base import UseCase
 from ..tbank.api_client import TbankApiClient
+from psycopg2.extras import RealDictCursor
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +69,11 @@ class UpdateMarketPrices(UseCase):
             query = """
                 SELECT isin, ticker, name, figi
                 FROM bonds_catalog 
-                WHERE isin = ?
+                WHERE isin = %s
                 ORDER BY isin
             """
             with self.storage.conn:
-                cursor = self.storage.conn.cursor()
+                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
                 cursor.execute(query, [args.isin])
                 return [dict(row) for row in cursor.fetchall()]
         else:
@@ -81,14 +82,14 @@ class UpdateMarketPrices(UseCase):
                 SELECT isin, ticker, name, figi
                 FROM bonds_catalog 
                 WHERE currency = 'rub'
-                    AND (is_trade_available = 1 OR is_trade_available IS NULL)
-                    AND perpetual_flag = 0
-                    AND maturity_date >= date('now')
+                    AND (is_trade_available IS TRUE OR is_trade_available IS NULL)
+                    AND perpetual_flag IS NOT TRUE
+                    AND maturity_date >= CURRENT_DATE
                 ORDER BY isin
             """
             
             with self.storage.conn:
-                cursor = self.storage.conn.cursor()
+                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
                 cursor.execute(query)
                 return [dict(row) for row in cursor.fetchall()]
     
@@ -123,9 +124,9 @@ class UpdateMarketPrices(UseCase):
         """Получает FIGI по ISIN через API."""
         try:
             # Ищем в локальной БД сначала
-            query = "SELECT figi FROM bonds_catalog WHERE isin = ?"
+            query = "SELECT figi FROM bonds_catalog WHERE isin = %s"
             with self.storage.conn:
-                cursor = self.storage.conn.cursor()
+                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
                 cursor.execute(query, [isin])
                 result = cursor.fetchone()
                 if result and result['figi']:
@@ -159,16 +160,16 @@ class UpdateMarketPrices(UseCase):
     
     def _save_market_price(self, isin: str, price: float) -> None:
         """Сохраняет рыночную цену в БД."""
-        query = "UPDATE bonds_catalog SET market_price = ? WHERE isin = ?"
+        query = "UPDATE bonds_catalog SET market_price = %s WHERE isin = %s"
         with self.storage.conn:
-            cursor = self.storage.conn.cursor()
+            cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [price, isin])
     
     def _save_figi(self, isin: str, figi: str) -> None:
         """Сохраняет FIGI в БД."""
-        query = "UPDATE bonds_catalog SET figi = ? WHERE isin = ?"
+        query = "UPDATE bonds_catalog SET figi = %s WHERE isin = %s"
         with self.storage.conn:
-            cursor = self.storage.conn.cursor()
+            cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [figi, isin])
     
     def _update_bond_prices_batch(self, bonds: List[Dict[str, Any]]) -> int:

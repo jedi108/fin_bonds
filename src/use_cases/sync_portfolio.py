@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from tinkoff.invest import PortfolioPosition as TinkoffPortfolioPosition
 
 from src.tbank.api_client import TbankApiClient
-from src.monitoring.storage import Database
 from src.data_models import (
     InstrumentInfo, 
     PortfolioPosition as DataModelPortfolioPosition

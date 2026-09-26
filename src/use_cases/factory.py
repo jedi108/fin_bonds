@@ -1,15 +1,15 @@
 import logging
 import os
+from decimal import Decimal
 from typing import Optional, Dict, Type, Any, List
 from dotenv import load_dotenv
 from functools import lru_cache
 
 from src.cbr.api_client import CbrApiClient
 from src.moex.api_client import MoexApiClient
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 from src.monitoring.notifier import TelegramNotifier
 from src.use_cases.base import UseCase
-from src.use_cases.interfaces import IPortfolioStorage
 from src.utils import load_config
 from src.tbank.api_client import TbankApiClient
 from src.monitoring.adapters.factory import AdapterFactory
@@ -55,7 +55,7 @@ class UseCaseFactory:
         load_dotenv()
         self.config = load_config()
         self.tinkoff_token = self._get_tinkoff_token()
-        self._db_connection: Optional[Database] = None
+        self._db_connection: Optional[PortfolioStorage] = None
         self._moex_api_client: Optional[MoexApiClient] = None
         self._cbr_api_client: Optional[CbrApiClient] = None
         self._tbank_api_client = None
@@ -70,15 +70,17 @@ class UseCaseFactory:
             raise ValueError("Токен TBank (INVEST_TOKEN) не найден или используется значение по умолчанию.")
         return token
 
-    def get_db_connection(self) -> IPortfolioStorage:
+    def get_db_connection(self) -> PortfolioStorage:
+        """Единственная точка создания хранилища: DSN берётся из POSTGRES_DSN."""
         if self._db_connection is None:
-            db_path = self.config['db_path']
-            self._db_connection = Database(db_path)
+            dsn = os.getenv('POSTGRES_DSN', '')
+            if not dsn:
+                raise ValueError(
+                    "Задайте POSTGRES_DSN в .env "
+                    "(формат: postgresql://user:password@host:port/dbname)."
+                )
+            self._db_connection = PortfolioStorage(dsn)
         return self._db_connection
-
-    def get_db_path(self) -> str:
-        """Возвращает путь к файлу БД из конфигурации."""
-        return self.config['db_path']
 
     def get_moex_api_client(self) -> MoexApiClient:
         if self._moex_api_client is None:
@@ -154,9 +156,14 @@ class UseCaseFactory:
             tokens = self._get_alor_tokens()
             if tokens:
                 try:
-                    # Добавляем db_path к токенам
-                    tokens['db_path'] = self.get_db_path()
-                    self._alor_api_client = AlorApiClient(**tokens)
+                    # Колбэк номинала вместо доступа API-клиента к БД
+                    storage = self.get_db_connection()
+
+                    def get_nominal(isin: str) -> Optional[Decimal]:
+                        bond = storage.get_bond_by_isin(isin)
+                        return bond.nominal if bond else None
+
+                    self._alor_api_client = AlorApiClient(get_nominal=get_nominal, **tokens)
                     logger.info("Alor API клиент успешно создан")
                 except Exception as e:
                     logger.error(f"Ошибка создания Alor API клиента: {e}")

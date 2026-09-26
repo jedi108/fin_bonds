@@ -6,11 +6,11 @@ import argparse
 from typing import TYPE_CHECKING, List, Dict, Any, Optional
 from decimal import Decimal
 from datetime import date, datetime
-import sqlite3
 import math
 
+from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 # Предотвращаем циклический импорт для type hints
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ class CalculateYtmUseCase(UseCase):
     2. Анализ уже купленных облигаций (по средней цене покупки)
     """
     
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod
@@ -107,7 +107,7 @@ class CalculateYtmUseCase(UseCase):
                 bc.ticker,
                 bc.name,
                 bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.risk_level,
@@ -116,17 +116,17 @@ class CalculateYtmUseCase(UseCase):
                 COALESCE(bc.market_price, bc.nominal) as current_price,
                 CASE 
                     WHEN COALESCE(bc.market_price, bc.nominal) IS NOT NULL AND COALESCE(bc.market_price, bc.nominal) > 0 
-                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
+                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
                     ELSE NULL 
                 END as real_yield_percent,
                 -- Общая сумма купонных выплат в месяц по всем бумагам в строке
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * 1, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * 1, 
                     2
                 ) as total_monthly_coupon_payment,
                 -- Тип купона (фиксированный/плавающий)
                 CASE 
-                    WHEN bc.floating_coupon_flag = 1 THEN 'Плавающий'
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
                     ELSE 'Фиксированный'
                 END as coupon_type
             FROM bonds_catalog bc
@@ -142,34 +142,34 @@ class CalculateYtmUseCase(UseCase):
                 )
             ) mc_floater ON bc.isin = mc_floater.isin
             WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available = 1 OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag = 0
-                AND bc.maturity_date >= ?
-                AND bc.maturity_date <= ?
-                AND bc.risk_level <= ?
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) IS NOT NULL
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
+                AND bc.maturity_date >= %s
+                AND bc.maturity_date <= %s
+                AND bc.risk_level <= %s
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
                 AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)
         """
         
         params = [args.min_maturity, args.max_maturity, args.max_risk]
         
         if args.no_amortization:
-            query += " AND bc.amortization_flag = 0"
+            query += " AND bc.amortization_flag IS NOT TRUE"
             
         if args.monthly_coupons:
             query += " AND bc.coupon_quantity_per_year = 12"
             
         if args.fixed_coupon:
-            query += " AND bc.floating_coupon_flag = 0"
+            query += " AND bc.floating_coupon_flag IS NOT TRUE"
             
         if args.floating_coupon:
-            query += " AND bc.floating_coupon_flag = 1"
+            query += " AND bc.floating_coupon_flag IS TRUE"
             
-        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT ?"
+        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
         params.append(args.limit)
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, params)
             rows = cursor.fetchall()
             
@@ -215,7 +215,11 @@ class CalculateYtmUseCase(UseCase):
         """
         try:
             # Рассчитываем время до погашения в годах
-            maturity = datetime.strptime(maturity_date, '%Y-%m-%d').date()
+            # psycopg2 возвращает DATE нативно (date); строка — легаси-формат
+            if isinstance(maturity_date, str):
+                maturity = datetime.strptime(maturity_date, '%Y-%m-%d').date()
+            else:
+                maturity = maturity_date
             today = date.today()
             years_to_maturity = (maturity - today).days / 365.25
             
@@ -314,7 +318,7 @@ class CalculateYtmUseCase(UseCase):
                 bc.ticker,
                 bc.name,
                 bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.risk_level,
@@ -325,7 +329,7 @@ class CalculateYtmUseCase(UseCase):
                 pp.quantity,
                 CASE 
                     WHEN pp.average_price IS NOT NULL AND pp.average_price > 0 
-                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price * 100
+                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100
                     ELSE NULL 
                 END as real_yield_percent,
                 CASE 
@@ -336,12 +340,12 @@ class CalculateYtmUseCase(UseCase):
                 END as price_change_percent,
                 -- Общая сумма купонных выплат в месяц по всем бумагам в строке
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
                     2
                 ) as total_monthly_coupon_payment,
                 -- Тип купона (фиксированный/плавающий)
                 CASE 
-                    WHEN bc.floating_coupon_flag = 1 THEN 'Плавающий'
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
                     ELSE 'Фиксированный'
                 END as coupon_type
             FROM portfolio_positions pp
@@ -360,31 +364,31 @@ class CalculateYtmUseCase(UseCase):
             WHERE bc.currency = 'rub'
                 AND pp.current_price > 0
                 AND pp.quantity > 0
-                AND bc.maturity_date >= ?
-                AND bc.maturity_date <= ?
-                AND bc.risk_level <= ?
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) IS NOT NULL
+                AND bc.maturity_date >= %s
+                AND bc.maturity_date <= %s
+                AND bc.risk_level <= %s
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
         """
         
         params = [args.min_maturity, args.max_maturity, args.max_risk]
         
         if args.no_amortization:
-            query += " AND bc.amortization_flag = 0"
+            query += " AND bc.amortization_flag IS NOT TRUE"
             
         if args.monthly_coupons:
             query += " AND bc.coupon_quantity_per_year = 12"
             
         if args.fixed_coupon:
-            query += " AND bc.floating_coupon_flag = 0"
+            query += " AND bc.floating_coupon_flag IS NOT TRUE"
             
         if args.floating_coupon:
-            query += " AND bc.floating_coupon_flag = 1"
+            query += " AND bc.floating_coupon_flag IS TRUE"
             
-        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT ?"
+        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
         params.append(args.limit)
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, params)
             rows = cursor.fetchall()
             

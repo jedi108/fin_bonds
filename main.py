@@ -1,6 +1,5 @@
 import argparse
 import logging
-import sys # Импортируем sys для прямой печати в stderr
 
 from src.use_cases.factory import UseCaseFactory
 from src.utils import setup_logging
@@ -43,12 +42,7 @@ def main():
         # Если указан флаг -v или команда является тестом, перенастраиваем логирование на уровень DEBUG
         if args.verbose or (args.command and args.command.startswith('test-')):
             logging.getLogger().setLevel(logging.DEBUG)
-            # Перенастраиваем с новым уровнем
-            # setup_logging(level=logging.DEBUG) # setup_logging уже настраивает StreamHandler
             logger.debug("Включен режим подробного логирования для тестовой команды.")
-        
-        # Debugging: Print args before execution directly to stderr
-        print(f"DEBUG: Parsed arguments: {args}", file=sys.stderr) # <<< ДОБАВЛЕНА/ИЗМЕНЕНА ЭТА СТРОКА
 
         # Получаем и выполняем выбранный use case
         use_case_instance = factory.get_use_case(args.command)

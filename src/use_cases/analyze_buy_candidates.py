@@ -4,11 +4,11 @@ Use Case для анализа облигаций для покупки.
 
 import argparse
 import logging
-import sqlite3
-from typing import List
+from typing import Any, Dict, List
 
+from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
-from src.monitoring.storage import Database
+from src.storage import PortfolioStorage
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class AnalyzeBuyCandidatesUseCase(UseCase):
     """Анализ облигаций для покупки."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: PortfolioStorage):
         self.db = db
 
     @staticmethod
@@ -67,14 +67,14 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 bc.isin,
                 bc.ticker,
                 bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.risk_level,
                 bc.list_level,
                 bc.maturity_date,
                 
                 -- Купонный доход за месяц (на 1 облигацию)
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.coupon_quantity_per_year, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year, 
                     2
                 ) as monthly_coupon_income_per_bond,
                 
@@ -85,7 +85,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 CASE 
                     WHEN bc.market_price IS NOT NULL AND bc.market_price > 0 THEN
                         ROUND(
-                            ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.market_price) * 100, 
+                            ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100, 
                             2
                         )
                     ELSE NULL 
@@ -93,14 +93,14 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 
                 -- До погашения (месяцев)
                 ROUND(
-                    (julianday(bc.maturity_date) - julianday('now')) / 30, 
+                    (bc.maturity_date - CURRENT_DATE) / 30.0, 
                     1
                 ) as months_to_maturity,
                 
                 -- Тип облигации
                 CASE 
-                    WHEN bc.floating_coupon_flag = 1 THEN 'Флоатер'
-                    WHEN bc.amortization_flag = 1 THEN 'Амортизируемая'
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Флоатер'
+                    WHEN bc.amortization_flag IS TRUE THEN 'Амортизируемая'
                     ELSE 'Обычная'
                 END as bond_type
                 
@@ -118,29 +118,29 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 )
             ) mc_floater ON bc.isin = mc_floater.isin
             WHERE bc.currency = 'rub'
-                AND bc.is_trade_available = 1
-                AND bc.perpetual_flag = 0
+                AND bc.is_trade_available IS TRUE
+                AND bc.perpetual_flag IS NOT TRUE
                 AND pp.isin IS NULL  -- Нет в портфеле
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) IS NOT NULL
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
                 AND bc.market_price IS NOT NULL  -- Есть рыночная цена
-                AND bc.risk_level <= ?
-                AND (julianday(bc.maturity_date) - julianday('now')) > ?
+                AND bc.risk_level <= %s
+                AND (bc.maturity_date - CURRENT_DATE) > %s
                 AND CASE 
-                    WHEN ? THEN bc.floating_coupon_flag = 0  -- Только фиксированный купон
-                    WHEN ? THEN bc.floating_coupon_flag = 1  -- Только флоатеры
-                    ELSE 1  -- Все типы
+                    WHEN %s THEN bc.floating_coupon_flag IS NOT TRUE  -- Только фиксированный купон
+                    WHEN %s THEN bc.floating_coupon_flag IS TRUE  -- Только флоатеры
+                    ELSE TRUE  -- Все типы
                 END
                 AND CASE 
-                    WHEN ? THEN bc.amortization_flag = 1  -- Только амортизируемые
-                    WHEN ? THEN bc.amortization_flag = 0  -- Исключить амортизируемые
-                    ELSE 1  -- Все типы
+                    WHEN %s THEN bc.amortization_flag IS TRUE  -- Только амортизируемые
+                    WHEN %s THEN bc.amortization_flag IS NOT TRUE  -- Исключить амортизируемые
+                    ELSE TRUE  -- Все типы
                 END
             ORDER BY annual_yield_percent DESC NULLS LAST
-            LIMIT ?
+            LIMIT %s
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [
                 args.min_risk, 
                 args.min_months * 30, 
@@ -166,20 +166,20 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 bc.isin,
                 bc.ticker,
                 bc.name,
-                mc_floater.metric_value as calculated_coupon_rate,
+                mc_floater.metric_value::numeric as calculated_coupon_rate,
                 bc.coupon_spread,
                 bc.risk_level,
                 bc.maturity_date,
                 
                 -- Купонный доход за месяц (на 1 облигацию)
                 ROUND(
-                    (mc_floater.metric_value * bc.nominal / 100) / bc.coupon_quantity_per_year, 
+                    (mc_floater.metric_value::numeric * bc.nominal / 100) / bc.coupon_quantity_per_year, 
                     2
                 ) as monthly_coupon_income_per_bond,
                 
                 -- До погашения (месяцев)
                 ROUND(
-                    (julianday(bc.maturity_date) - julianday('now')) / 30, 
+                    (bc.maturity_date - CURRENT_DATE) / 30.0, 
                     1
                 ) as months_to_maturity
                 
@@ -197,18 +197,18 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 )
             ) mc_floater ON bc.isin = mc_floater.isin
             WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available = 1 OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag = 0
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
                 AND pp.isin IS NULL  -- Нет в портфеле
-                AND bc.floating_coupon_flag = 1  -- Только флоатеры
-                AND mc_floater.metric_value IS NOT NULL  -- Есть рассчитанная ставка
+                AND bc.floating_coupon_flag IS TRUE  -- Только флоатеры
+                AND mc_floater.metric_value::numeric IS NOT NULL  -- Есть рассчитанная ставка
                 AND bc.coupon_spread IS NOT NULL  -- Установлен спред
             ORDER BY monthly_coupon_income_per_bond DESC
-            LIMIT ?
+            LIMIT %s
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [args.limit])
             rows = cursor.fetchall()
             
@@ -224,7 +224,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         query = """
             WITH portfolio_avg_yield AS (
                 SELECT 
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
                 FROM bonds_catalog bc
                 JOIN portfolio_positions pp ON bc.isin = pp.isin
                 LEFT JOIN (
@@ -246,25 +246,25 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                 bc.isin,
                 bc.ticker,
                 bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.risk_level,
                 
                 -- Потенциальная годовая доходность (если купить по рыночной цене)
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.market_price * 100, 
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100, 
                     2
                 ) as potential_yield_percent,
                 
                 -- Сравнение с портфелем
                 ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.market_price * 100) - pavg.avg_portfolio_yield, 
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) - pavg.avg_portfolio_yield, 
                     2
                 ) as yield_vs_portfolio,
                 
                 -- Рекомендация
                 CASE 
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
+                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
+                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
                     ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
                 END as recommendation
                 
@@ -283,18 +283,18 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
             ) mc_floater ON bc.isin = mc_floater.isin
             CROSS JOIN portfolio_avg_yield pavg
             WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available = 1 OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag = 0
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
                 AND pp.isin IS NULL  -- Нет в портфеле
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) IS NOT NULL
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
                 AND bc.market_price IS NOT NULL  -- Есть рыночная цена
-                AND bc.risk_level <= ?  -- Только низкорисковые
+                AND bc.risk_level <= %s  -- Только низкорисковые
             ORDER BY yield_vs_portfolio DESC
-            LIMIT ?
+            LIMIT %s
         """
         
         with self.db.conn:
-            cursor = self.db.conn.cursor()
+            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, [args.min_risk, args.limit])
             rows = cursor.fetchall()
             
@@ -305,7 +305,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         logger.info(f"📈 Найдено {len(rows)} бумаг для сравнения")
         self._print_comparison_table(rows)
 
-    def _print_top_candidates_table(self, rows: List[sqlite3.Row]):
+    def _print_top_candidates_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу топ кандидатов."""
         print(f"\n{'='*140}")
         print(f"📊 Топ бумаг для покупки по доходности к погашению")
@@ -335,7 +335,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         
         print(f"{'='*120}")
 
-    def _print_floater_candidates_table(self, rows: List[sqlite3.Row]):
+    def _print_floater_candidates_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу флоатеров для покупки."""
         print(f"\n{'='*120}")
         print(f"📊 Флоатеры для покупки")
@@ -364,7 +364,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         
         print(f"{'='*120}")
 
-    def _print_comparison_table(self, rows: List[sqlite3.Row]):
+    def _print_comparison_table(self, rows: List[Dict[str, Any]]):
         """Выводит таблицу сравнения с портфелем."""
         print(f"\n{'='*120}")
         print(f"📊 Сравнение с текущим портфелем")
