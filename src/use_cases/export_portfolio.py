@@ -13,7 +13,7 @@ from tinkoff.invest.utils import quotation_to_decimal
 from tabulate import tabulate
 
 from src.data_models import PortfolioPosition, Portfolio
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 
 try:
     import gspread
@@ -28,7 +28,7 @@ class ExportPortfolioUseCase:
     """
     Сценарий: экспорт данных о портфеле из локальной БД в различные форматы.
     """
-    def __init__(self, config: dict, storage: IPortfolioStorage, tinkoff_token: str):
+    def __init__(self, config: dict, storage: PortfolioStorage, tinkoff_token: str):
         self.config = config
         self.storage = storage
         self.tinkoff_token = tinkoff_token

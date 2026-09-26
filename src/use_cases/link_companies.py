@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from src.company_normalization import TYPE_INDIVIDUAL, resolve_company
 from src.use_cases.base import UseCase
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def link_bonds_to_companies(
-    db: IPortfolioStorage,
+    db: PortfolioStorage,
     overrides: Optional[Dict[str, Any]],
     inn_by_isin: Optional[Dict[str, str]] = None,
     only_unlinked: bool = True
@@ -67,7 +67,7 @@ class LinkCompaniesUseCase(UseCase):
 
     def __init__(self, factory: 'UseCaseFactory'):
         super().__init__(factory)
-        self.db: IPortfolioStorage = self.factory.get_db_connection()
+        self.db: PortfolioStorage = self.factory.get_db_connection()
         self.config = self.factory.config
 
     @staticmethod

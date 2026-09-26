@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, TYPE_CHECKING, List
 from tqdm import tqdm
 
 from src.use_cases.base import UseCase
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 from src.monitoring.notifier import TelegramNotifier
 from src.monitoring.adapters.factory import AdapterFactory
 from src.monitoring.adapters.base import MonitoringResult
@@ -39,7 +39,7 @@ class UpdateRatingsUseCase(UseCase):
             use_case_factory=factory
         )
 
-    def __init__(self, storage: IPortfolioStorage, notifier: Optional[TelegramNotifier], use_case_factory: 'UseCaseFactory'):
+    def __init__(self, storage: PortfolioStorage, notifier: Optional[TelegramNotifier], use_case_factory: 'UseCaseFactory'):
         self.storage = storage
         self.notifier = notifier
         self.adapter_factory = AdapterFactory(use_case_factory)

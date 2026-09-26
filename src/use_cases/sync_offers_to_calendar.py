@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, List
 from src.use_cases.base import UseCase
 from src.services.calendar_generator import CalendarGenerator
 from src.monitoring.notifier import TelegramNotifier
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 import tempfile
 import os
 
@@ -17,7 +17,7 @@ class SyncOffersToCalendarUseCase(UseCase):
     """
     Генерирует .ics файл с датами оферт и отправляет его в Telegram или сохраняет на диск.
     """
-    def __init__(self, storage: IPortfolioStorage, notifier: TelegramNotifier, config: dict):
+    def __init__(self, storage: PortfolioStorage, notifier: TelegramNotifier, config: dict):
         self.storage = storage
         self.notifier = notifier
         self.config = config

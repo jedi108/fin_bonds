@@ -18,7 +18,6 @@ from psycopg2.extras import RealDictCursor
 
 from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond
 from src.migrations import discover_migrations, get_applied_versions
-from src.use_cases.interfaces import IPortfolioStorage
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +103,7 @@ def _row_to_portfolio_position(row: Mapping[str, Any]) -> Optional[PortfolioPosi
         return None
 
 
-class PortfolioStorage(IPortfolioStorage):
+class PortfolioStorage:
     """
     Хранилище данных портфеля на PostgreSQL.
     Отвечает за выполнение всех SQL-запросов; схему создают миграции.

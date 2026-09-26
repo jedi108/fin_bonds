@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from src.use_cases.base import UseCase
 # from src.utils import load_isins_from_file # Эту строку можно будет удалить, если она больше нигде не используется в этом файле
-from src.use_cases.interfaces import IPortfolioStorage
+from src.storage import PortfolioStorage
 from src.monitoring.notifier import TelegramNotifier
 
 # Предотвращаем циклический импорт для type hints
@@ -22,7 +22,7 @@ class CheckOffersUseCase(UseCase):
     Проверяет приближающиеся даты оферт для облигаций из портфеля.
     """
 
-    def __init__(self, storage: IPortfolioStorage, config: Dict[str, Any], notifier: Optional[TelegramNotifier]):
+    def __init__(self, storage: PortfolioStorage, config: Dict[str, Any], notifier: Optional[TelegramNotifier]):
         self.storage = storage
         self.config = config
         self.notifier = notifier

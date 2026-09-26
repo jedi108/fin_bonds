@@ -19,17 +19,47 @@ def setup_logging(level=logging.INFO):
     )
 
 
+# Корень проекта: utils.py лежит в src/, parents[1] — каталог проекта.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Относительные пути верхнего уровня config.yaml, привязываемые к корню проекта.
+_PROJECT_ROOTED_KEYS = ("portfolio_file", "watchlist_file", "portfolio_isins_txt_file")
+
+
+def _anchor_to_project_root(value: Any) -> Any:
+    """Перепривязывает относительный путь к корню проекта; абсолютный не меняет."""
+    if isinstance(value, str) and value and not Path(value).is_absolute():
+        return str(PROJECT_ROOT / value)
+    return value
+
+
 def load_config() -> Dict[str, Any]:
     """
-    Загружает конфигурационный файл config.yaml.
+    Загружает конфигурационный файл config.yaml из корня проекта
+    (независимо от текущей директории запуска) и привязывает относительные
+    пути данных из него к корню проекта.
     """
-    config_path = Path("config.yaml")
+    config_path = PROJECT_ROOT / "config.yaml"
     if not config_path.is_file():
         # Эта ситуация обрабатывается в main.py, но дублируем для безопасности
-        raise FileNotFoundError(f"Файл конфигурации '{config_path.resolve()}' не найден.")
-    
+        raise FileNotFoundError(f"Файл конфигурации '{config_path}' не найден.")
+
     with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+
+    for key in _PROJECT_ROOTED_KEYS:
+        if key in config:
+            config[key] = _anchor_to_project_root(config[key])
+
+    plotter_config = config.get('plotter')
+    if isinstance(plotter_config, dict) and 'output_dir' in plotter_config:
+        plotter_config['output_dir'] = _anchor_to_project_root(plotter_config['output_dir'])
+
+    export_config = config.get('export_portfolio')
+    if isinstance(export_config, dict) and 'gcreds_filename' in export_config:
+        export_config['gcreds_filename'] = _anchor_to_project_root(export_config['gcreds_filename'])
+
+    return config
 
 
 def load_isins_from_file(file_path: str) -> List[str]:

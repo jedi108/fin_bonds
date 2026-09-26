@@ -16,7 +16,6 @@ from tinkoff.invest import Client, Bond, MoneyValue, InstrumentStatus
 from tinkoff.invest.utils import quotation_to_decimal
 
 from src.use_cases.interfaces import IMoexApiClient
-from src.use_cases.interfaces import IPortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.link_companies import link_bonds_to_companies
 from src.data_models import Bond as BondDTO

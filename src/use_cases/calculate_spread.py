@@ -8,7 +8,6 @@ from decimal import Decimal
 from datetime import datetime, timezone
 
 from src.use_cases.base import UseCase
-from src.use_cases.interfaces import IPortfolioStorage
 from tinkoff.invest import Client, RequestError
 from tinkoff.invest.utils import quotation_to_decimal
 from src.use_cases.interfaces import ITbankApiClient
