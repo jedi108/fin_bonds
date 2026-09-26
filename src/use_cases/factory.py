@@ -28,6 +28,7 @@ from src.use_cases.export_bonds import ExportBondsUseCase
 from src.use_cases.export_monitoring_results import ExportMonitoringResultsUseCase
 from src.use_cases.export_portfolio import ExportPortfolioUseCase
 from src.use_cases.generate_plots import GeneratePlotsUseCase
+from src.use_cases.link_companies import LinkCompaniesUseCase
 from src.use_cases.migrate_db import MigrateDbUseCase
 from src.use_cases.seed_data import SeedDataUseCase
 from src.use_cases.set_spread import SetSpreadUseCase
@@ -192,6 +193,7 @@ class UseCaseFactory:
         return {
             'add-bond': AddBondToCatalogUseCase,
             'update-bonds': UpdateBondsCatalogUseCase,
+            'link-companies': LinkCompaniesUseCase,
             'update-ratings': UpdateRatingsUseCase,
             'seed-data': SeedDataUseCase,
             'clear-data': ClearDataUseCase,

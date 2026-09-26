@@ -5,6 +5,19 @@ from decimal import Decimal
 from tinkoff.invest import Bond as TinkoffBond, PortfolioPosition as TinkoffPortfolioPosition, Instrument as TinkoffInstrument
 
 @dataclass
+class Company:
+    """
+    DTO для компании-эмитента облигаций (юридического лица).
+    Одна компания — много облигаций (bonds_catalog.company_id).
+    entity_type: company | individual | region | sovereign.
+    """
+    id: Optional[int] = None
+    name: str = ''
+    full_name: Optional[str] = None
+    inn: Optional[str] = None
+    entity_type: str = 'company'
+
+@dataclass
 class Bond:
     """
     Класс данных (DTO) для представления облигации.
@@ -38,6 +51,10 @@ class Bond:
     market_price: Optional[Decimal] = None
     market_price_source: Optional[str] = None  # 'tbank', 'moex', 'alor'
     market_price_updated_at: Optional[datetime] = None
+
+    # Привязка к компании-эмитенту (справочник companies); заполняется
+    # при линковке, в upsert каталога не участвует
+    company_id: Optional[int] = None
 
     @classmethod
     def from_tinkoff_api(cls, tinkoff_bond: TinkoffBond) -> "Bond":

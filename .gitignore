@@ -62,3 +62,7 @@ node_modules/
 
 ratings.db
 *.egg-info/
+
+# ZCode agent workspace files
+.zcode/
+.zcodeignore

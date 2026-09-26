@@ -18,6 +18,7 @@ from tinkoff.invest.utils import quotation_to_decimal
 from src.use_cases.interfaces import IMoexApiClient
 from src.use_cases.interfaces import IPortfolioStorage
 from src.use_cases.base import UseCase
+from src.use_cases.link_companies import link_bonds_to_companies
 from src.data_models import Bond as BondDTO
 
 # Предотвращаем циклический импорт для type hints
@@ -140,11 +141,12 @@ class UpdateBondsCatalogUseCase(UseCase):
         """
         Получает полный список облигаций с TBank API,
         находит новые и добавляет их в локальную базу данных.
+        В конце привязывает облигации без компании к компаниям-эмитентам.
         """
         # Шаг 1: Получаем все облигации из Tinkoff API
         self.logger.info("--- Обновление каталога из TBank API ---")
         with Client(self.tbank_client.token) as client:
-            all_tinkoff_bonds = self._get_all_bonds_from_tinkoff(client)
+            all_tinkoff_bonds, inn_by_isin = self._get_all_bonds_from_tinkoff(client)
 
         if not all_tinkoff_bonds:
             self.logger.error("Не удалось получить список облигаций из TBank API. Прерывание.")
@@ -172,6 +174,16 @@ class UpdateBondsCatalogUseCase(UseCase):
         self.logger.info("Принудительное обновление всех облигаций для заполнения is_trade_available...")
         self.db.add_bonds_to_catalog(all_tinkoff_bonds)
         self.logger.info(f"Обновлено {len(all_tinkoff_bonds)} облигаций в каталоге.")
+
+        # Привязываем облигации без компании (в т.ч. только что добавленные)
+        overrides = self.factory.config.get('company_overrides') or {}
+        linked, companies = link_bonds_to_companies(
+            self.db, overrides, inn_by_isin=inn_by_isin, only_unlinked=True
+        )
+        if linked:
+            self.logger.info(
+                f"Автопривязка к компаниям: {linked} облигаций, компаний затронуто {companies}."
+            )
 
     def _update_from_moex(self):
         """
@@ -305,20 +317,30 @@ class UpdateBondsCatalogUseCase(UseCase):
                 except Exception as e:
                     self.logger.error(f"Ошибка при сохранении в CSV: {e}")
 
-    def _get_all_bonds_from_tinkoff(self, client: Client) -> List[BondDTO]:
-        """Вспомогательный метод для получения всех облигаций из Tinkoff API."""
+    def _get_all_bonds_from_tinkoff(self, client: Client) -> tuple:
+        """
+        Вспомогательный метод для получения всех облигаций из Tinkoff API.
+        Возвращает (список DTO облигаций, словарь ISIN -> ИНН эмитента).
+        ИНН берётся из поля issuer_inn, если оно появится в SDK
+        (в текущей версии tinkoff-invest его нет — словарь будет пустым).
+        """
         raw_bonds = client.instruments.bonds().instruments
         bonds_dto_list = []
+        inn_by_isin = {}
         for bond in raw_bonds:
             if bond.currency.lower() != 'rub':
                 continue
-            
+
             # Пропускаем облигации без ISIN или maturity_date
             if not bond.isin or not bond.maturity_date:
                 continue
 
+            inn = getattr(bond, 'issuer_inn', None)
+            if inn:
+                inn_by_isin[bond.isin] = inn
+
             bonds_dto_list.append(fetch_and_prepare_bond_details(bond))
-        return bonds_dto_list
+        return bonds_dto_list, inn_by_isin
 
     # Этот метод не используется и будет удален
     # def _check_and_notify_coupon_change(self, bond: BondDTO, new_rate: Optional[float]):

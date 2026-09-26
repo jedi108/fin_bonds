@@ -25,6 +25,38 @@ class IPortfolioStorage(ABC):
     def get_all_isins_from_catalog(self) -> Set[str]:
         """Получить все ISIN из каталога облигаций."""
         pass
+
+    # Методы для работы с компаниями-эмитентами (юрлицами)
+    @abstractmethod
+    def upsert_company(
+        self,
+        name: str,
+        entity_type: str = 'company',
+        inn: Optional[str] = None,
+        full_name: Optional[str] = None
+    ) -> int:
+        """Найти компанию по ИНН/имени или создать новую. Вернуть id."""
+        pass
+
+    @abstractmethod
+    def get_bonds_for_company_linking(self, only_unlinked: bool = True) -> List[Tuple[str, str]]:
+        """Получить пары (isin, name) облигаций для привязки к компаниям."""
+        pass
+
+    @abstractmethod
+    def link_bonds_to_companies(self, links: List[Tuple[str, int]]) -> int:
+        """Привязать облигации к компаниям: список пар (isin, company_id)."""
+        pass
+
+    @abstractmethod
+    def get_companies_overview(self) -> List[Dict[str, Any]]:
+        """Компании с количеством облигаций."""
+        pass
+
+    @abstractmethod
+    def get_catalog_company_coverage(self) -> Tuple[int, int]:
+        """Возвращает (всего облигаций, привязано к компаниям)."""
+        pass
     
     # Методы для работы с портфелем
     @abstractmethod

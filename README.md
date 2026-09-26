@@ -115,6 +115,7 @@ python3 main.py check-changes
 | `update-market-prices` | Обновление рыночных цен облигаций | [📖](doc/commands/update-market-prices.md) |
 | `update-ratings` | Обновление рейтингов и мониторинга | [📖](doc/commands/update-ratings.md) |
 | `sync-portfolio` | Синхронизация портфеля | [📖](doc/commands/sync-portfolio.md) |
+| `link-companies` | Привязка облигаций к компаниям-эмитентам (backfill и отчёт) | [📖](doc/commands/link-companies.md) |
 
 ### 📈 Команды экспорта
 
@@ -495,6 +496,7 @@ python3 main.py export-bonds filtered_bonds.csv --min-maturity 2027-01-01 --max-
 | `export-portfolio`     | Экспортирует текущий состав портфеля из БД в XLS или консоль.                |
 | `update-bonds`         | Обновляет каталог облигаций (основную информацию) в локальной БД из MOEX API. |
 | `update-market-prices` | Обновляет рыночные цены облигаций через TBank API.                        |
+| `link-companies`       | Привязывает облигации каталога к компаниям-эмитентам (юрлицам): backfill и отчёт по группировке. |
 | `export-bonds`         | Экспортирует отфильтрованный список облигаций в CSV.                          |
 | `add-bond`             | Добавляет одну облигацию в каталог по ISIN.                                 |
 | `update-ratings`       | Обновляет отслеживаемые метрики для облигаций в портфеле (рейтинг, уровень листинга и т.д.). |

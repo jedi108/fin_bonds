@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Any, Dict, List, Tuple, Optional, Set
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from collections import defaultdict
@@ -42,6 +42,7 @@ def _row_to_bond(row: sqlite3.Row) -> Optional[Bond]:
             created_at=row_dict.get('created_at'),
             updated_at=row_dict.get('updated_at'),
             is_for_qualified_investors=bool(row_dict.get('is_for_qualified_investors')),
+            company_id=row_dict.get('company_id'),
         )
     except (ValueError, TypeError, KeyError) as e:
         logger.error(f"Failed to convert row to Bond DTO for ISIN {row_dict.get('isin')}: {e}")
@@ -101,6 +102,9 @@ class Database(IPortfolioStorage):
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
         )
         self.conn.row_factory = sqlite3.Row
+        # Встроенные lower()/NOCASE в SQLite не знают кириллицы —
+        # регистрируем питоновский вариант для регистронезависимого поиска имён
+        self.conn.create_function('py_lower', 1, lambda value: value.lower() if isinstance(value, str) else value)
         self._create_tables()
 
     def _add_column_if_not_exists(self, cursor: sqlite3.Cursor, table_name: str, column_name: str, column_type: str):
@@ -153,7 +157,37 @@ class Database(IPortfolioStorage):
             self._add_column_if_not_exists(cursor, 'bonds_catalog', 'market_price', 'REAL')
             self._add_column_if_not_exists(cursor, 'bonds_catalog', 'market_price_source', 'TEXT')
             self._add_column_if_not_exists(cursor, 'bonds_catalog', 'market_price_updated_at', 'TEXT')
-            
+
+            # Справочник компаний-эмитентов (юрлиц): одна компания — много облигаций.
+            # Суррогатный PK id — точка входа для будущих связей (news, tags и т.п.).
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                full_name TEXT,
+                inn TEXT UNIQUE,
+                entity_type TEXT NOT NULL DEFAULT 'company',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
+            # Связь облигаций с компаниями (один ко многим)
+            self._add_column_if_not_exists(
+                cursor, 'bonds_catalog', 'company_id', 'INTEGER REFERENCES companies(id)'
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bonds_catalog_company_id ON bonds_catalog(company_id)"
+            )
+
+            cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_companies_updated_at
+            AFTER UPDATE ON companies
+            BEGIN
+                UPDATE companies SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+            END;
+            """)
+
             # Таблица для хранения истории рейтингов
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS rating_history (
@@ -376,7 +410,12 @@ class Database(IPortfolioStorage):
         return result
 
     def add_bonds_to_catalog(self, bonds_dto_list: List[Bond]):
-        """Добавляет или обновляет список облигаций в каталоге."""
+        """Добавляет или обновляет список облигаций в каталоге.
+
+        Существующие записи обновляются без стирания данных, которых нет
+        в источнике TBank: company_id, created_at, обогащения из MOEX
+        (list_level, купон) и рыночных цен (COALESCE с существующими).
+        """
         bonds_data = []
         for bond in bonds_dto_list:
             bonds_data.append((
@@ -387,23 +426,131 @@ class Database(IPortfolioStorage):
                 bond.coupon_quantity_per_year, float(bond.coupon_rate_percent) if bond.coupon_rate_percent else None, bond.coupon_type,
                 bond.list_level, bond.risk_level, float(bond.coupon_spread) if bond.coupon_spread else None,
                 bond.is_trade_available, bond.is_for_qualified_investors, bond.issue_size,
-                bond.created_at, bond.updated_at, bond.floating_coupon_flag, bond.perpetual_flag, bond.amortization_flag,
-                float(bond.market_price) if bond.market_price else None, bond.market_price_source, 
+                bond.floating_coupon_flag, bond.perpetual_flag, bond.amortization_flag,
+                float(bond.market_price) if bond.market_price else None, bond.market_price_source,
                 bond.market_price_updated_at.strftime('%Y-%m-%d %H:%M:%S') if bond.market_price_updated_at else None
             ))
 
         with self.conn:
             self.conn.executemany("""
-                INSERT OR REPLACE INTO bonds_catalog ( 
+                INSERT INTO bonds_catalog ( 
                     isin, figi, ticker, name, currency, nominal, maturity_date, offer_date,
                     coupon_quantity_per_year, coupon_rate_percent, coupon_type,
                     list_level, risk_level, coupon_spread,
                     is_trade_available, is_for_qualified_investors, issue_size,
-                    created_at, updated_at, floating_coupon_flag, perpetual_flag, amortization_flag,
+                    floating_coupon_flag, perpetual_flag, amortization_flag,
                     market_price, market_price_source, market_price_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(isin) DO UPDATE SET
+                    figi = excluded.figi,
+                    ticker = excluded.ticker,
+                    name = excluded.name,
+                    currency = excluded.currency,
+                    nominal = excluded.nominal,
+                    maturity_date = excluded.maturity_date,
+                    offer_date = excluded.offer_date,
+                    coupon_quantity_per_year = excluded.coupon_quantity_per_year,
+                    coupon_rate_percent = COALESCE(excluded.coupon_rate_percent, bonds_catalog.coupon_rate_percent),
+                    coupon_type = COALESCE(excluded.coupon_type, bonds_catalog.coupon_type),
+                    list_level = COALESCE(excluded.list_level, bonds_catalog.list_level),
+                    risk_level = excluded.risk_level,
+                    coupon_spread = COALESCE(excluded.coupon_spread, bonds_catalog.coupon_spread),
+                    is_trade_available = excluded.is_trade_available,
+                    is_for_qualified_investors = excluded.is_for_qualified_investors,
+                    issue_size = excluded.issue_size,
+                    floating_coupon_flag = excluded.floating_coupon_flag,
+                    perpetual_flag = excluded.perpetual_flag,
+                    amortization_flag = excluded.amortization_flag,
+                    market_price = COALESCE(excluded.market_price, bonds_catalog.market_price),
+                    market_price_source = COALESCE(excluded.market_price_source, bonds_catalog.market_price_source),
+                    market_price_updated_at = COALESCE(excluded.market_price_updated_at, bonds_catalog.market_price_updated_at),
+                    updated_at = CURRENT_TIMESTAMP
             """, bonds_data)
         logger.info(f"Добавлено/обновлено {len(bonds_data)} облигаций в каталоге.")
+
+    # Методы для работы с компаниями-эмитентами (юрлицами)
+
+    def upsert_company(
+        self,
+        name: str,
+        entity_type: str = 'company',
+        inn: Optional[str] = None,
+        full_name: Optional[str] = None
+    ) -> int:
+        """
+        Находит компанию по ИНН (если задан), затем по имени (без учёта регистра);
+        при отсутствии создаёт новую. Возвращает id компании.
+
+        ИНН у физлиц не передавать (персональные данные).
+        """
+        with self.conn:
+            cursor = self.conn.cursor()
+            if inn:
+                cursor.execute("SELECT id FROM companies WHERE inn = ?", (inn,))
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute(
+                        "UPDATE companies SET name = ?, entity_type = ?, "
+                        "full_name = COALESCE(?, full_name) WHERE id = ?",
+                        (name, entity_type, full_name, row['id'])
+                    )
+                    return row['id']
+            cursor.execute(
+                "SELECT id FROM companies WHERE py_lower(name) = py_lower(?)", (name,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # ИНН мог появиться позже имени — заполняем только пустой
+                if inn:
+                    cursor.execute(
+                        "UPDATE companies SET inn = ? WHERE id = ? AND (inn IS NULL OR inn = '')",
+                        (inn, row['id'])
+                    )
+                return row['id']
+            cursor.execute(
+                "INSERT INTO companies (name, entity_type, inn, full_name) VALUES (?, ?, ?, ?)",
+                (name, entity_type, inn, full_name)
+            )
+            return cursor.lastrowid
+
+    def get_bonds_for_company_linking(self, only_unlinked: bool = True) -> List[Tuple[str, str]]:
+        """Возвращает список пар (isin, name) для привязки к компаниям."""
+        cursor = self.conn.cursor()
+        query = "SELECT isin, name FROM bonds_catalog"
+        if only_unlinked:
+            query += " WHERE company_id IS NULL"
+        cursor.execute(query)
+        return [(row['isin'], row['name']) for row in cursor.fetchall()]
+
+    def link_bonds_to_companies(self, links: List[Tuple[str, int]]) -> int:
+        """Привязывает облигации к компаниям: список пар (isin, company_id)."""
+        if not links:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE bonds_catalog SET company_id = ? WHERE isin = ?",
+                [(company_id, isin) for isin, company_id in links]
+            )
+        return len(links)
+
+    def get_companies_overview(self) -> List[Dict[str, Any]]:
+        """Компании с количеством облигаций — для отчётов и контроля группировки."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT c.id, c.name, c.entity_type, c.inn, COUNT(b.isin) AS bonds_count
+            FROM companies c
+            LEFT JOIN bonds_catalog b ON b.company_id = c.id
+            GROUP BY c.id
+            ORDER BY bonds_count DESC, c.name
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_catalog_company_coverage(self) -> Tuple[int, int]:
+        """Возвращает (всего облигаций, привязано к компаниям)."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS total, COUNT(company_id) AS linked FROM bonds_catalog")
+        row = cursor.fetchone()
+        return row['total'], row['linked']
 
     def get_bonds_without_list_level(self) -> List[sqlite3.Row]:
         """Возвращает облигации, у которых не установлен уровень листинга."""
