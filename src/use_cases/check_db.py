@@ -39,46 +39,13 @@ class CheckDbUseCase(UseCase):
     def execute(self, args: argparse.Namespace):
         self.logger.info("Executing CheckDbUseCase")
 
-        if args.query:
-            query = args.query
-            params = ()
-        else:
-            query = """
-            WITH LatestRisk AS (
-                SELECT
-                    isin,
-                    risk_level as risk_rating,
-                    risk_date as last_update,
-                    ROW_NUMBER() OVER(PARTITION BY isin ORDER BY risk_date DESC) as rn
-                FROM risk_history
-            ),
-            LatestListLevel AS (
-                SELECT
-                    isin,
-                    list_level,
-                    check_date,
-                    ROW_NUMBER() OVER(PARTITION BY isin ORDER BY check_date DESC) as rn
-                FROM listlevel_history
-            )
-            SELECT
-                lr.isin,
-                lr.risk_rating,
-                ll.list_level,
-                lr.last_update
-            FROM LatestRisk lr
-            LEFT JOIN LatestListLevel ll ON lr.isin = ll.isin AND ll.rn = 1
-            WHERE lr.rn = 1
-            ORDER BY lr.last_update DESC
-            LIMIT %s;
-            """
-            params = (args.limit,)
-
         try:
-            cursor = self.db.conn.cursor()
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            df = pd.DataFrame(rows, columns=[c.name for c in cursor.description])
-            cursor.close()
+            if args.query:
+                rows = self.db.execute_debug_query(args.query)
+            else:
+                rows = self.db.get_last_risk_listlevel(args.limit)
+
+            df = pd.DataFrame(rows)
 
             if df.empty:
                 self.logger.info("No data found in the database matching the criteria.")
@@ -87,7 +54,7 @@ class CheckDbUseCase(UseCase):
                 self.logger.info(f"Successfully fetched {len(df)} records.")
                 print("Query result:")
                 print(df.to_string())
-        
+
         except Exception as e:
             self.logger.error(f"An unexpected error occurred: {e}")
             print(f"An unexpected error occurred: {e}")

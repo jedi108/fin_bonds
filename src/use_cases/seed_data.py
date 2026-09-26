@@ -8,7 +8,7 @@ import argparse
 from typing import Dict, Any, TYPE_CHECKING
 
 from src.storage import PortfolioStorage
-from src.monitoring.data_fetcher import get_bond_details
+from src.monitoring.data_fetcher import BondData, get_bond_details
 from src.utils import load_isins_from_file
 from src.use_cases.base import UseCase
 
@@ -64,21 +64,17 @@ class SeedDataUseCase(UseCase):
         else:
             logger.warning("Токен Tinkoff не найден или используется заглушка. Будут использованы ISIN вместо имен.")
             # Создаем "заглушки" на основе ISIN
-            bonds_info = [{'isin': isin, 'name': isin, 'ticker': isin} for isin in isins_to_seed]
+            bonds_info = [BondData(isin=isin, ticker=isin, name=isin) for isin in isins_to_seed]
 
         if not bonds_info:
             logger.warning("Не удалось получить информацию ни по одной облигации. Завершение работы.")
             return
 
         # 2. Удаляем существующие исторические данные
-        logger.info("Очистка старых данных (рейтинги, уровни риска и информация об облигациях)...")
-        conn = self.db._get_connection()
-        conn.execute("DELETE FROM rating_history;")
-        conn.execute("DELETE FROM listlevel_history;")
-        conn.execute("DELETE FROM risk_history;")
-        conn.execute("DELETE FROM bonds;")
-        conn.commit()
-        
+        # (истории рейтингов, уровней листинга и риска; портфель и каталог не трогаем)
+        logger.info("Очистка старых данных (рейтинги, уровни риска и листинга)...")
+        self.db.clear_tables(['rating_history', 'listlevel_history', 'risk_history'])
+
         # 3. Генерируем и вставляем тестовые данные
         logger.info("Генерация и вставка тестовых данных...")
         for bond in bonds_info:
@@ -89,20 +85,20 @@ class SeedDataUseCase(UseCase):
 
             logger.info(f"  -> Для {bond_name} ({bond_ticker})")
             self.db.add_or_update_bond(isin, bond_ticker, bond_name)
-            
+
             start_rating_score = random.randint(4, 9)
             start_risk_level = random.randint(1, 2)
 
-            for i in range(180, 0, -15): 
+            for i in range(180, 0, -15):
                 current_date = date.today() - timedelta(days=i)
-                
+
                 # Генерация кредитного рейтинга
                 rating_change = random.choice([-1, 0, 0, 0, 1])
                 current_rating_score = max(0, min(10, start_rating_score + rating_change))
                 rating_value = next((k for k, v in rating_scale.items() if v == current_rating_score), "N/A")
                 self.db.add_rating(
-                    isin=isin, rating_date=current_date, agency="АКРА (тест)",
-                    value=rating_value, score=current_rating_score
+                    isin=isin, rating_date=current_date,
+                    rating_code=rating_value, rating_score=current_rating_score
                 )
 
                 # Генерация уровня риска, если включено в конфиге

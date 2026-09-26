@@ -4,9 +4,7 @@ Use case для расчета ежемесячной прибыли по обл
 import logging
 import argparse
 from typing import TYPE_CHECKING, List, Dict, Any
-from decimal import Decimal
 
-from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
 from src.storage import PortfolioStorage
 
@@ -48,320 +46,55 @@ class CalculateMonthlyProfitUseCase(UseCase):
 
     def _show_detailed_profit(self, args: argparse.Namespace):
         """Показывает детальную ежемесячную прибыль по каждой бумаге."""
-        query = """
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.coupon_quantity_per_year,
-                bc.risk_level,
-                pp.average_price,
-                pp.current_price,
-                pp.quantity,
-                pp.broker_name,
-                
-                -- Купонный доход за месяц
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
-                    2
-                ) as monthly_coupon_income,
-                
-                -- Прибыль от изменения цены
-                ROUND(
-                    (pp.current_price - pp.average_price) * pp.quantity, 
-                    2
-                ) as price_change_profit,
-                
-                -- Общая ежемесячная прибыль
-                ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                    ((pp.current_price - pp.average_price) * pp.quantity), 
-                    2
-                ) as total_monthly_profit,
-                
-                -- Процентная доходность (годовая)
-                ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price) * 100, 
-                    2
-                ) as annual_yield_percent
-                
-            FROM bonds_catalog bc
-            JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-                AND ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                    ((pp.current_price - pp.average_price) * pp.quantity) >= %s
-            ORDER BY total_monthly_profit DESC
-            LIMIT %s
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [args.min_profit, args.limit])
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_monthly_profit_candidates(
+            min_profit=args.min_profit, limit=args.limit
+        )
+
         if not rows:
             logger.info("ℹ️ Не найдено облигаций, соответствующих критериям.")
             return
-            
+
         logger.info(f"📈 Найдено {len(rows)} облигаций для анализа")
         self._print_detailed_table(rows)
 
     def _show_summary_profit(self, args: argparse.Namespace):
         """Показывает суммарную ежемесячную прибыль по всем бумагам."""
-        query = """
-            SELECT 
-                COUNT(DISTINCT bc.isin) as bonds_count,
-                SUM(pp.quantity) as total_quantity,
-                
-                -- Общий купонный доход за месяц
-                ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
-                    2
-                ) as total_monthly_coupon_income,
-                
-                -- Общая прибыль от изменения цены
-                ROUND(
-                    SUM((pp.current_price - pp.average_price) * pp.quantity), 
-                    2
-                ) as total_price_change_profit,
-                
-                -- Общая ежемесячная прибыль
-                ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                        ((pp.current_price - pp.average_price) * pp.quantity)), 
-                    2
-                ) as total_monthly_profit,
-                
-                -- Средняя годовая доходность портфеля
-                ROUND(
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100), 
-                    2
-                ) as avg_annual_yield_percent
-                
-            FROM bonds_catalog bc
-            JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query)
-            row = cursor.fetchone()
-            
+        row = self.db.get_portfolio_profit_summary()
+
         if not row:
             logger.info("ℹ️ Не найдено данных для анализа.")
             return
-            
+
         self._print_summary_table(row)
 
     def _show_profit_by_broker(self, args: argparse.Namespace):
         """Показывает ежемесячную прибыль по брокерам."""
-        query = """
-            SELECT 
-                pp.broker_name,
-                COUNT(DISTINCT bc.isin) as bonds_count,
-                
-                -- Купонный доход за месяц
-                ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
-                    2
-                ) as monthly_coupon_income,
-                
-                -- Прибыль от изменения цены
-                ROUND(
-                    SUM((pp.current_price - pp.average_price) * pp.quantity), 
-                    2
-                ) as price_change_profit,
-                
-                -- Общая ежемесячная прибыль
-                ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                        ((pp.current_price - pp.average_price) * pp.quantity)), 
-                    2
-                ) as total_monthly_profit
-                
-            FROM bonds_catalog bc
-            JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-            GROUP BY pp.broker_name
-            ORDER BY total_monthly_profit DESC
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_monthly_profit_by_broker()
+
         if not rows:
             logger.info("ℹ️ Не найдено данных по брокерам.")
             return
-            
+
         self._print_broker_table(rows)
 
     def _show_profit_by_risk(self, args: argparse.Namespace):
         """Показывает ежемесячную прибыль по уровням риска."""
-        query = """
-            SELECT 
-                bc.risk_level,
-                COUNT(DISTINCT bc.isin) as bonds_count,
-                
-                -- Купонный доход за месяц
-                ROUND(
-                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity), 
-                    2
-                ) as monthly_coupon_income,
-                
-                -- Прибыль от изменения цены
-                ROUND(
-                    SUM((pp.current_price - pp.average_price) * pp.quantity), 
-                    2
-                ) as price_change_profit,
-                
-                -- Общая ежемесячная прибыль
-                ROUND(
-                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                        ((pp.current_price - pp.average_price) * pp.quantity)), 
-                    2
-                ) as total_monthly_profit,
-                
-                -- Средняя годовая доходность
-                ROUND(
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100), 
-                    2
-                ) as avg_annual_yield_percent
-                
-            FROM bonds_catalog bc
-            JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-            GROUP BY bc.risk_level
-            ORDER BY bc.risk_level
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_monthly_profit_by_risk()
+
         if not rows:
             logger.info("ℹ️ Не найдено данных по уровням риска.")
             return
-            
+
         self._print_risk_table(rows)
 
     def _show_top_profitable_bonds(self, args: argparse.Namespace):
         """Показывает топ-10 облигаций по ежемесячной прибыли."""
-        query = """
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.risk_level,
-                pp.quantity,
-                pp.broker_name,
-                
-                -- Ежемесячная прибыль
-                ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
-                    ((pp.current_price - pp.average_price) * pp.quantity), 
-                    2
-                ) as monthly_profit,
-                
-                -- Купонная часть
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
-                    2
-                ) as coupon_part,
-                
-                -- Прибыль от цены
-                ROUND(
-                    (pp.current_price - pp.average_price) * pp.quantity, 
-                    2
-                ) as price_part
-                
-            FROM bonds_catalog bc
-            JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-            ORDER BY monthly_profit DESC
-            LIMIT ?
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [args.limit])
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_top_profitable_bonds(limit=args.limit)
+
         if not rows:
             logger.info("ℹ️ Не найдено облигаций для анализа.")
             return
-            
+
         self._print_top_table(rows)
 
     def _print_detailed_table(self, rows: List[Dict[str, Any]]):

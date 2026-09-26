@@ -8,7 +8,6 @@ from decimal import Decimal
 from datetime import date, datetime
 import math
 
-from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
 from src.storage import PortfolioStorage
 
@@ -101,101 +100,39 @@ class CalculateYtmUseCase(UseCase):
 
     def _get_bonds_for_buying(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
         """Получает облигации для покупки с расчетом YTM по текущей цене."""
-        query = """
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.coupon_quantity_per_year,
-                bc.maturity_date,
-                bc.risk_level,
-                bc.list_level,
-                bc.amortization_flag,
-                COALESCE(bc.market_price, bc.nominal) as current_price,
-                CASE 
-                    WHEN COALESCE(bc.market_price, bc.nominal) IS NOT NULL AND COALESCE(bc.market_price, bc.nominal) > 0 
-                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
-                    ELSE NULL 
-                END as real_yield_percent,
-                -- Общая сумма купонных выплат в месяц по всем бумагам в строке
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * 1, 
-                    2
-                ) as total_monthly_coupon_payment,
-                -- Тип купона (фиксированный/плавающий)
-                CASE 
-                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
-                    ELSE 'Фиксированный'
-                END as coupon_type
-            FROM bonds_catalog bc
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
+        bonds = self.db.get_bonds_yield_table(
+            mode='buy',
+            min_maturity=args.min_maturity,
+            max_maturity=args.max_maturity,
+            max_risk=args.max_risk,
+            no_amortization=args.no_amortization,
+            monthly_coupons=args.monthly_coupons,
+            fixed_coupon=args.fixed_coupon,
+            floating_coupon=args.floating_coupon,
+            limit=args.limit,
+        )
+
+        # Добавляем расчет YTM для каждой облигации
+        for bond in bonds:
+            try:
+                nominal = float(bond['nominal'])
+                coupon_rate = float(bond['coupon_rate_percent'])
+                market_price = float(bond['current_price'])
+                maturity_date = bond['maturity_date']
+                coupon_frequency = int(bond['coupon_quantity_per_year'])
+                amortization_flag = bool(bond['amortization_flag'])
+
+                ytm = self._calculate_ytm(
+                    nominal, coupon_rate, market_price,
+                    maturity_date, coupon_frequency, amortization_flag
                 )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE
-                AND bc.maturity_date >= %s
-                AND bc.maturity_date <= %s
-                AND bc.risk_level <= %s
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-                AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)
-        """
-        
-        params = [args.min_maturity, args.max_maturity, args.max_risk]
-        
-        if args.no_amortization:
-            query += " AND bc.amortization_flag IS NOT TRUE"
-            
-        if args.monthly_coupons:
-            query += " AND bc.coupon_quantity_per_year = 12"
-            
-        if args.fixed_coupon:
-            query += " AND bc.floating_coupon_flag IS NOT TRUE"
-            
-        if args.floating_coupon:
-            query += " AND bc.floating_coupon_flag IS TRUE"
-            
-        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
-        params.append(args.limit)
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            
-            bonds = [dict(row) for row in rows]
-            
-            # Добавляем расчет YTM для каждой облигации
-            for bond in bonds:
-                try:
-                    nominal = float(bond['nominal'])
-                    coupon_rate = float(bond['coupon_rate_percent'])
-                    market_price = float(bond['current_price'])
-                    maturity_date = bond['maturity_date']
-                    coupon_frequency = int(bond['coupon_quantity_per_year'])
-                    amortization_flag = bool(bond['amortization_flag'])
-                    
-                    ytm = self._calculate_ytm(
-                        nominal, coupon_rate, market_price, 
-                        maturity_date, coupon_frequency, amortization_flag
-                    )
-                    bond['ytm_percent'] = ytm
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка при расчете YTM для {bond.get('isin', 'Unknown')}: {e}")
-                    bond['ytm_percent'] = None
-            
-            return bonds
+                bond['ytm_percent'] = ytm
+
+            except Exception as e:
+                logger.error(f"Ошибка при расчете YTM для {bond.get('isin', 'Unknown')}: {e}")
+                bond['ytm_percent'] = None
+
+        return bonds
 
     def _calculate_ytm(self, nominal: float, coupon_rate: float, market_price: float, 
                       maturity_date: str, coupon_frequency: int, amortization_flag: bool) -> Optional[float]:
@@ -312,87 +249,17 @@ class CalculateYtmUseCase(UseCase):
 
     def _get_portfolio_bonds(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
         """Получает облигации из портфеля с расчетом YTM по средней цене покупки."""
-        query = """
-            SELECT 
-                pp.isin,
-                bc.ticker,
-                bc.name,
-                bc.nominal,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.coupon_quantity_per_year,
-                bc.maturity_date,
-                bc.risk_level,
-                bc.list_level,
-                bc.amortization_flag,
-                pp.average_price,
-                pp.current_price,
-                pp.quantity,
-                CASE 
-                    WHEN pp.average_price IS NOT NULL AND pp.average_price > 0 
-                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100
-                    ELSE NULL 
-                END as real_yield_percent,
-                CASE 
-                    WHEN pp.current_price IS NOT NULL AND pp.average_price IS NOT NULL 
-                    AND pp.average_price > 0
-                    THEN ((pp.current_price - pp.average_price) / pp.average_price) * 100
-                    ELSE NULL 
-                END as price_change_percent,
-                -- Общая сумма купонных выплат в месяц по всем бумагам в строке
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity, 
-                    2
-                ) as total_monthly_coupon_payment,
-                -- Тип купона (фиксированный/плавающий)
-                CASE 
-                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
-                    ELSE 'Фиксированный'
-                END as coupon_type
-            FROM portfolio_positions pp
-            JOIN bonds_catalog bc ON pp.isin = bc.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND pp.current_price > 0
-                AND pp.quantity > 0
-                AND bc.maturity_date >= %s
-                AND bc.maturity_date <= %s
-                AND bc.risk_level <= %s
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-        """
-        
-        params = [args.min_maturity, args.max_maturity, args.max_risk]
-        
-        if args.no_amortization:
-            query += " AND bc.amortization_flag IS NOT TRUE"
-            
-        if args.monthly_coupons:
-            query += " AND bc.coupon_quantity_per_year = 12"
-            
-        if args.fixed_coupon:
-            query += " AND bc.floating_coupon_flag IS NOT TRUE"
-            
-        if args.floating_coupon:
-            query += " AND bc.floating_coupon_flag IS TRUE"
-            
-        query += " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
-        params.append(args.limit)
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            
-            return [dict(row) for row in rows]
+        return self.db.get_bonds_yield_table(
+            mode='portfolio',
+            min_maturity=args.min_maturity,
+            max_maturity=args.max_maturity,
+            max_risk=args.max_risk,
+            no_amortization=args.no_amortization,
+            monthly_coupons=args.monthly_coupons,
+            fixed_coupon=args.fixed_coupon,
+            floating_coupon=args.floating_coupon,
+            limit=args.limit,
+        )
 
     def _print_bonds_table(self, bonds: List[Dict[str, Any]], title: str):
         """Выводит таблицу с облигациями в консоль."""

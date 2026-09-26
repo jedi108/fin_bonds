@@ -6,7 +6,6 @@ import argparse
 import logging
 from typing import Any, Dict, List
 
-from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
 from src.storage import PortfolioStorage
 
@@ -62,246 +61,45 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
 
     def _show_top_candidates(self, args: argparse.Namespace):
         """Показывает топ бумаг по доходности."""
-        query = """
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.risk_level,
-                bc.list_level,
-                bc.maturity_date,
-                
-                -- Купонный доход за месяц (на 1 облигацию)
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year, 
-                    2
-                ) as monthly_coupon_income_per_bond,
-                
-                -- Рыночная цена
-                bc.market_price,
-                
-                -- Годовая доходность к погашению (если есть рыночная цена)
-                CASE 
-                    WHEN bc.market_price IS NOT NULL AND bc.market_price > 0 THEN
-                        ROUND(
-                            ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100, 
-                            2
-                        )
-                    ELSE NULL 
-                END as annual_yield_percent,
-                
-                -- До погашения (месяцев)
-                ROUND(
-                    (bc.maturity_date - CURRENT_DATE) / 30.0, 
-                    1
-                ) as months_to_maturity,
-                
-                -- Тип облигации
-                CASE 
-                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Флоатер'
-                    WHEN bc.amortization_flag IS TRUE THEN 'Амортизируемая'
-                    ELSE 'Обычная'
-                END as bond_type
-                
-            FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND bc.is_trade_available IS TRUE
-                AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-                AND bc.market_price IS NOT NULL  -- Есть рыночная цена
-                AND bc.risk_level <= %s
-                AND (bc.maturity_date - CURRENT_DATE) > %s
-                AND CASE 
-                    WHEN %s THEN bc.floating_coupon_flag IS NOT TRUE  -- Только фиксированный купон
-                    WHEN %s THEN bc.floating_coupon_flag IS TRUE  -- Только флоатеры
-                    ELSE TRUE  -- Все типы
-                END
-                AND CASE 
-                    WHEN %s THEN bc.amortization_flag IS TRUE  -- Только амортизируемые
-                    WHEN %s THEN bc.amortization_flag IS NOT TRUE  -- Исключить амортизируемые
-                    ELSE TRUE  -- Все типы
-                END
-            ORDER BY annual_yield_percent DESC NULLS LAST
-            LIMIT %s
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [
-                args.min_risk, 
-                args.min_months * 30, 
-                args.fixed_coupon,  # Фильтр фиксированного купона
-                args.floating_coupon,  # Фильтр флоатеров
-                args.amortization,  # Фильтр амортизируемых
-                args.no_amortization,  # Исключить амортизируемые
-                args.limit
-            ])
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_top_buy_candidates(
+            max_risk=args.min_risk,
+            min_days_to_maturity=args.min_months * 30,
+            only_fixed_coupon=args.fixed_coupon,
+            only_floating_coupon=args.floating_coupon,
+            only_amortization=args.amortization,
+            exclude_amortization=args.no_amortization,
+            limit=args.limit,
+        )
+
         if not rows:
             logger.info("ℹ️ Не найдено подходящих бумаг для покупки.")
             return
-            
+
         logger.info(f"📈 Найдено {len(rows)} бумаг для анализа")
         self._print_top_candidates_table(rows)
 
     def _show_floater_candidates(self, args: argparse.Namespace):
         """Показывает флоатеры для покупки."""
-        query = """
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                mc_floater.metric_value::numeric as calculated_coupon_rate,
-                bc.coupon_spread,
-                bc.risk_level,
-                bc.maturity_date,
-                
-                -- Купонный доход за месяц (на 1 облигацию)
-                ROUND(
-                    (mc_floater.metric_value::numeric * bc.nominal / 100) / bc.coupon_quantity_per_year, 
-                    2
-                ) as monthly_coupon_income_per_bond,
-                
-                -- До погашения (месяцев)
-                ROUND(
-                    (bc.maturity_date - CURRENT_DATE) / 30.0, 
-                    1
-                ) as months_to_maturity
-                
-            FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
-                AND bc.floating_coupon_flag IS TRUE  -- Только флоатеры
-                AND mc_floater.metric_value::numeric IS NOT NULL  -- Есть рассчитанная ставка
-                AND bc.coupon_spread IS NOT NULL  -- Установлен спред
-            ORDER BY monthly_coupon_income_per_bond DESC
-            LIMIT %s
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [args.limit])
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_floater_buy_candidates(limit=args.limit)
+
         if not rows:
             logger.info("ℹ️ Не найдено флоатеров для покупки.")
             return
-            
+
         logger.info(f"📈 Найдено {len(rows)} флоатеров для анализа")
         self._print_floater_candidates_table(rows)
 
     def _show_portfolio_comparison(self, args: argparse.Namespace):
         """Показывает сравнение с текущим портфелем."""
-        query = """
-            WITH portfolio_avg_yield AS (
-                SELECT 
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
-                FROM bonds_catalog bc
-                JOIN portfolio_positions pp ON bc.isin = pp.isin
-                LEFT JOIN (
-                    SELECT isin, metric_value
-                    FROM monitoring_checks 
-                    WHERE metric_name = 'floater_coupon_calculator' 
-                    AND check_date = (
-                        SELECT MAX(check_date) 
-                        FROM monitoring_checks 
-                        WHERE isin = monitoring_checks.isin 
-                        AND metric_name = 'floater_coupon_calculator'
-                    )
-                ) mc_floater ON bc.isin = mc_floater.isin
-                WHERE bc.currency = 'rub'
-                    AND pp.current_price > 0
-                    AND pp.quantity > 0
-            )
-            SELECT 
-                bc.isin,
-                bc.ticker,
-                bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
-                bc.risk_level,
-                
-                -- Потенциальная годовая доходность (если купить по рыночной цене)
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100, 
-                    2
-                ) as potential_yield_percent,
-                
-                -- Сравнение с портфелем
-                ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) - pavg.avg_portfolio_yield, 
-                    2
-                ) as yield_vs_portfolio,
-                
-                -- Рекомендация
-                CASE 
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
-                    ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
-                END as recommendation
-                
-            FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
-            LEFT JOIN (
-                SELECT isin, metric_value
-                FROM monitoring_checks 
-                WHERE metric_name = 'floater_coupon_calculator' 
-                AND check_date = (
-                    SELECT MAX(check_date) 
-                    FROM monitoring_checks 
-                    WHERE isin = monitoring_checks.isin 
-                    AND metric_name = 'floater_coupon_calculator'
-                )
-            ) mc_floater ON bc.isin = mc_floater.isin
-            CROSS JOIN portfolio_avg_yield pavg
-            WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-                AND bc.market_price IS NOT NULL  -- Есть рыночная цена
-                AND bc.risk_level <= %s  -- Только низкорисковые
-            ORDER BY yield_vs_portfolio DESC
-            LIMIT %s
-        """
-        
-        with self.db.conn:
-            cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [args.min_risk, args.limit])
-            rows = cursor.fetchall()
-            
+        rows = self.db.get_portfolio_comparison_candidates(
+            max_risk=args.min_risk,
+            limit=args.limit,
+        )
+
         if not rows:
             logger.info("ℹ️ Не найдено бумаг для сравнения с портфелем.")
             return
-            
+
         logger.info(f"📈 Найдено {len(rows)} бумаг для сравнения")
         self._print_comparison_table(rows)
 

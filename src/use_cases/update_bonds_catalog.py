@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Use case для получения и обновления полного каталога облигаций.
-Сохраняет данные в базу SQLite и опционально выгружает в CSV.
+Сохраняет данные в базу PostgreSQL и опционально выгружает в CSV.
 """
 import logging
 import os
@@ -17,7 +17,6 @@ from tinkoff.invest.utils import quotation_to_decimal
 
 from src.use_cases.interfaces import IMoexApiClient
 from src.use_cases.interfaces import IPortfolioStorage
-from psycopg2.extras import RealDictCursor
 from src.use_cases.base import UseCase
 from src.use_cases.link_companies import link_bonds_to_companies
 from src.data_models import Bond as BondDTO
@@ -233,13 +232,7 @@ class UpdateBondsCatalogUseCase(UseCase):
         self.logger.info(f"Найдено {len(all_bonds_to_update)} облигаций для обновления цен.")
         
         # Получаем FIGI для облигаций
-        figi_by_isin = {}
-        cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT isin, figi FROM bonds_catalog WHERE isin = ANY(%s)", (all_bonds_to_update,))
-        
-        for row in cursor.fetchall():
-            if row['figi']:  # Пропускаем облигации без FIGI
-                figi_by_isin[row['isin']] = row['figi']
+        figi_by_isin = self.db.get_figis_by_isins(all_bonds_to_update)
         
         if not figi_by_isin:
             self.logger.warning("Не найдено FIGI для облигаций. Невозможно получить цены.")

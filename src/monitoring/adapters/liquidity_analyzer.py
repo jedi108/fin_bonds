@@ -263,7 +263,8 @@ class LiquidityAnalyzerAdapter(BaseAdapter):
     def _save_to_history(self, isin: str, base_volume: Decimal, 
                          market_exit_value: Decimal, loss_ratio: Decimal) -> None:
         """
-        Сохраняет данные о ликвидности в таблицу liquidity_history.
+        Сохраняет данные о ликвидности в таблицу liquidity_history
+        через метод хранилища add_liquidity_history.
         
         Args:
             isin: ISIN облигации
@@ -272,12 +273,15 @@ class LiquidityAnalyzerAdapter(BaseAdapter):
             loss_ratio: Коэффициент потерь в процентах
         """
         try:
-            cursor = self.db.conn.cursor()
-            cursor.execute("""
-                INSERT INTO liquidity_history (timestamp, isin, base_volume, market_exit_value, loss_ratio, depth_level, data_source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (datetime.now(), isin, base_volume, market_exit_value, loss_ratio, self.depth, 'TBank_API'))
-            self.db.conn.commit()
+            self.db.add_liquidity_history(
+                isin=isin,
+                timestamp=datetime.now(),
+                base_volume=base_volume,
+                market_exit_value=market_exit_value,
+                loss_ratio=loss_ratio,
+                depth_level=self.depth,
+                data_source='TBank_API'
+            )
             logger.debug(f"Сохранены данные о ликвидности для {isin}")
         except Exception as e:
             logger.error(f"Ошибка при сохранении истории ликвидности для {isin}: {e}", exc_info=True)

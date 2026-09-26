@@ -9,7 +9,6 @@ from datetime import datetime
 
 from .base import UseCase
 from ..tbank.api_client import TbankApiClient
-from psycopg2.extras import RealDictCursor
 
 logger = logging.getLogger(__name__)
 
@@ -64,34 +63,7 @@ class UpdateMarketPrices(UseCase):
     
     def _get_bonds_for_update(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
         """Получает список облигаций для обновления цен."""
-        if args.isin:
-            # Обновляем только конкретный ISIN
-            query = """
-                SELECT isin, ticker, name, figi
-                FROM bonds_catalog 
-                WHERE isin = %s
-                ORDER BY isin
-            """
-            with self.storage.conn:
-                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
-                cursor.execute(query, [args.isin])
-                return [dict(row) for row in cursor.fetchall()]
-        else:
-            # Обновляем все подходящие облигации
-            query = """
-                SELECT isin, ticker, name, figi
-                FROM bonds_catalog 
-                WHERE currency = 'rub'
-                    AND (is_trade_available IS TRUE OR is_trade_available IS NULL)
-                    AND perpetual_flag IS NOT TRUE
-                    AND maturity_date >= CURRENT_DATE
-                ORDER BY isin
-            """
-            
-            with self.storage.conn:
-                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
-                cursor.execute(query)
-                return [dict(row) for row in cursor.fetchall()]
+        return self.storage.get_bonds_for_market_price_update(isin=args.isin)
     
     def _update_bond_price(self, bond: Dict[str, Any]) -> bool:
         """Обновляет цену для одной облигации."""
@@ -124,14 +96,10 @@ class UpdateMarketPrices(UseCase):
         """Получает FIGI по ISIN через API."""
         try:
             # Ищем в локальной БД сначала
-            query = "SELECT figi FROM bonds_catalog WHERE isin = %s"
-            with self.storage.conn:
-                cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
-                cursor.execute(query, [isin])
-                result = cursor.fetchone()
-                if result and result['figi']:
-                    return result['figi']
-            
+            figi = self.storage.get_bond_figi(isin)
+            if figi:
+                return figi
+
             # Если нет в БД, запрашиваем через API
             instruments = self.tbank_client.find_instrument(isin)
             if instruments:
@@ -139,9 +107,9 @@ class UpdateMarketPrices(UseCase):
                 # Сохраняем FIGI в БД
                 self._save_figi(isin, figi)
                 return figi
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"❌ Ошибка при получении FIGI для {isin}: {e}")
             return None
@@ -160,17 +128,11 @@ class UpdateMarketPrices(UseCase):
     
     def _save_market_price(self, isin: str, price: float) -> None:
         """Сохраняет рыночную цену в БД."""
-        query = "UPDATE bonds_catalog SET market_price = %s WHERE isin = %s"
-        with self.storage.conn:
-            cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [price, isin])
-    
+        self.storage.save_market_price(isin, price)
+
     def _save_figi(self, isin: str, figi: str) -> None:
         """Сохраняет FIGI в БД."""
-        query = "UPDATE bonds_catalog SET figi = %s WHERE isin = %s"
-        with self.storage.conn:
-            cursor = self.storage.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(query, [figi, isin])
+        self.storage.save_bond_figi(isin, figi)
     
     def _update_bond_prices_batch(self, bonds: List[Dict[str, Any]]) -> int:
         """Обновляет цены для группы облигаций."""

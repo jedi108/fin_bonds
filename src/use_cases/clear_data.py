@@ -50,16 +50,5 @@ class ClearDataUseCase(UseCase):
         logger.info("Процесс очистки данных завершен.")
 
     def _clear_tables(self, tables: List[str]):
-        with self.db.conn as conn:
-            cursor = conn.cursor()
-            for table in tables:
-                try:
-                    # Наличие таблиц гарантируют миграции — проверка не нужна
-                    logger.debug(f"Очистка таблицы '{table}'...")
-                    cursor.execute(f"DELETE FROM {table};")
-                    logger.info(f"Таблица '{table}' успешно очищена.")
-                except Exception as e:
-                    logger.error(f"Ошибка при очистке таблицы '{table}': {e}")
-                    conn.rollback()
-                    raise
-            conn.commit()
+        """Делегирует очистку в storage: там белый список имён и одна транзакция."""
+        self.db.clear_tables(tables)

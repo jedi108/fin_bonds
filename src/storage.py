@@ -9,7 +9,7 @@
 """
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from collections import defaultdict
 
@@ -21,6 +21,23 @@ from src.migrations import discover_migrations, get_applied_versions
 from src.use_cases.interfaces import IPortfolioStorage
 
 logger = logging.getLogger(__name__)
+
+# Подзапрос «последняя рассчитанная ставка купона флоатера» — общий фрагмент
+# аналитических выборок. metric_value в monitoring_checks хранится строкой
+# (TEXT), поэтому в расчётах она приводится к numeric.
+_LATEST_FLOATER_RATE_JOIN = """
+            LEFT JOIN (
+                SELECT isin, metric_value
+                FROM monitoring_checks
+                WHERE metric_name = 'floater_coupon_calculator'
+                AND check_date = (
+                    SELECT MAX(check_date)
+                    FROM monitoring_checks
+                    WHERE isin = monitoring_checks.isin
+                    AND metric_name = 'floater_coupon_calculator'
+                )
+            ) mc_floater ON bc.isin = mc_floater.isin
+"""
 
 
 def _row_to_bond(row: Optional[Mapping[str, Any]]) -> Optional[Bond]:
@@ -149,6 +166,14 @@ class PortfolioStorage(IPortfolioStorage):
         cursor.execute("SELECT isin, name FROM bonds_catalog WHERE isin = ANY(%s)", (isins,))
         return {row['isin']: row['name'] for row in cursor.fetchall()}
 
+    def get_figis_by_isins(self, isins: List[str]) -> Dict[str, str]:
+        """Возвращает соответствие ISIN -> FIGI (только облигации с заданным FIGI)."""
+        if not isins:
+            return {}
+        cursor = self._cursor()
+        cursor.execute("SELECT isin, figi FROM bonds_catalog WHERE isin = ANY(%s)", (isins,))
+        return {row['isin']: row['figi'] for row in cursor.fetchall() if row['figi']}
+
     def get_rating_history_for_bonds(self, isins: List[str]) -> Dict[str, List[Tuple[date, int]]]:
         if not isins:
             return {}
@@ -196,6 +221,28 @@ class PortfolioStorage(IPortfolioStorage):
         for row in cursor.fetchall():
             history_data[row['isin']].append((row['check_date'], row['list_level']))
         return history_data
+
+    def add_rating(self, isin: str, rating_date: date, rating_code: str, rating_score: int):
+        """Добавляет запись в историю кредитных рейтингов.
+
+        rating_code — значение по шкале рейтингов из конфигурации
+        (rating_scale); колонка agency в схеме отсутствует.
+        """
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("""
+                INSERT INTO rating_history (isin, rating_date, rating_code, rating_score)
+                VALUES (%s, %s, %s, %s)
+            """, (isin, rating_date, rating_code, rating_score))
+
+    def add_risk_level(self, isin: str, risk_date: date, risk_level: int):
+        """Добавляет запись в историю уровней риска."""
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("""
+                INSERT INTO risk_history (isin, risk_date, risk_level)
+                VALUES (%s, %s, %s)
+            """, (isin, risk_date, risk_level))
 
     def is_catalog_empty(self) -> bool:
         cursor = self._cursor()
@@ -273,6 +320,23 @@ class PortfolioStorage(IPortfolioStorage):
                     updated_at = CURRENT_TIMESTAMP
             """, bonds_data)
         logger.info(f"Добавлено/обновлено {len(bonds_data)} облигаций в каталоге.")
+
+    def add_or_update_bond(self, isin: str, ticker: str, name: str):
+        """Вставляет или обновляет карточку облигации по минимальному набору полей.
+
+        Используется seed-data: остальные поля каталога заполняются
+        отдельными обогащениями (TBank/MOEX), здесь они не трогаются.
+        """
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("""
+                INSERT INTO bonds_catalog (isin, ticker, name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT(isin) DO UPDATE SET
+                    ticker = excluded.ticker,
+                    name = excluded.name,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (isin, ticker, name))
 
     # Методы для работы с компаниями-эмитентами (юрлицами)
 
@@ -533,6 +597,40 @@ class PortfolioStorage(IPortfolioStorage):
         except psycopg2.Error as e:
             logger.error(f"Ошибка при удалении позиций брокера {broker_name}: {e}")
 
+    # Таблицы, которые разрешено очищать командой clear-data и seed-data.
+    # Белый список для динамического DELETE: имя таблицы плейсхолдером
+    # передать нельзя (§8 п.3 корневого ТЗ).
+    CLEARABLE_TABLES = frozenset({
+        'portfolio_positions',
+        'monitoring_checks',
+        'rating_history',
+        'risk_history',
+        'listlevel_history',
+        'calculated_coupons',
+        'liquidity_history',
+    })
+
+    def clear_tables(self, tables: List[str]):
+        """Очищает перечисленные таблицы в одной транзакции.
+
+        Имена таблиц принимаются только из белого списка CLEARABLE_TABLES:
+        посторонние имена отклоняются до начала очистки (fail-fast, ничего
+        не удаляется). Наличие таблиц гарантируют миграции — отдельно не
+        проверяется (§4 корневого ТЗ).
+        """
+        unknown = [table for table in tables if table not in self.CLEARABLE_TABLES]
+        if unknown:
+            raise ValueError(
+                f"Таблицы {unknown} не входят в белый список очистки. "
+                f"Разрешены: {sorted(self.CLEARABLE_TABLES)}."
+            )
+        with self.conn:
+            cursor = self._cursor()
+            for table in tables:
+                logger.debug(f"Очистка таблицы '{table}'...")
+                cursor.execute(f"DELETE FROM {table}")  # имя из белого списка
+                logger.info(f"Таблица '{table}' успешно очищена.")
+
     def update_position_liquidity(self, isin: str, broker_name: str, liquidity_value: float):
         """Обновляет значение liquidity_loss_ratio для позиции в портфеле."""
         try:
@@ -693,6 +791,21 @@ class PortfolioStorage(IPortfolioStorage):
             except (ValueError, TypeError) as e:
                 logger.warning(f"Некорректные данные для isin {row['isin']} в liquidity_history: {e}")
         return history_data
+
+    def add_liquidity_history(self, isin: str, timestamp: datetime, base_volume: Decimal,
+                              market_exit_value: Decimal, loss_ratio: Decimal,
+                              depth_level: int, data_source: str):
+        """Сохраняет результат анализа стакана заявок в историю ликвидности.
+
+        Используется адаптером monitoring.adapters.liquidity_analyzer.
+        """
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("""
+                INSERT INTO liquidity_history
+                    (timestamp, isin, base_volume, market_exit_value, loss_ratio, depth_level, data_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (timestamp, isin, base_volume, market_exit_value, loss_ratio, depth_level, data_source))
 
     def get_portfolio_bonds_for_monitoring(self) -> List['PortfolioBond']:
         """
@@ -999,6 +1112,56 @@ class PortfolioStorage(IPortfolioStorage):
         """, (hours_threshold,))
         return [row['isin'] for row in cursor.fetchall()]
 
+    def get_bonds_for_market_price_update(self, isin: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Выборка облигаций для команды update-market-prices.
+
+        С заданным isin — только эта облигация; без него — все торговые
+        рублёвые облигации с незакрытой датой погашения (не вечные).
+        """
+        cursor = self._cursor()
+        if isin:
+            query = """
+                SELECT isin, ticker, name, figi
+                FROM bonds_catalog
+                WHERE isin = %s
+                ORDER BY isin
+            """
+            cursor.execute(query, (isin,))
+        else:
+            query = """
+                SELECT isin, ticker, name, figi
+                FROM bonds_catalog
+                WHERE currency = 'rub'
+                    AND (is_trade_available IS TRUE OR is_trade_available IS NULL)
+                    AND perpetual_flag IS NOT TRUE
+                    AND maturity_date >= CURRENT_DATE
+                ORDER BY isin
+            """
+            cursor.execute(query)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_bond_figi(self, isin: str) -> Optional[str]:
+        """Возвращает FIGI облигации из каталога или None, если он не задан."""
+        cursor = self._cursor()
+        cursor.execute("SELECT figi FROM bonds_catalog WHERE isin = %s", (isin,))
+        row = cursor.fetchone()
+        return row['figi'] if row else None
+
+    def save_market_price(self, isin: str, price: Decimal):
+        """Сохраняет рыночную цену одной облигации (источник и метка времени не меняются).
+
+        Для пакетной записи с source/updated_at есть update_market_prices().
+        """
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("UPDATE bonds_catalog SET market_price = %s WHERE isin = %s", (price, isin))
+
+    def save_bond_figi(self, isin: str, figi: str):
+        """Сохраняет FIGI облигации в каталоге."""
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute("UPDATE bonds_catalog SET figi = %s WHERE isin = %s", (figi, isin))
+
     def get_all_floaters(self) -> List[Bond]:
         """
         Возвращает список всех облигаций-флоатеров из портфеля.
@@ -1042,3 +1205,591 @@ class PortfolioStorage(IPortfolioStorage):
 
         except psycopg2.Error as e:
             logger.error(f"DB_WRITE: Ошибка БД при обновлении ставки для {isin}: {e}")
+
+    # --- Аналитические выборки для отчётов (перенос из use-case'ов, _00_04) ---
+    # SQL живёт только здесь; use-case'ы получают словари и занимаются
+    # форматированием и бизнес-расчётами (YTM, формат таблиц).
+
+    def get_top_buy_candidates(self, max_risk: int, min_days_to_maturity: int,
+                               only_fixed_coupon: bool, only_floating_coupon: bool,
+                               only_amortization: bool, exclude_amortization: bool,
+                               limit: int) -> List[Dict[str, Any]]:
+        """Кандидаты на покупку вне портфеля, топ по текущей доходности
+        (режим top команды analyze-buy-candidates).
+
+        min_days_to_maturity — минимальный срок до погашения в днях; месяцы
+        до погашения считаются делением на 30.0 (не на 30 — иначе целочисленное
+        деление PG меняет расчёт, §4 корневого ТЗ).
+        """
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.risk_level,
+                bc.list_level,
+                bc.maturity_date,
+
+                -- Купонный доход за месяц (на 1 облигацию)
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year,
+                    2
+                ) as monthly_coupon_income_per_bond,
+
+                -- Рыночная цена
+                bc.market_price,
+
+                -- Годовая доходность к погашению (если есть рыночная цена)
+                CASE
+                    WHEN bc.market_price IS NOT NULL AND bc.market_price > 0 THEN
+                        ROUND(
+                            ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100,
+                            2
+                        )
+                    ELSE NULL
+                END as annual_yield_percent,
+
+                -- До погашения (месяцев)
+                ROUND(
+                    (bc.maturity_date - CURRENT_DATE) / 30.0,
+                    1
+                ) as months_to_maturity,
+
+                -- Тип облигации
+                CASE
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Флоатер'
+                    WHEN bc.amortization_flag IS TRUE THEN 'Амортизируемая'
+                    ELSE 'Обычная'
+                END as bond_type
+
+            FROM bonds_catalog bc
+            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND bc.is_trade_available IS TRUE
+                AND bc.perpetual_flag IS NOT TRUE
+                AND pp.isin IS NULL  -- Нет в портфеле
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
+                AND bc.market_price IS NOT NULL  -- Есть рыночная цена
+                AND bc.risk_level <= %s
+                AND (bc.maturity_date - CURRENT_DATE) > %s
+                AND CASE
+                    WHEN %s THEN bc.floating_coupon_flag IS NOT TRUE  -- Только фиксированный купон
+                    WHEN %s THEN bc.floating_coupon_flag IS TRUE  -- Только флоатеры
+                    ELSE TRUE  -- Все типы
+                END
+                AND CASE
+                    WHEN %s THEN bc.amortization_flag IS TRUE  -- Только амортизируемые
+                    WHEN %s THEN bc.amortization_flag IS NOT TRUE  -- Исключить амортизируемые
+                    ELSE TRUE  -- Все типы
+                END
+            ORDER BY annual_yield_percent DESC NULLS LAST
+            LIMIT %s
+        """
+        cursor.execute(query, [
+            max_risk,
+            min_days_to_maturity,
+            only_fixed_coupon,
+            only_floating_coupon,
+            only_amortization,
+            exclude_amortization,
+            limit,
+        ])
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_floater_buy_candidates(self, limit: int) -> List[Dict[str, Any]]:
+        """Флоатеры вне портфеля с рассчитанной ставкой и установленным спредом
+        (режим floaters команды analyze-buy-candidates)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                mc_floater.metric_value::numeric as calculated_coupon_rate,
+                bc.coupon_spread,
+                bc.risk_level,
+                bc.maturity_date,
+
+                -- Купонный доход за месяц (на 1 облигацию)
+                ROUND(
+                    (mc_floater.metric_value::numeric * bc.nominal / 100) / bc.coupon_quantity_per_year,
+                    2
+                ) as monthly_coupon_income_per_bond,
+
+                -- До погашения (месяцев)
+                ROUND(
+                    (bc.maturity_date - CURRENT_DATE) / 30.0,
+                    1
+                ) as months_to_maturity
+
+            FROM bonds_catalog bc
+            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
+                AND pp.isin IS NULL  -- Нет в портфеле
+                AND bc.floating_coupon_flag IS TRUE  -- Только флоатеры
+                AND mc_floater.metric_value::numeric IS NOT NULL  -- Есть рассчитанная ставка
+                AND bc.coupon_spread IS NOT NULL  -- Установлен спред
+            ORDER BY monthly_coupon_income_per_bond DESC
+            LIMIT %s
+        """
+        cursor.execute(query, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_portfolio_comparison_candidates(self, max_risk: int, limit: int) -> List[Dict[str, Any]]:
+        """Бумаги вне портфеля с потенциальной доходностью против средней
+        доходности портфеля (режим compare команды analyze-buy-candidates)."""
+        cursor = self._cursor()
+        query = f"""
+            WITH portfolio_avg_yield AS (
+                SELECT
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
+                FROM bonds_catalog bc
+                JOIN portfolio_positions pp ON bc.isin = pp.isin
+                {_LATEST_FLOATER_RATE_JOIN}
+                WHERE bc.currency = 'rub'
+                    AND pp.current_price > 0
+                    AND pp.quantity > 0
+            )
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.risk_level,
+
+                -- Потенциальная годовая доходность (если купить по рыночной цене)
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100,
+                    2
+                ) as potential_yield_percent,
+
+                -- Сравнение с портфелем
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) - pavg.avg_portfolio_yield,
+                    2
+                ) as yield_vs_portfolio,
+
+                -- Рекомендация
+                CASE
+                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
+                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
+                    ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
+                END as recommendation
+
+            FROM bonds_catalog bc
+            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            CROSS JOIN portfolio_avg_yield pavg
+            WHERE bc.currency = 'rub'
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
+                AND pp.isin IS NULL  -- Нет в портфеле
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
+                AND bc.market_price IS NOT NULL  -- Есть рыночная цена
+                AND bc.risk_level <= %s  -- Только низкорисковые
+            ORDER BY yield_vs_portfolio DESC
+            LIMIT %s
+        """
+        cursor.execute(query, (max_risk, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_monthly_profit_candidates(self, min_profit: float, limit: int) -> List[Dict[str, Any]]:
+        """Позиции портфеля с ежемесячной прибылью не ниже min_profit
+        (режим detailed команды calculate-monthly-profit)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.risk_level,
+                pp.average_price,
+                pp.current_price,
+                pp.quantity,
+                pp.broker_name,
+
+                -- Купонный доход за месяц
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity,
+                    2
+                ) as monthly_coupon_income,
+
+                -- Прибыль от изменения цены
+                ROUND(
+                    (pp.current_price - pp.average_price) * pp.quantity,
+                    2
+                ) as price_change_profit,
+
+                -- Общая ежемесячная прибыль
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((pp.current_price - pp.average_price) * pp.quantity),
+                    2
+                ) as total_monthly_profit,
+
+                -- Процентная доходность (годовая)
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price) * 100,
+                    2
+                ) as annual_yield_percent
+
+            FROM bonds_catalog bc
+            JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+                AND ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((pp.current_price - pp.average_price) * pp.quantity) >= %s
+            ORDER BY total_monthly_profit DESC
+            LIMIT %s
+        """
+        cursor.execute(query, (min_profit, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_portfolio_profit_summary(self) -> Dict[str, Any]:
+        """Сводная ежемесячная прибыль портфеля (режим summary команды
+        calculate-monthly-profit)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                COUNT(DISTINCT bc.isin) as bonds_count,
+                SUM(pp.quantity) as total_quantity,
+
+                -- Общий купонный доход за месяц
+                ROUND(
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity),
+                    2
+                ) as total_monthly_coupon_income,
+
+                -- Общая прибыль от изменения цены
+                ROUND(
+                    SUM((pp.current_price - pp.average_price) * pp.quantity),
+                    2
+                ) as total_price_change_profit,
+
+                -- Общая ежемесячная прибыль
+                ROUND(
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                        ((pp.current_price - pp.average_price) * pp.quantity)),
+                    2
+                ) as total_monthly_profit,
+
+                -- Средняя годовая доходность портфеля
+                ROUND(
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100),
+                    2
+                ) as avg_annual_yield_percent
+
+            FROM bonds_catalog bc
+            JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+        """
+        cursor.execute(query)
+        return dict(cursor.fetchone())
+
+    def get_monthly_profit_by_broker(self) -> List[Dict[str, Any]]:
+        """Ежемесячная прибыль в разрезе брокеров (режим by-broker команды
+        calculate-monthly-profit)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                pp.broker_name,
+                COUNT(DISTINCT bc.isin) as bonds_count,
+
+                -- Купонный доход за месяц
+                ROUND(
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity),
+                    2
+                ) as monthly_coupon_income,
+
+                -- Прибыль от изменения цены
+                ROUND(
+                    SUM((pp.current_price - pp.average_price) * pp.quantity),
+                    2
+                ) as price_change_profit,
+
+                -- Общая ежемесячная прибыль
+                ROUND(
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                        ((pp.current_price - pp.average_price) * pp.quantity)),
+                    2
+                ) as total_monthly_profit
+
+            FROM bonds_catalog bc
+            JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+            GROUP BY pp.broker_name
+            ORDER BY total_monthly_profit DESC
+        """
+        cursor.execute(query)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_monthly_profit_by_risk(self) -> List[Dict[str, Any]]:
+        """Ежемесячная прибыль в разрезе уровней риска (режим by-risk команды
+        calculate-monthly-profit)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                bc.risk_level,
+                COUNT(DISTINCT bc.isin) as bonds_count,
+
+                -- Купонный доход за месяц
+                ROUND(
+                    SUM((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity),
+                    2
+                ) as monthly_coupon_income,
+
+                -- Прибыль от изменения цены
+                ROUND(
+                    SUM((pp.current_price - pp.average_price) * pp.quantity),
+                    2
+                ) as price_change_profit,
+
+                -- Общая ежемесячная прибыль
+                ROUND(
+                    SUM(((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                        ((pp.current_price - pp.average_price) * pp.quantity)),
+                    2
+                ) as total_monthly_profit,
+
+                -- Средняя годовая доходность
+                ROUND(
+                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100),
+                    2
+                ) as avg_annual_yield_percent
+
+            FROM bonds_catalog bc
+            JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+            GROUP BY bc.risk_level
+            ORDER BY bc.risk_level
+        """
+        cursor.execute(query)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_top_profitable_bonds(self, limit: int) -> List[Dict[str, Any]]:
+        """Топ позиций портфеля по ежемесячной прибыли (режим top-10 команды
+        calculate-monthly-profit)."""
+        cursor = self._cursor()
+        query = f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.risk_level,
+                pp.quantity,
+                pp.broker_name,
+
+                -- Ежемесячная прибыль
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity) +
+                    ((pp.current_price - pp.average_price) * pp.quantity),
+                    2
+                ) as monthly_profit,
+
+                -- Купонная часть
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity,
+                    2
+                ) as coupon_part,
+
+                -- Прибыль от цены
+                ROUND(
+                    (pp.current_price - pp.average_price) * pp.quantity,
+                    2
+                ) as price_part
+
+            FROM bonds_catalog bc
+            JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+            ORDER BY monthly_profit DESC
+            LIMIT %s
+        """
+        cursor.execute(query, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_bonds_yield_table(self, mode: str, min_maturity: str, max_maturity: str,
+                              max_risk: int, no_amortization: bool = False,
+                              monthly_coupons: bool = False, fixed_coupon: bool = False,
+                              floating_coupon: bool = False, limit: int = 50) -> List[Dict[str, Any]]:
+        """Строки таблицы доходностей для команды calculate-ytm.
+
+        mode='buy' — кандидаты на покупку вне портфеля (цена рыночная),
+        mode='portfolio' — позиции портфеля (цена средняя покупки). Сам расчёт
+        YTM остаётся в use-case'е. Динамические фильтры — статические строки;
+        даты, уровень риска и лимит передаются параметрами.
+        """
+        if mode not in ('buy', 'portfolio'):
+            raise ValueError(f"Неизвестный режим таблицы доходностей: {mode!r}")
+
+        if mode == 'buy':
+            body = f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.maturity_date,
+                bc.risk_level,
+                bc.list_level,
+                bc.amortization_flag,
+                COALESCE(bc.market_price, bc.nominal) as current_price,
+                CASE
+                    WHEN COALESCE(bc.market_price, bc.nominal) IS NOT NULL AND COALESCE(bc.market_price, bc.nominal) > 0
+                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
+                    ELSE NULL
+                END as real_yield_percent,
+                -- Общая сумма купонных выплат в месяц по всем бумагам в строке
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * 1,
+                    2
+                ) as total_monthly_coupon_payment,
+                -- Тип купона (фиксированный/плавающий)
+                CASE
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
+                    ELSE 'Фиксированный'
+                END as coupon_type
+            FROM bonds_catalog bc
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
+                AND bc.perpetual_flag IS NOT TRUE
+                AND bc.maturity_date >= %s
+                AND bc.maturity_date <= %s
+                AND bc.risk_level <= %s
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
+                AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)
+        """
+        else:
+            body = f"""
+            SELECT
+                pp.isin,
+                bc.ticker,
+                bc.name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.maturity_date,
+                bc.risk_level,
+                bc.list_level,
+                bc.amortization_flag,
+                pp.average_price,
+                pp.current_price,
+                pp.quantity,
+                CASE
+                    WHEN pp.average_price IS NOT NULL AND pp.average_price > 0
+                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100
+                    ELSE NULL
+                END as real_yield_percent,
+                CASE
+                    WHEN pp.current_price IS NOT NULL AND pp.average_price IS NOT NULL
+                    AND pp.average_price > 0
+                    THEN ((pp.current_price - pp.average_price) / pp.average_price) * 100
+                    ELSE NULL
+                END as price_change_percent,
+                -- Общая сумма купонных выплат в месяц по всем бумагам в строке
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * pp.quantity,
+                    2
+                ) as total_monthly_coupon_payment,
+                -- Тип купона (фиксированный/плавающий)
+                CASE
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
+                    ELSE 'Фиксированный'
+                END as coupon_type
+            FROM portfolio_positions pp
+            JOIN bonds_catalog bc ON pp.isin = bc.isin
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.currency = 'rub'
+                AND pp.current_price > 0
+                AND pp.quantity > 0
+                AND bc.maturity_date >= %s
+                AND bc.maturity_date <= %s
+                AND bc.risk_level <= %s
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
+        """
+
+        filters = ""
+        if no_amortization:
+            filters += " AND bc.amortization_flag IS NOT TRUE"
+        if monthly_coupons:
+            filters += " AND bc.coupon_quantity_per_year = 12"
+        if fixed_coupon:
+            filters += " AND bc.floating_coupon_flag IS NOT TRUE"
+        if floating_coupon:
+            filters += " AND bc.floating_coupon_flag IS TRUE"
+
+        query = body + filters + " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
+        params = [min_maturity, max_maturity, max_risk, limit]
+
+        cursor = self._cursor()
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_last_risk_listlevel(self, limit: int) -> List[Dict[str, Any]]:
+        """Последние уровни риска и листинга по каждому ISIN (команда check-db)."""
+        cursor = self._cursor()
+        cursor.execute("""
+            WITH LatestRisk AS (
+                SELECT
+                    isin,
+                    risk_level as risk_rating,
+                    risk_date as last_update,
+                    ROW_NUMBER() OVER(PARTITION BY isin ORDER BY risk_date DESC) as rn
+                FROM risk_history
+            ),
+            LatestListLevel AS (
+                SELECT
+                    isin,
+                    list_level,
+                    check_date,
+                    ROW_NUMBER() OVER(PARTITION BY isin ORDER BY check_date DESC) as rn
+                FROM listlevel_history
+            )
+            SELECT
+                lr.isin,
+                lr.risk_rating,
+                ll.list_level,
+                lr.last_update
+            FROM LatestRisk lr
+            LEFT JOIN LatestListLevel ll ON lr.isin = ll.isin AND ll.rn = 1
+            WHERE lr.rn = 1
+            ORDER BY lr.last_update DESC
+            LIMIT %s;
+        """, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def execute_debug_query(self, sql: str) -> List[Dict[str, Any]]:
+        """Выполняет произвольный SQL-запрос (ветка --query команды check-db).
+
+        Только для ручной диагностики из CLI: обходит семантику DTO,
+        поэтому вне check-db не используется.
+        """
+        cursor = self._cursor()
+        cursor.execute(sql)
+        return [dict(row) for row in cursor.fetchall()]
