@@ -2,11 +2,9 @@ import argparse
 import logging
 import os
 import sys
-from pathlib import Path
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING
 
-import psycopg2
-
+from src.migrations import apply_migrations
 from src.use_cases.base import UseCase
 
 if TYPE_CHECKING:
@@ -14,17 +12,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Каталог с SQL-миграциями PostgreSQL: <project_root>/migrations/postgres/
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / 'migrations' / 'postgres'
-
 
 class MigrateDbUseCase(UseCase):
     """
     Сценарий: Применение миграций схемы PostgreSQL.
 
-    Читает SQL-файлы из migrations/postgres/ (имя вида NNN_description.sql,
-    применяются по возрастанию номера NNN), отслеживает примененные версии
-    в таблице schema_migrations. Повторный запуск идемпотентен.
+    CLI-обёртка над src/migrations.py: резолвит DSN (флаг --dsn или
+    POSTGRES_DSN из .env) и передаёт его в apply_migrations(), где живёт
+    вся логика discovery/применения (advisory lock, таблица учёта версий,
+    транзакция на файл). Повторный запуск идемпотентен.
     """
 
     def __init__(self, factory: 'UseCaseFactory'):
@@ -63,98 +59,16 @@ class MigrateDbUseCase(UseCase):
             )
         return dsn
 
-    @staticmethod
-    def _discover_migrations() -> List[Tuple[int, Path]]:
-        """Возвращает список (version, path) SQL-миграций, отсортированный по version."""
-        if not MIGRATIONS_DIR.is_dir():
-            raise FileNotFoundError(f"Каталог миграций не найден: {MIGRATIONS_DIR}")
-
-        migrations: List[Tuple[int, Path]] = []
-        for path in sorted(MIGRATIONS_DIR.glob('*.sql')):
-            version_str = path.name.split('_', 1)[0]
-            if not version_str.isdigit():
-                raise ValueError(
-                    f"Некорректное имя файла миграции: {path.name}. "
-                    "Ожидается формат NNN_description.sql."
-                )
-            migrations.append((int(version_str), path))
-
-        versions = [version for version, _ in migrations]
-        if len(set(versions)) != len(versions):
-            raise ValueError("Обнаружены дублирующиеся номера версий миграций.")
-
-        if not migrations:
-            logger.warning(f"В каталоге {MIGRATIONS_DIR} нет SQL-файлов миграций.")
-
-        return sorted(migrations, key=lambda item: item[0])
-
-    def _report(self, migrations: List[Tuple[int, Path]], applied: set, pending: List[Tuple[int, Path]]):
-        print(f"Миграции: найдено {len(migrations)}, применено {len(applied)}, ожидают {len(pending)}")
-        for version, path in pending:
-            print(f"  [ ] {version:03d} {path.name}")
-        if not pending:
-            print("Схема актуальна — нечего применять.")
-
     def execute(self, args: argparse.Namespace):
         logger.info("Executing MigrateDbUseCase")
 
-        conn = None
         try:
             dsn = self._resolve_dsn(args)
-            migrations = self._discover_migrations()
-            conn = psycopg2.connect(dsn)
-            # Каждая миграция выполняется в своей транзакции;
-            # advisory lock защищает от параллельного запуска ранера.
-            conn.autocommit = True
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT pg_advisory_lock(hashtext('fin_bonds_migrations'))")
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS schema_migrations (
-                        version INTEGER PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                    )
-                """)
-                cursor.execute("SELECT version FROM schema_migrations")
-                applied = {row[0] for row in cursor.fetchall()}
-                pending = [item for item in migrations if item[0] not in applied]
-
-                self._report(migrations, applied, pending)
-
-                if args.status or args.dry_run:
-                    if args.status:
-                        print("\nПримененные миграции:")
-                        for version, path in migrations:
-                            marker = 'x' if version in applied else ' '
-                            print(f"  [{marker}] {version:03d} {path.name}")
-                    return
-
-                for version, path in pending:
-                    sql = path.read_text(encoding='utf-8')
-                    logger.info(f"Применение миграции {version:03d} ({path.name})...")
-                    cursor.execute("BEGIN")
-                    try:
-                        cursor.execute(sql)
-                        cursor.execute(
-                            "INSERT INTO schema_migrations (version, name) VALUES (%s, %s)",
-                            (version, path.name)
-                        )
-                        cursor.execute("COMMIT")
-                        print(f"  [x] {version:03d} {path.name} — применена")
-                    except Exception:
-                        cursor.execute("ROLLBACK")
-                        logger.error(f"Миграция {version:03d} ({path.name}) провалилась, транзакция отменена.")
-                        raise
-
-                if pending:
-                    logger.info(f"Успешно применено миграций: {len(pending)}.")
+            apply_migrations(dsn, dry_run=args.dry_run, status=args.status)
         except Exception as e:
             # main.py глотает исключения команд, поэтому выходим с ненулевым кодом:
             # миграция, молча считающаяся успешной в cron/CI, опаснее ошибки.
             logger.error(f"Ошибка применения миграций: {e}", exc_info=True)
             sys.exit(1)
-        finally:
-            if conn is not None:
-                conn.close()
 
         logger.info("MigrateDbUseCase finished")
