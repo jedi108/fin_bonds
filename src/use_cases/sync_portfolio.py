@@ -237,7 +237,7 @@ class PortfolioPosition(DataModelPortfolioPosition):
             average_price=quotation_to_decimal(position.average_position_price),
             current_price=quotation_to_decimal(position.current_price),
             currency=instrument_info.currency,
-            yield_to_maturity=quotation_to_decimal(position.expected_yield),
+            yield_to_maturity=None,  # expected_yield - это ₽ брокера, а не YTM%
             broker_name="TBank",
             instrument_type=instrument_info.instrument_type
         ) 

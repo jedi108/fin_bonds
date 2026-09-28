@@ -88,7 +88,7 @@ class TbankApiClient(ITbankApiClient):
                         quantity=self._convert_money_value(pos.quantity),
                         average_price=self._convert_money_value(pos.average_position_price),
                         current_price=self._convert_money_value(pos.current_price),
-                        yield_to_maturity=self._convert_money_value(pos.expected_yield),
+                        yield_to_maturity=None,  # expected_yield - это ₽ брокера, а не YTM%
                         broker_name="TBank",
                         portfolio_percent=Decimal(0),
                         current_value=Decimal(0),

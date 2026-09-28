@@ -30,17 +30,29 @@ python main.py update-bonds --update-prices >> "$LOG_FILE" 2>&1
 echo "--- 2. Calculating spread for new floaters ---" >> "$LOG_FILE"
 python main.py calculate-spread >> "$LOG_FILE" 2>&1
 
-# 3. Обновляем рейтинги и другие отслеживаемые параметры. Логируем результат.
-echo "--- 3. Updating ratings ---" >> "$LOG_FILE"
+# 3. Привязываем новые облигации к справочнику компаний
+echo "--- 3. Linking bonds to companies ---" >> "$LOG_FILE"
+python main.py link-companies >> "$LOG_FILE" 2>&1
+
+# 4. Обновляем рейтинги и другие отслеживаемые параметры. Логируем результат.
+echo "--- 4. Updating ratings ---" >> "$LOG_FILE"
 python main.py update-ratings >> "$LOG_FILE" 2>&1
 
-# 4. Проверяем приближающиеся оферты для флоатеров. Логируем результат.
-echo "--- 4. Checking for upcoming floater offers ---" >> "$LOG_FILE"
+# 5. Синхронизируем позиции портфеля
+echo "--- 5. Syncing portfolio positions ---" >> "$LOG_FILE"
+python main.py sync-portfolio >> "$LOG_FILE" 2>&1
+
+# 6. Обновляем показатели ликвидности позиций портфеля
+echo "--- 6. Updating portfolio liquidity ---" >> "$LOG_FILE"
+python main.py update-liquidity --all >> "$LOG_FILE" 2>&1
+
+# 7. Проверяем приближающиеся оферты для флоатеров. Логируем результат.
+echo "--- 7. Checking for upcoming floater offers ---" >> "$LOG_FILE"
 python main.py check-offers >> "$LOG_FILE" 2>&1
 
-# 5. Проверяем изменения и отправляем уведомления, если они есть. Логируем результат.
-# echo "--- 5. Checking for changes ---" >> "$LOG_FILE"
-# python main.py check_changes >> "$LOG_FILE" 2>&1
+# 8. Проверяем изменения и записываем в историю рисков. Логируем результат.
+echo "--- 8. Checking for changes ---" >> "$LOG_FILE"
+python main.py check-changes >> "$LOG_FILE" 2>&1
 
 echo "Update job finished at $(date)" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE" 
