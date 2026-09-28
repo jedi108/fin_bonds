@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 
 from src.use_cases.factory import UseCaseFactory
 from src.utils import setup_logging
@@ -50,8 +51,11 @@ def main():
         
         logger.info(f"Команда '{args.command}' успешно выполнена.")
 
+    except SystemExit:
+        raise
     except Exception as e:
         logger.error(f"Произошла ошибка при выполнении команды: {e}", exc_info=True)
+        sys.exit(1)
     finally:
         factory.close_db()
 

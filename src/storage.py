@@ -9,7 +9,7 @@
 """
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from collections import defaultdict
 
@@ -1115,6 +1115,44 @@ class PortfolioStorage:
             AND is_trade_available IS TRUE
         """, (hours_threshold,))
         return [row['isin'] for row in cursor.fetchall()]
+
+    def get_db_freshness(self, stale_threshold_hours: int = 24) -> Dict[str, Any]:
+        """
+        Возвращает метки свежести данных из каталога, позиций и проверок мониторинга.
+        Выполняется одним параметризованным SELECT-запросом.
+        """
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_threshold_hours)
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS bonds_catalog_rows,
+                MAX(updated_at) AS bonds_catalog_max_updated_at,
+                COUNT(*) FILTER (WHERE market_price IS NOT NULL) AS bonds_with_market_price,
+                MAX(market_price_updated_at) AS market_price_max_updated_at,
+                COUNT(*) FILTER (
+                    WHERE market_price IS NOT NULL
+                    AND (market_price_updated_at IS NULL OR market_price_updated_at < %s)
+                    AND is_trade_available IS TRUE
+                ) AS bonds_with_stale_market_price,
+                (SELECT COUNT(*) FROM portfolio_positions) AS portfolio_positions_rows,
+                (SELECT MAX(updated_at) FROM portfolio_positions) AS portfolio_max_updated_at,
+                (SELECT MAX(check_date) FROM monitoring_checks) AS monitoring_checks_max_check_date
+            FROM bonds_catalog
+        """, (stale_cutoff,))
+        row = cursor.fetchone()
+        if not row:
+            return {
+                'bonds_catalog_rows': 0,
+                'bonds_catalog_max_updated_at': None,
+                'bonds_with_market_price': 0,
+                'market_price_max_updated_at': None,
+                'bonds_with_stale_market_price': 0,
+                'portfolio_positions_rows': 0,
+                'portfolio_max_updated_at': None,
+                'monitoring_checks_max_check_date': None,
+            }
+        return dict(row)
+
 
     def get_bonds_for_market_price_update(self, isin: Optional[str] = None) -> List[Dict[str, Any]]:
         """Выборка облигаций для команды update-market-prices.
