@@ -1252,10 +1252,12 @@ class PortfolioStorage:
     # SQL живёт только здесь; use-case'ы получают словари и занимаются
     # форматированием и бизнес-расчётами (YTM, формат таблиц).
 
-    def get_top_buy_candidates(self, max_risk: int, min_days_to_maturity: int,
-                               only_fixed_coupon: bool, only_floating_coupon: bool,
-                               only_amortization: bool, exclude_amortization: bool,
-                               limit: int) -> List[Dict[str, Any]]:
+    def get_top_buy_candidates(self, max_risk: int = 1, min_days_to_maturity: int = 30,
+                               only_fixed_coupon: bool = False, only_floating_coupon: bool = False,
+                               only_amortization: bool = False, exclude_amortization: bool = False,
+                               limit: int = 20,
+                               coupon_freq: Optional[int] = None,
+                               entity_type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Кандидаты на покупку вне портфеля, топ по текущей доходности
         (режим top команды analyze-buy-candidates).
 
@@ -1264,34 +1266,97 @@ class PortfolioStorage:
         деление PG меняет расчёт, §4 корневого ТЗ).
         """
         cursor = self._cursor()
+
+        conditions = [
+            "bc.currency = 'rub'",
+            "bc.is_trade_available IS TRUE",
+            "bc.perpetual_flag IS NOT TRUE",
+            "pp.isin IS NULL",  # Нет в портфеле
+            "bc.company_id IS NOT NULL",
+            "bc.is_for_qualified_investors IS NOT TRUE",
+            "bc.market_price IS NOT NULL",
+            "bc.market_price > 0",
+            "bc.market_price_updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'",
+            "bc.issue_size * bc.nominal >= 500000000",
+            "COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL",
+            "bc.risk_level <= %s",
+            "(bc.maturity_date - CURRENT_DATE) > %s",
+        ]
+        params: List[Any] = [max_risk, min_days_to_maturity]
+
+        if only_fixed_coupon:
+            conditions.append("bc.floating_coupon_flag IS NOT TRUE")
+        elif only_floating_coupon:
+            conditions.append("bc.floating_coupon_flag IS TRUE")
+
+        if only_amortization:
+            conditions.append("bc.amortization_flag IS TRUE")
+        elif exclude_amortization:
+            conditions.append("bc.amortization_flag IS NOT TRUE")
+
+        if coupon_freq is not None and coupon_freq > 0:
+            conditions.append("bc.coupon_quantity_per_year = %s")
+            params.append(coupon_freq)
+
+        if entity_type_filter in ('only_ofz', 'ofz_only', 'sovereign'):
+            conditions.append("co.entity_type = 'sovereign'")
+        elif entity_type_filter in ('exclude_ofz', 'no_ofz', 'exclude_sovereign'):
+            conditions.append("co.entity_type IS NOT NULL AND co.entity_type != 'sovereign'")
+
+        where_clause = " AND ".join(conditions)
+
         query = f"""
             SELECT
                 bc.isin,
                 bc.ticker,
                 bc.name,
+                bc.company_id,
+                co.name as company,
+                co.entity_type,
+                CASE
+                    WHEN bc.floating_coupon_flag IS TRUE THEN 'FLOAT'
+                    ELSE 'FIX'
+                END as coupon_type,
                 COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate,
+                bc.coupon_quantity_per_year as coupon_freq,
+                bc.coupon_quantity_per_year,
                 bc.risk_level,
                 bc.list_level,
                 bc.maturity_date,
+                bc.offer_date,
 
-                -- Купонный доход за месяц (на 1 облигацию)
+                -- Выплата по купону на 1 облигацию
                 ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year,
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / NULLIF(bc.coupon_quantity_per_year, 0),
+                    2
+                ) as coupon_payment_per_bond,
+
+                -- Средний месячный купонный доход на 1 облигацию
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / 12.0,
+                    2
+                ) as average_monthly_coupon_per_bond,
+
+                ROUND(
+                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / 12.0,
                     2
                 ) as monthly_coupon_income_per_bond,
 
                 -- Рыночная цена
                 bc.market_price,
+                bc.market_price_updated_at,
 
-                -- Годовая доходность к погашению (если есть рыночная цена)
-                CASE
-                    WHEN bc.market_price IS NOT NULL AND bc.market_price > 0 THEN
-                        ROUND(
-                            ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100,
-                            2
-                        )
-                    ELSE NULL
-                END as annual_yield_percent,
+                -- Текущая купонная доходность
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100,
+                    2
+                ) as current_coupon_yield,
+
+                ROUND(
+                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price) * 100,
+                    2
+                ) as annual_yield_percent,
 
                 -- До погашения (месяцев)
                 ROUND(
@@ -1304,86 +1369,138 @@ class PortfolioStorage:
                     WHEN bc.floating_coupon_flag IS TRUE THEN 'Флоатер'
                     WHEN bc.amortization_flag IS TRUE THEN 'Амортизируемая'
                     ELSE 'Обычная'
-                END as bond_type
+                END as bond_type,
+
+                rh.rating_code as rating,
+                rh.rating_date
 
             FROM bonds_catalog bc
             LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            JOIN companies co ON co.id = bc.company_id
+            LEFT JOIN (
+                SELECT DISTINCT ON (isin) isin, rating_code, rating_date
+                FROM rating_history
+                ORDER BY isin, rating_date DESC, id DESC
+            ) rh ON rh.isin = bc.isin
             {_LATEST_FLOATER_RATE_JOIN}
-            WHERE bc.currency = 'rub'
-                AND bc.is_trade_available IS TRUE
-                AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-                AND bc.market_price IS NOT NULL  -- Есть рыночная цена
-                AND bc.risk_level <= %s
-                AND (bc.maturity_date - CURRENT_DATE) > %s
-                AND CASE
-                    WHEN %s THEN bc.floating_coupon_flag IS NOT TRUE  -- Только фиксированный купон
-                    WHEN %s THEN bc.floating_coupon_flag IS TRUE  -- Только флоатеры
-                    ELSE TRUE  -- Все типы
-                END
-                AND CASE
-                    WHEN %s THEN bc.amortization_flag IS TRUE  -- Только амортизируемые
-                    WHEN %s THEN bc.amortization_flag IS NOT TRUE  -- Исключить амортизируемые
-                    ELSE TRUE  -- Все типы
-                END
-            ORDER BY annual_yield_percent DESC NULLS LAST
+            WHERE {where_clause}
+            ORDER BY current_coupon_yield DESC NULLS LAST, bc.isin
             LIMIT %s
         """
-        cursor.execute(query, [
-            max_risk,
-            min_days_to_maturity,
-            only_fixed_coupon,
-            only_floating_coupon,
-            only_amortization,
-            exclude_amortization,
-            limit,
-        ])
+        params.append(limit)
+        cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_floater_buy_candidates(self, limit: int) -> List[Dict[str, Any]]:
+    def get_floater_buy_candidates(self, limit: int = 15, max_risk: int = 1,
+                                   coupon_freq: Optional[int] = None,
+                                   entity_type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Флоатеры вне портфеля с рассчитанной ставкой и установленным спредом
         (режим floaters команды analyze-buy-candidates)."""
         cursor = self._cursor()
+
+        conditions = [
+            "bc.currency = 'rub'",
+            "bc.is_trade_available IS TRUE",
+            "bc.perpetual_flag IS NOT TRUE",
+            "pp.isin IS NULL",  # Нет в портфеле
+            "bc.company_id IS NOT NULL",
+            "bc.is_for_qualified_investors IS NOT TRUE",
+            "bc.market_price IS NOT NULL",
+            "bc.market_price > 0",
+            "bc.market_price_updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'",
+            "bc.issue_size * bc.nominal >= 500000000",
+            "bc.floating_coupon_flag IS TRUE",
+            "mc_floater.metric_value::numeric IS NOT NULL",
+            "bc.coupon_spread IS NOT NULL",
+            "bc.risk_level <= %s",
+            "(bc.maturity_date IS NULL OR bc.maturity_date > CURRENT_DATE)",
+        ]
+        params: List[Any] = [max_risk]
+
+        if coupon_freq is not None and coupon_freq > 0:
+            conditions.append("bc.coupon_quantity_per_year = %s")
+            params.append(coupon_freq)
+
+        if entity_type_filter in ('only_ofz', 'ofz_only', 'sovereign'):
+            conditions.append("co.entity_type = 'sovereign'")
+        elif entity_type_filter in ('exclude_ofz', 'no_ofz', 'exclude_sovereign'):
+            conditions.append("co.entity_type IS NOT NULL AND co.entity_type != 'sovereign'")
+
+        where_clause = " AND ".join(conditions)
+
         query = f"""
             SELECT
                 bc.isin,
                 bc.ticker,
                 bc.name,
+                bc.company_id,
+                co.name as company,
+                co.entity_type,
+                'FLOAT' as coupon_type,
                 mc_floater.metric_value::numeric as calculated_coupon_rate,
+                mc_floater.metric_value::numeric as coupon_rate,
                 bc.coupon_spread,
                 bc.risk_level,
+                bc.list_level,
+                bc.coupon_quantity_per_year as coupon_freq,
+                bc.coupon_quantity_per_year,
                 bc.maturity_date,
+                bc.offer_date,
 
-                -- Купонный доход за месяц (на 1 облигацию)
+                -- Купонный платеж на 1 бумагу
                 ROUND(
-                    (mc_floater.metric_value::numeric * bc.nominal / 100) / bc.coupon_quantity_per_year,
+                    (mc_floater.metric_value::numeric * bc.nominal / 100) / NULLIF(bc.coupon_quantity_per_year, 0),
+                    2
+                ) as coupon_payment_per_bond,
+
+                -- Средний месячный купонный доход на 1 облигацию
+                ROUND(
+                    (mc_floater.metric_value::numeric * bc.nominal / 100) / 12.0,
+                    2
+                ) as average_monthly_coupon_per_bond,
+
+                ROUND(
+                    (mc_floater.metric_value::numeric * bc.nominal / 100) / 12.0,
                     2
                 ) as monthly_coupon_income_per_bond,
+
+                -- Рыночная цена
+                bc.market_price,
+                bc.market_price_updated_at,
+
+                -- Текущая купонная доходность
+                ROUND(
+                    ((mc_floater.metric_value::numeric * bc.nominal / 100) / bc.market_price) * 100,
+                    2
+                ) as current_coupon_yield,
 
                 -- До погашения (месяцев)
                 ROUND(
                     (bc.maturity_date - CURRENT_DATE) / 30.0,
                     1
-                ) as months_to_maturity
+                ) as months_to_maturity,
+
+                rh.rating_code as rating,
+                rh.rating_date
 
             FROM bonds_catalog bc
             LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            JOIN companies co ON co.id = bc.company_id
+            LEFT JOIN (
+                SELECT DISTINCT ON (isin) isin, rating_code, rating_date
+                FROM rating_history
+                ORDER BY isin, rating_date DESC, id DESC
+            ) rh ON rh.isin = bc.isin
             {_LATEST_FLOATER_RATE_JOIN}
-            WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
-                AND bc.floating_coupon_flag IS TRUE  -- Только флоатеры
-                AND mc_floater.metric_value::numeric IS NOT NULL  -- Есть рассчитанная ставка
-                AND bc.coupon_spread IS NOT NULL  -- Установлен спред
-            ORDER BY monthly_coupon_income_per_bond DESC
+            WHERE {where_clause}
+            ORDER BY calculated_coupon_rate DESC NULLS LAST, bc.coupon_spread DESC NULLS LAST, bc.isin
             LIMIT %s
         """
-        cursor.execute(query, (limit,))
+        params.append(limit)
+        cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_portfolio_comparison_candidates(self, max_risk: int, limit: int) -> List[Dict[str, Any]]:
+    def get_portfolio_comparison_candidates(self, max_risk: int = 1, limit: int = 25) -> List[Dict[str, Any]]:
         """Бумаги вне портфеля с потенциальной доходностью против средней
         доходности портфеля (режим compare команды analyze-buy-candidates)."""
         cursor = self._cursor()
