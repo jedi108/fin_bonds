@@ -56,6 +56,12 @@ class Bond:
     # при линковке, в upsert каталога не участвует
     company_id: Optional[int] = None
 
+    # Дюрация (004_duration_metric)
+    duration_macaulay: Optional[Decimal] = None
+    duration_modified: Optional[Decimal] = None
+    duration_null_reason: Optional[str] = None
+    duration_updated_at: Optional[datetime] = None
+
     @classmethod
     def from_tinkoff_api(cls, tinkoff_bond: TinkoffBond) -> "Bond":
         """Фабричный метод для создания DTO из ответа Tinkoff API."""

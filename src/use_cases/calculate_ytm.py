@@ -190,63 +190,6 @@ class CalculateYtmUseCase(UseCase):
             logger.error(f"Ошибка при расчете YTM: {e}")
             return None
 
-    def _calculate_bond_price(self, nominal: float, coupon_rate: float, years_to_maturity: float,
-                             coupon_frequency: int, ytm_rate: float, amortization_flag: bool) -> float:
-        """
-        Рассчитывает цену облигации при заданном YTM.
-        
-        Args:
-            nominal: Номинал облигации
-            coupon_rate: Годовая купонная ставка (%)
-            years_to_maturity: Время до погашения в годах
-            coupon_frequency: Частота купонных выплат в год
-            ytm_rate: YTM в десятичном виде (например, 0.15 для 15%)
-            amortization_flag: Флаг наличия амортизации
-            
-        Returns:
-            Рассчитанная цена облигации
-        """
-        try:
-            if amortization_flag:
-                # Для облигаций с амортизацией
-                # Предполагаем линейную амортизацию
-                periods = int(years_to_maturity * coupon_frequency)
-                price = 0
-                remaining_nominal = nominal
-                amortization_per_period = (nominal - nominal * 0.8) / periods  # Амортизация до 80% от номинала
-                
-                for i in range(periods):
-                    period_rate = ytm_rate / coupon_frequency
-                    coupon_payment = (remaining_nominal * coupon_rate / 100) / coupon_frequency
-                    amortization_payment = amortization_per_period
-                    total_payment = coupon_payment + amortization_payment
-                    
-                    price += total_payment / ((1 + period_rate) ** (i + 1))
-                    remaining_nominal -= amortization_payment
-                
-                # Добавляем финальный платеж
-                price += remaining_nominal / ((1 + ytm_rate / coupon_frequency) ** periods)
-                
-            else:
-                # Для обычных облигаций
-                periods = int(years_to_maturity * coupon_frequency)
-                coupon_payment = (nominal * coupon_rate / 100) / coupon_frequency
-                period_rate = ytm_rate / coupon_frequency
-                
-                # Текущая стоимость купонных платежей
-                coupon_pv = coupon_payment * (1 - (1 + period_rate) ** (-periods)) / period_rate
-                
-                # Текущая стоимость номинала
-                nominal_pv = nominal / ((1 + period_rate) ** periods)
-                
-                price = coupon_pv + nominal_pv
-            
-            return price
-            
-        except Exception as e:
-            logger.error(f"Ошибка при расчете цены облигации: {e}")
-            return 0
-
     def _get_portfolio_bonds(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
         """Получает облигации из портфеля с расчетом YTM по средней цене покупки."""
         return self.db.get_bonds_yield_table(

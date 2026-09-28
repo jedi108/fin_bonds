@@ -18,6 +18,7 @@ from psycopg2.extras import RealDictCursor
 
 from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond
 from src.migrations import discover_migrations, get_applied_versions
+from src.services.cashflow import calculate_bond_cashflow_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,13 @@ def _row_to_bond(row: Optional[Mapping[str, Any]]) -> Optional[Bond]:
             updated_at=row.get('updated_at'),
             is_for_qualified_investors=bool(row.get('is_for_qualified_investors') or False),
             company_id=row.get('company_id'),
+            market_price=row.get('market_price'),
+            market_price_source=row.get('market_price_source'),
+            market_price_updated_at=row.get('market_price_updated_at'),
+            duration_macaulay=row.get('duration_macaulay'),
+            duration_modified=row.get('duration_modified'),
+            duration_null_reason=row.get('duration_null_reason'),
+            duration_updated_at=row.get('duration_updated_at'),
         )
     except (ValueError, TypeError, KeyError) as e:
         logger.error(f"Failed to convert row to Bond DTO for ISIN {row.get('isin')}: {e}")
@@ -320,6 +328,7 @@ class PortfolioStorage:
                     updated_at = CURRENT_TIMESTAMP
             """, bonds_data)
         logger.info(f"Добавлено/обновлено {len(bonds_data)} облигаций в каталоге.")
+        self.update_bonds_duration([b.isin for b in bonds_dto_list])
 
     def add_or_update_bond(self, isin: str, ticker: str, name: str):
         """Вставляет или обновляет карточку облигации по минимальному набору полей.
@@ -464,6 +473,7 @@ class PortfolioStorage:
                 SET list_level = %s, coupon_rate_percent = %s, offer_date = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE isin = %s
             """, (list_level, coupon_rate, offer_date, isin))
+        self.update_bonds_duration([isin])
         logger.debug(f"Обновлены MOEX данные для {isin}.")
 
     def get_full_catalog(self) -> List[Bond]:
@@ -1061,6 +1071,7 @@ class PortfolioStorage:
 
         cursor = self._cursor()
         updated_count = 0
+        updated_isins: List[str] = []
 
         with self.conn:
             for isin, price, source in prices_data:
@@ -1075,9 +1086,13 @@ class PortfolioStorage:
 
                     if cursor.rowcount > 0:
                         updated_count += 1
+                        updated_isins.append(isin)
 
                 except Exception as e:
                     logger.error(f"Ошибка обновления цены для {isin}: {e}")
+
+        if updated_isins:
+            self.update_bonds_duration(updated_isins)
 
         return updated_count
 
@@ -1163,7 +1178,7 @@ class PortfolioStorage:
         cursor = self._cursor()
         if isin:
             query = """
-                SELECT isin, ticker, name, figi
+                SELECT isin, ticker, name, figi, nominal
                 FROM bonds_catalog
                 WHERE isin = %s
                 ORDER BY isin
@@ -1171,7 +1186,7 @@ class PortfolioStorage:
             cursor.execute(query, (isin,))
         else:
             query = """
-                SELECT isin, ticker, name, figi
+                SELECT isin, ticker, name, figi, nominal
                 FROM bonds_catalog
                 WHERE currency = 'rub'
                     AND (is_trade_available IS TRUE OR is_trade_available IS NULL)
@@ -1189,14 +1204,114 @@ class PortfolioStorage:
         row = cursor.fetchone()
         return row['figi'] if row else None
 
-    def save_market_price(self, isin: str, price: Decimal):
-        """Сохраняет рыночную цену одной облигации (источник и метка времени не меняются).
+    def save_market_price(self, isin: str, price: Decimal, source: str = 'tbank'):
+        """Сохраняет рыночную цену одной облигации, источник и метку времени,
 
-        Для пакетной записи с source/updated_at есть update_market_prices().
+        и пересчитывает дюрацию.
         """
         with self.conn:
             cursor = self._cursor()
-            cursor.execute("UPDATE bonds_catalog SET market_price = %s WHERE isin = %s", (price, isin))
+            cursor.execute("""
+                UPDATE bonds_catalog
+                SET market_price = %s,
+                    market_price_source = %s,
+                    market_price_updated_at = CURRENT_TIMESTAMP
+                WHERE isin = %s
+            """, (price, source, isin))
+        self.update_bonds_duration([isin])
+
+    def update_bonds_duration(
+        self,
+        isins: Optional[List[str]] = None,
+        valuation_date: Optional[date] = None
+    ) -> int:
+        """Пересчитывает дюрацию Маколея и модифицированную дюрацию для списка ISIN
+
+        или для всех бумаг в каталоге.
+        Обновляет duration_macaulay, duration_modified, duration_null_reason и
+        duration_updated_at (включая осознанный NULL).
+        """
+        cursor = self._cursor()
+        if isins is not None:
+            if not isins:
+                return 0
+            unique_isins = list(set(isins))
+            cursor.execute("""
+                SELECT isin, nominal, maturity_date, coupon_quantity_per_year,
+                       coupon_rate_percent, market_price, perpetual_flag,
+                       floating_coupon_flag, amortization_flag
+                FROM bonds_catalog
+                WHERE isin = ANY(%s)
+            """, (unique_isins,))
+        else:
+            cursor.execute("""
+                SELECT isin, nominal, maturity_date, coupon_quantity_per_year,
+                       coupon_rate_percent, market_price, perpetual_flag,
+                       floating_coupon_flag, amortization_flag
+                FROM bonds_catalog
+            """)
+
+        rows = cursor.fetchall()
+        if not rows:
+            return 0
+
+        update_data = []
+        for r in rows:
+            metrics = calculate_bond_cashflow_metrics(
+                valuation_date=valuation_date,
+                nominal=r['nominal'],
+                maturity_date=r['maturity_date'],
+                coupon_quantity_per_year=r['coupon_quantity_per_year'],
+                coupon_rate_percent=r['coupon_rate_percent'],
+                market_price=r['market_price'],
+                perpetual_flag=r['perpetual_flag'],
+                floating_coupon_flag=r['floating_coupon_flag'],
+                amortization_flag=r['amortization_flag'],
+            )
+            update_data.append((
+                metrics.duration_macaulay,
+                metrics.duration_modified,
+                metrics.null_reason,
+                r['isin'],
+            ))
+
+        with self.conn:
+            cursor.executemany("""
+                UPDATE bonds_catalog
+                SET duration_macaulay = %s,
+                    duration_modified = %s,
+                    duration_null_reason = %s,
+                    duration_updated_at = CURRENT_TIMESTAMP
+                WHERE isin = %s
+            """, update_data)
+
+        return len(update_data)
+
+    def get_portfolio_durations(self) -> List[Dict[str, Any]]:
+        """Возвращает позиции портфеля с дюрацией и параметрами облигаций."""
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                p.isin,
+                p.ticker,
+                p.name,
+                p.quantity,
+                p.current_value,
+                p.current_price,
+                c.nominal,
+                c.market_price,
+                c.coupon_rate_percent,
+                c.coupon_quantity_per_year,
+                c.maturity_date,
+                c.duration_macaulay,
+                c.duration_modified,
+                c.duration_null_reason,
+                c.duration_updated_at
+            FROM portfolio_positions p
+            LEFT JOIN bonds_catalog c ON c.isin = p.isin
+            ORDER BY p.current_value DESC NULLS LAST
+        """)
+        return [dict(r) for r in cursor.fetchall()]
 
     def save_bond_figi(self, isin: str, figi: str):
         """Сохраняет FIGI облигации в каталоге."""

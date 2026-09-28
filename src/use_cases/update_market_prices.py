@@ -4,6 +4,7 @@ Use Case для обновления рыночных цен облигаций.
 
 import argparse
 import logging
+from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -76,16 +77,27 @@ class UpdateMarketPrices(UseCase):
                     logger.warning(f"⚠️ Не удалось найти FIGI для {bond['isin']}")
                     return False
             
-            # Получаем текущую цену через API
-            current_price = self._get_current_price(figi)
-            if current_price is None:
+            # Получаем текущую цену через API (% от номинала)
+            current_price_pct = self._get_current_price(figi)
+            if current_price_pct is None:
                 logger.warning(f"⚠️ Не удалось получить цену для {bond['isin']}")
                 return False
+
+            nominal = bond.get('nominal')
+            if nominal is None:
+                bond_info = self.storage.get_bond_by_isin(bond['isin'])
+                nominal = bond_info.nominal if bond_info else None
+
+            if not nominal or float(nominal) <= 0:
+                logger.warning(f"⚠️ Не найден корректный номинал для {bond['isin']}, пропуск цены.")
+                return False
+
+            price_rub = float(current_price_pct) * float(nominal) / 100.0
+
+            # Обновляем цену в БД (в рублях)
+            self._save_market_price(bond['isin'], price_rub)
             
-            # Обновляем цену в БД
-            self._save_market_price(bond['isin'], current_price)
-            
-            logger.debug(f"✅ Обновлена цена для {bond['isin']}: {current_price}")
+            logger.debug(f"✅ Обновлена цена для {bond['isin']}: {price_rub:.2f} руб. ({current_price_pct}%)")
             return True
             
         except Exception as e:
@@ -127,8 +139,8 @@ class UpdateMarketPrices(UseCase):
             return None
     
     def _save_market_price(self, isin: str, price: float) -> None:
-        """Сохраняет рыночную цену в БД."""
-        self.storage.save_market_price(isin, price)
+        """Сохраняет рыночную цену (в рублях) в БД."""
+        self.storage.save_market_price(isin, Decimal(str(round(price, 4))), source='tbank')
 
     def _save_figi(self, isin: str, figi: str) -> None:
         """Сохраняет FIGI в БД."""
@@ -147,14 +159,25 @@ class UpdateMarketPrices(UseCase):
             # Получить цены пакетно
             prices = self.tbank_client.get_market_prices(figi_list)
             
-            # Обновить цены в БД
-            updated_count = 0
+            prices_data = []
             for bond in bonds:
                 figi = bond.get('figi')
                 if figi and figi in prices:
-                    self._save_market_price(bond['isin'], float(prices[figi]))
-                    updated_count += 1
-                    logger.debug(f"✅ Обновлена цена для {bond['isin']}: {prices[figi]}")
+                    nominal = bond.get('nominal')
+                    if nominal is None:
+                        bond_info = self.storage.get_bond_by_isin(bond['isin'])
+                        nominal = bond_info.nominal if bond_info else None
+                    if nominal and float(nominal) > 0:
+                        price_rub = Decimal(str(prices[figi])) * Decimal(str(nominal)) / Decimal('100')
+                        prices_data.append((bond['isin'], price_rub, 'tbank'))
+                        logger.debug(f"✅ Обновлена цена для {bond['isin']}: {price_rub} руб. ({prices[figi]}%)")
+                    else:
+                        logger.warning(f"⚠️ Не найден корректный номинал для {bond['isin']}, пропуск цены.")
+
+            if prices_data:
+                updated_count = self.storage.update_market_prices(prices_data)
+            else:
+                updated_count = 0
             
             logger.info(f"📊 Обновлено цен для {updated_count} из {len(bonds)} облигаций")
             return updated_count

@@ -47,6 +47,7 @@ from src.use_cases.update_liquidity import UpdateLiquidityUseCase
 from src.use_cases.update_market_prices import UpdateMarketPrices
 from src.use_cases.update_ratings import UpdateRatingsUseCase
 from src.use_cases.update_floaters import UpdateFloatersUseCase
+from src.use_cases.calculate_duration import CalculateDurationUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,7 @@ class UseCaseFactory:
             'analyze-buy-candidates': AnalyzeBuyCandidatesUseCase,
             'update-market-prices': UpdateMarketPrices,
             'update-floaters': UpdateFloatersUseCase,
+            'calculate-duration': CalculateDurationUseCase,
         }
 
     def get_all_use_cases(self) -> List[Type[UseCase]]:
