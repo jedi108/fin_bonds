@@ -90,18 +90,16 @@ class AddBondToCatalogUseCase(UseCase):
             name=moex_data.get('SHORTNAME') or isin,
             list_level=int(moex_data.get('LISTLEVEL', 0)),
             currency=moex_data.get('CURRENCYID', 'SUR'),
-            nominal=float(Decimal(str(moex_data.get('FACEVALUE', '0')))),
-            coupon_rate_percent=float(Decimal(str(moex_data.get('COUPONPERCENT', '0')))),
+            nominal=Decimal(str(moex_data.get('FACEVALUE', '0'))),
+            coupon_rate_percent=Decimal(str(moex_data.get('COUPONPERCENT', '0'))),
             coupon_quantity_per_year=int(coupon_quantity),
             maturity_date=_parse_date(moex_data.get('MATDATE')),
-            aci_value=float(Decimal(str(moex_data.get('ACCRUEDINT', '0')))),
             offer_date=_parse_date(moex_data.get('OFFERDATE')),
             # Значения по умолчанию, которые могут быть перезаписаны
             figi=None,
             floating_coupon_flag=False,
             perpetual_flag=False,
             amortization_flag=False,
-            class_code='N/A',
             issue_size=0,
             risk_level=0,
             coupon_spread=None
@@ -127,11 +125,10 @@ class AddBondToCatalogUseCase(UseCase):
                         bond_dto.floating_coupon_flag = tinkoff_details.floating_coupon_flag
                         bond_dto.perpetual_flag = tinkoff_details.perpetual_flag
                         bond_dto.amortization_flag = tinkoff_details.amortization_flag
-                        bond_dto.class_code = tinkoff_details.class_code
                         bond_dto.issue_size = tinkoff_details.issue_size
                         bond_dto.risk_level = tinkoff_details.risk_level
                         if tinkoff_details.nominal > 0:
-                            bond_dto.nominal = float(tinkoff_details.nominal)
+                            bond_dto.nominal = Decimal(str(tinkoff_details.nominal))
                         logger.info(f"Данные из Tinkoff успешно получены для '{tinkoff_details.name}'.")
                 else:
                     logger.warning("Не удалось найти инструмент в Tinkoff API. Будут сохранены только данные MOEX.")
