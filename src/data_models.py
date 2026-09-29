@@ -62,6 +62,11 @@ class Bond:
     duration_null_reason: Optional[str] = None
     duration_updated_at: Optional[datetime] = None
 
+    # Доходность к погашению (007_ytm_storage)
+    ytm: Optional[Decimal] = None
+    ytm_null_reason: Optional[str] = None
+    ytm_updated_at: Optional[datetime] = None
+
     @classmethod
     def from_tinkoff_api(cls, tinkoff_bond: TinkoffBond) -> "Bond":
         """Фабричный метод для создания DTO из ответа Tinkoff API."""

@@ -78,6 +78,9 @@ def _row_to_bond(row: Optional[Mapping[str, Any]]) -> Optional[Bond]:
             duration_modified=row.get('duration_modified'),
             duration_null_reason=row.get('duration_null_reason'),
             duration_updated_at=row.get('duration_updated_at'),
+            ytm=row.get('ytm'),
+            ytm_null_reason=row.get('ytm_null_reason'),
+            ytm_updated_at=row.get('ytm_updated_at'),
         )
     except (ValueError, TypeError, KeyError) as e:
         logger.error(f"Failed to convert row to Bond DTO for ISIN {row.get('isin')}: {e}")
