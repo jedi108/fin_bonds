@@ -46,7 +46,8 @@ def test_freshness_with_data_fresh_stale_and_null(db):
     db.add_bonds_to_catalog([make_bond('RU000A3', 'Бонд Без Времени Цены')])
     # 4. Устаревшая цена, но НЕ торгуется (is_trade_available = False) -> НЕ должна считаться устаревшей
     db.add_bonds_to_catalog([make_bond('RU000A4', 'Бонд Неторгуемый')])
-    # 5. Нет рыночной цены (market_price IS NULL), торгуется -> НЕ считается устаревшей ценой
+    # 5. Нет рыночной цены (market_price IS NULL), торгуется -> ухудшает
+    #    bonds_tradeable_stale_or_missing (торгуемая облигация без цены)
     db.add_bonds_to_catalog([make_bond('RU000A5', 'Бонд Без Цены')])
 
     with db.conn.cursor() as cursor:
@@ -116,8 +117,16 @@ def test_freshness_with_data_fresh_stale_and_null(db):
     assert freshness['bonds_with_market_price'] == 4  # RU000A1, A2, A3, A4
     assert freshness['market_price_max_updated_at'] == fresh_time
     assert freshness['bonds_with_stale_market_price'] == 2  # RU000A2 (stale) и RU000A3 (NULL timestamp)
+    assert freshness['bonds_tradeable_count'] == 4  # A1, A2, A3, A5 (A4 не торгуется)
+    # RU000A2 (устаревшая цена), RU000A3 (NULL timestamp) и RU000A5 — торговая
+    # облигация без market_price тоже должна ухудшать метрику
+    assert freshness['bonds_tradeable_stale_or_missing'] == 3
+    assert freshness['max_market_price_time'] == fresh_time
     assert freshness['portfolio_positions_rows'] == 1
     assert freshness['portfolio_max_updated_at'] == fresh_time
+    assert freshness['last_sync_time'] == fresh_time
+    assert freshness['portfolio_zero_value_positions'] == 1  # позиция без current_value
+    assert freshness['portfolio_total_value'] == Decimal(0)
     assert freshness['monitoring_checks_max_check_date'] == check_d
 
 
@@ -148,12 +157,19 @@ def test_use_case_freshness_json_output(db, capsys):
     data = json.loads(lines[0])
     expected_keys = {
         'generated_at',
+        'status',
+        'is_fresh',
+        'issues',
         'bonds_catalog_rows',
         'bonds_catalog_max_updated_at',
         'bonds_with_market_price',
         'market_price_max_updated_at',
         'bonds_with_stale_market_price',
+        'bonds_tradeable_count',
+        'bonds_tradeable_stale_or_missing',
         'portfolio_positions_rows',
+        'portfolio_zero_value_positions',
+        'portfolio_total_value',
         'portfolio_max_updated_at',
         'monitoring_checks_max_check_date',
     }
@@ -162,6 +178,65 @@ def test_use_case_freshness_json_output(db, capsys):
     assert data['monitoring_checks_max_check_date'] == '2026-09-28'
     assert isinstance(data['generated_at'], str)
     assert '+' in data['generated_at'] or data['generated_at'].endswith('Z')
+    # Пустой каталог цен -> гейт не пропускает
+    assert data['bonds_with_market_price'] == 0
+    assert data['is_fresh'] is False
+    assert data['status'] == 'CRITICAL'
+    assert data['issues']
+
+
+def test_freshness_gate_empty_price_catalog_is_critical(db, capsys):
+    """Инцидент 2026-09-29: пустой каталог цен (bonds_with_market_price=0) —
+    это CRITICAL и is_fresh=false, а не «0 устаревших из 0» = OK."""
+    db.add_bonds_to_catalog([make_bond('RU000B1', 'Бонд Без Цены')])
+    now = datetime.now(timezone.utc)
+    with db.conn.cursor() as cursor:
+        cursor.execute(
+            "UPDATE bonds_catalog SET is_trade_available = TRUE WHERE isin = 'RU000B1'"
+        )
+        cursor.execute(
+            """
+            INSERT INTO portfolio_positions (isin, broker_name, name, quantity, current_price, current_value, updated_at)
+            VALUES ('RU000B1', 'tbank', 'Бонд Без Цены', 5, 990.0, 4950.0, %s)
+            """,
+            (now,),
+        )
+    db.conn.commit()
+
+    use_case = CheckDbUseCase(config={}, db=db)
+
+    class Args:
+        freshness = True
+        json = True
+        query = None
+        limit = 10
+        fail_stale = False
+
+    use_case.execute(Args())
+
+    data = json.loads(capsys.readouterr().out.strip())
+    assert data['bonds_with_market_price'] == 0
+    assert data['bonds_tradeable_stale_or_missing'] == 1  # торгуемая облигация без цены
+    assert data['portfolio_zero_value_positions'] == 0
+    assert data['is_fresh'] is False
+    assert data['status'] == 'CRITICAL'
+    assert any('рыночных цен пуст' in issue for issue in data['issues'])
+
+
+def test_fail_stale_exits_with_code_1_when_not_fresh(db):
+    """--fail-stale при is_fresh=false завершает процесс с SystemExit(1)."""
+    use_case = CheckDbUseCase(config={}, db=db)  # пустая БД -> is_fresh=false
+
+    class Args:
+        freshness = True
+        json = True
+        query = None
+        limit = 10
+        fail_stale = True
+
+    with pytest.raises(SystemExit) as excinfo:
+        use_case.execute(Args())
+    assert excinfo.value.code == 1
 
 
 def test_cli_freshness_contracts(db):

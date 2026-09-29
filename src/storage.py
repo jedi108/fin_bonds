@@ -1144,6 +1144,16 @@ class PortfolioStorage:
     def get_db_freshness(self, stale_threshold_hours: int = 24) -> Dict[str, Any]:
         """
         Возвращает метки свежести данных из каталога, позиций и проверок мониторинга.
+
+        Новые поля по сравнению с предыдущей версией:
+        - bonds_tradeable_count: торгуемые облигации
+        - bonds_tradeable_stale_or_missing: торгуемые облигации без актуальной цены
+          (market_price IS NULL ИЛИ market_price_updated_at устарел/NULL)
+        - portfolio_zero_value_positions: позиции с current_value IS NULL или <= 0
+        - portfolio_total_value: суммарная оценка портфеля
+        - last_sync_time: время последней синхронизации (MAX updated_at portfolio_positions)
+        - max_market_price_time: время последнего обновления цены
+
         Выполняется одним параметризованным SELECT-запросом.
         """
         stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_threshold_hours)
@@ -1159,11 +1169,25 @@ class PortfolioStorage:
                     AND (market_price_updated_at IS NULL OR market_price_updated_at < %s)
                     AND is_trade_available IS TRUE
                 ) AS bonds_with_stale_market_price,
+                COUNT(*) FILTER (WHERE is_trade_available IS TRUE) AS bonds_tradeable_count,
+                COUNT(*) FILTER (
+                    WHERE is_trade_available IS TRUE
+                    AND (
+                        market_price IS NULL
+                        OR market_price_updated_at IS NULL
+                        OR market_price_updated_at < %s
+                    )
+                ) AS bonds_tradeable_stale_or_missing,
+                MAX(market_price_updated_at) AS max_market_price_time,
                 (SELECT COUNT(*) FROM portfolio_positions) AS portfolio_positions_rows,
                 (SELECT MAX(updated_at) FROM portfolio_positions) AS portfolio_max_updated_at,
+                (SELECT MAX(updated_at) FROM portfolio_positions) AS last_sync_time,
+                (SELECT COUNT(*) FROM portfolio_positions
+                 WHERE current_value IS NULL OR current_value <= 0) AS portfolio_zero_value_positions,
+                (SELECT COALESCE(SUM(current_value), 0) FROM portfolio_positions) AS portfolio_total_value,
                 (SELECT MAX(check_date) FROM monitoring_checks) AS monitoring_checks_max_check_date
             FROM bonds_catalog
-        """, (stale_cutoff,))
+        """, (stale_cutoff, stale_cutoff))
         row = cursor.fetchone()
         if not row:
             return {
@@ -1172,8 +1196,14 @@ class PortfolioStorage:
                 'bonds_with_market_price': 0,
                 'market_price_max_updated_at': None,
                 'bonds_with_stale_market_price': 0,
+                'bonds_tradeable_count': 0,
+                'bonds_tradeable_stale_or_missing': 0,
+                'max_market_price_time': None,
                 'portfolio_positions_rows': 0,
                 'portfolio_max_updated_at': None,
+                'last_sync_time': None,
+                'portfolio_zero_value_positions': 0,
+                'portfolio_total_value': Decimal(0),
                 'monitoring_checks_max_check_date': None,
             }
         return dict(row)
