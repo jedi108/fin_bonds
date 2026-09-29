@@ -59,6 +59,8 @@ def test_calculate_ytm_buy_mode_stored(db):
         fixed_coupon=False,
         floating_coupon=False,
         limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
     )
     bonds = use_case._get_bonds_for_buying(args)
     by_isin = {b['isin']: b for b in bonds}
@@ -120,6 +122,8 @@ def test_calculate_ytm_portfolio_mode_mark_to_market(db):
         fixed_coupon=False,
         floating_coupon=False,
         limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
     )
     bonds = use_case._get_portfolio_bonds(args)
     assert len(bonds) == 1
@@ -192,6 +196,8 @@ def test_calculate_ytm_min_ytm_filter_does_not_coerce_null(db):
         fixed_coupon=False,
         floating_coupon=False,
         limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
     )
     bonds_15 = use_case._get_bonds_for_buying(args_15)
     isins_15 = [b['isin'] for b in bonds_15]
@@ -211,6 +217,8 @@ def test_calculate_ytm_min_ytm_filter_does_not_coerce_null(db):
         fixed_coupon=False,
         floating_coupon=False,
         limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
     )
     bonds_0 = use_case._get_bonds_for_buying(args_0)
     isins_0 = [b['isin'] for b in bonds_0]
@@ -258,6 +266,8 @@ def test_calculate_ytm_unbackfilled_row_fallback(db):
         fixed_coupon=False,
         floating_coupon=False,
         limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
     )
     bonds = use_case._get_bonds_for_buying(args)
     ub_bond = [b for b in bonds if b['isin'] == 'RU000TESTUB1'][0]
@@ -345,4 +355,148 @@ def test_print_bonds_table_formatting(capsys):
     assert "11.25%" in out_pf
     assert "950.00" in out_pf
     assert "Ср.цена" in out_pf
+
+
+def test_calculate_ytm_max_listlevel_filters_third_tier(db):
+    """012-C: бумага с list_level=3 не попадает в результаты при --max-listlevel 2."""
+    tomorrow = date.today() + timedelta(days=365)
+    b_top = Bond(
+        isin='RU000TESTLL1',
+        ticker='LL1',
+        name='First Tier Bond',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        list_level=1,
+        nominal=Decimal('1000'),
+        maturity_date=tomorrow,
+        coupon_quantity_per_year=2,
+        coupon_rate_percent=Decimal('10.0'),
+        market_price=Decimal('1000'),
+    )
+    b_third = Bond(
+        isin='RU000TESTLL3',
+        ticker='LL3',
+        name='Third Tier Bond',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        list_level=3,
+        nominal=Decimal('1000'),
+        maturity_date=tomorrow,
+        coupon_quantity_per_year=2,
+        coupon_rate_percent=Decimal('10.0'),
+        market_price=Decimal('1000'),
+    )
+    db.add_bonds_to_catalog([b_top, b_third])
+    db.update_bonds_derived_metrics(['RU000TESTLL1', 'RU000TESTLL3'])
+
+    use_case = CalculateYtmUseCase(db=db)
+    args = argparse.Namespace(
+        mode='buy',
+        min_ytm=None,
+        max_risk=5,
+        min_maturity='2020-01-01',
+        max_maturity='2040-01-01',
+        no_amortization=False,
+        monthly_coupons=False,
+        fixed_coupon=False,
+        floating_coupon=False,
+        limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
+    )
+    bonds = use_case._get_bonds_for_buying(args)
+    isins = [b['isin'] for b in bonds]
+    assert 'RU000TESTLL1' in isins
+    assert 'RU000TESTLL3' not in isins
+
+
+def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_fraction: Decimal):
+    """Создаёт бумагу с канонической YTM, записанной напрямую в каталог."""
+    tomorrow = date.today() + timedelta(days=365)
+    bond = Bond(
+        isin=isin,
+        ticker=ticker,
+        name=f'Distress Test {ticker}',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        list_level=1,
+        nominal=Decimal('1000'),
+        maturity_date=tomorrow,
+        coupon_quantity_per_year=2,
+        coupon_rate_percent=Decimal('10.0'),
+        market_price=Decimal('1000'),
+    )
+    db.add_bonds_to_catalog([bond])
+    with db.conn:
+        cursor = db._cursor()
+        cursor.execute("""
+            UPDATE bonds_catalog
+            SET ytm = %s, ytm_null_reason = NULL, ytm_updated_at = CURRENT_TIMESTAMP
+            WHERE isin = %s
+        """, (ytm_fraction, isin))
+
+
+def _make_buy_args(max_ytm: float) -> argparse.Namespace:
+    return argparse.Namespace(
+        mode='buy',
+        min_ytm=None,
+        max_risk=5,
+        min_maturity='2020-01-01',
+        max_maturity='2040-01-01',
+        no_amortization=False,
+        monthly_coupons=False,
+        fixed_coupon=False,
+        floating_coupon=False,
+        limit=10,
+        max_listlevel=2,
+        max_ytm=max_ytm,
+    )
+
+
+def test_calculate_ytm_max_ytm_filters_distress(db):
+    """012-C: бумага с YTM 45% не попадает в результаты при --max-ytm 35."""
+    _add_bond_with_stored_ytm(db, 'RU000TESTVD1', 'VD1', Decimal('0.45'))
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
+    assert 'RU000TESTVD1' not in [b['isin'] for b in bonds]
+
+
+def test_calculate_ytm_max_ytm_keeps_normal_yield(db):
+    """012-C: бумага с YTM 28% попадает в результаты при --max-ytm 35."""
+    _add_bond_with_stored_ytm(db, 'RU000TESTVD2', 'VD2', Decimal('0.28'))
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
+    vd2 = [b for b in bonds if b['isin'] == 'RU000TESTVD2']
+    assert len(vd2) == 1
+    assert vd2[0]['ytm_percent'] is not None
+    assert abs(vd2[0]['ytm_percent'] - 28.0) < 0.01
+
+
+def test_calculate_ytm_max_ytm_filters_unbackfilled_fallback(db):
+    """012-C: до backfill (bc.ytm IS NULL) порог --max-ytm применяется к YTM, рассчитанной на лету."""
+    tomorrow = date.today() + timedelta(days=365)
+    bond = Bond(
+        isin='RU000TESTVD3',
+        ticker='VD3',
+        name='Unbackfilled Distress',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        list_level=1,
+        nominal=Decimal('1000'),
+        maturity_date=tomorrow,
+        coupon_quantity_per_year=1,
+        coupon_rate_percent=Decimal('40.0'),
+        market_price=Decimal('1000'),
+    )
+    db.add_bonds_to_catalog([bond])
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
+    assert 'RU000TESTVD3' not in [b['isin'] for b in bonds]
 

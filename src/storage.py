@@ -2004,13 +2004,18 @@ class PortfolioStorage:
     def get_bonds_yield_table(self, mode: str, min_maturity: str, max_maturity: str,
                               max_risk: int, no_amortization: bool = False,
                               monthly_coupons: bool = False, fixed_coupon: bool = False,
-                              floating_coupon: bool = False, limit: int = 50) -> List[Dict[str, Any]]:
+                              floating_coupon: bool = False, limit: int = 50,
+                              max_listlevel: int = 2, max_ytm: float = 35.0) -> List[Dict[str, Any]]:
         """Строки таблицы доходностей для команды calculate-ytm.
 
         mode='buy' — кандидаты на покупку вне портфеля (цена рыночная),
         mode='portfolio' — позиции портфеля (цена средняя покупки). Сам расчёт
         YTM остаётся в use-case'е. Динамические фильтры — статические строки;
         даты, уровень риска и лимит передаются параметрами.
+
+        В buy-режиме дополнительно отсекаются бумаги третьего эшелона
+        (list_level > max_listlevel, NULL проходит) и аномальные доходности
+        (ytm > max_ytm, % годовых — маркер ВДО/дистресса; NULL проходит).
         """
         if mode not in ('buy', 'portfolio'):
             raise ValueError(f"Неизвестный режим таблицы доходностей: {mode!r}")
@@ -2060,6 +2065,8 @@ class PortfolioStorage:
                 AND bc.risk_level <= %s
                 AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
                 AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)
+                AND (bc.list_level IS NULL OR bc.list_level <= %s)
+                AND (bc.ytm IS NULL OR bc.ytm <= %s)
         """
         else:
             body = f"""
@@ -2127,7 +2134,11 @@ class PortfolioStorage:
             filters += " AND bc.floating_coupon_flag IS TRUE"
 
         query = body + filters + " ORDER BY bc.ytm DESC NULLS LAST, real_yield_percent DESC NULLS LAST LIMIT %s"
-        params = [min_maturity, max_maturity, max_risk, limit]
+        # bc.ytm хранится долей (0.35 = 35%), порог CLI задан в процентах
+        params = [min_maturity, max_maturity, max_risk]
+        if mode == 'buy':
+            params += [max_listlevel, max_ytm / 100.0]
+        params += [limit]
 
         cursor = self._cursor()
         cursor.execute(query, params)

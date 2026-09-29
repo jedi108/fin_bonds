@@ -39,6 +39,19 @@ class CalculateYtmUseCase(UseCase):
                            help='Минимальная YTM для фильтрации (в процентах)')
         parser.add_argument('--max-risk', type=int, default=3,
                            help='Максимальный уровень риска (1-5)')
+        parser.add_argument(
+            '--max-listlevel',
+            type=int,
+            choices=[1, 2, 3],
+            default=2,
+            help='Максимальный уровень листинга MOEX для buy-режима (1=высший, 3=третий). Default: 2'
+        )
+        parser.add_argument(
+            '--max-ytm',
+            type=float,
+            default=35.0,
+            help='Порог отсечения аномальной доходности (YTM ≥ значения = ВДО/дистресс). Default: 35.0'
+        )
         parser.add_argument('--min-maturity', type=str, default='2025-01-01',
                            help='Минимальная дата погашения (YYYY-MM-DD)')
         parser.add_argument('--max-maturity', type=str, default='2030-12-31',
@@ -152,8 +165,18 @@ class CalculateYtmUseCase(UseCase):
             fixed_coupon=args.fixed_coupon,
             floating_coupon=args.floating_coupon,
             limit=args.limit,
+            max_listlevel=args.max_listlevel,
+            max_ytm=args.max_ytm,
         )
-        return self._enrich_bonds_with_ytm(bonds, args)
+        enriched = self._enrich_bonds_with_ytm(bonds, args)
+        # SQL-фильтр --max-ytm действует на хранимую bc.ytm и пропускает строки
+        # до backfill (ytm_updated_at IS NULL), чья YTM считается на лету выше;
+        # повторяем порог на рассчитанном значении, чтобы аномальные доходности
+        # не попадали в buy-вывод.
+        return [
+            bond for bond in enriched
+            if bond['ytm_percent'] is None or bond['ytm_percent'] <= args.max_ytm
+        ]
 
     def _get_portfolio_bonds(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
         """Получает облигации из портфеля с канонической mark-to-market YTM."""
@@ -200,6 +223,8 @@ class CalculateYtmUseCase(UseCase):
                     ytm = bond.get('ytm_percent')
                     if ytm is not None:
                         ytm_str = f"{ytm:.2f}%"
+                        if ytm > 30:
+                            ytm_str += " ⚠️ ВДО/Дистресс"
                     else:
                         reason = bond.get('ytm_reason') or 'Н/Д'
                         ytm_str = f"— ({reason})"
@@ -243,6 +268,8 @@ class CalculateYtmUseCase(UseCase):
                     ytm = bond.get('ytm_percent')
                     if ytm is not None:
                         ytm_str = f"{ytm:.2f}%"
+                        if ytm > 30:
+                            ytm_str += " ⚠️ ВДО/Дистресс"
                     else:
                         reason = bond.get('ytm_reason') or 'Н/Д'
                         ytm_str = f"— ({reason})"
