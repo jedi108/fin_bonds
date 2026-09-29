@@ -1,323 +1,85 @@
 # Команда: `export-portfolio`
 
 ## Описание
-Команда для экспорта данных портфеля облигаций в различные форматы. Поддерживает экспорт в CSV, Excel (XLSX), консоль и другие форматы с возможностью фильтрации и настройки полей.
+Команда для экспорта данных портфеля облигаций из локальной базы данных PostgreSQL в различные форматы: Markdown (`md`), Excel (`xlsx`), CSV (`csv`), вывод в консоль (`console`) и Google Таблицы (`gsheets`).
+
+Формат `md` формирует готовый отчет с позициями, итогами, честной YTM из каталога и тремя метками свежести данных, не требуя сетевых обращений к брокерскому API.
 
 ## Синтаксис
 ```bash
-python3 main.py export-portfolio [опции]
+python3 main.py export-portfolio --format <формат> [опции]
 ```
 
 ## Параметры
 
-### Основные параметры
-
-| Параметр | Тип | По умолчанию | Описание |
+| Параметр | Тип | Обязательный | Описание |
 |----------|-----|--------------|----------|
-| `--format` | string | `console` | Формат экспорта |
-| `--output` | string | - | Путь к выходному файлу |
-| `--fields` | string | - | Список полей для экспорта |
-| `--filter-risk` | integer | - | Максимальный уровень риска |
-| `--filter-maturity` | string | - | Минимальная дата погашения |
+| `--format` | string | Да | Формат вывода: `md`, `xlsx`, `csv`, `console`, `gsheets` |
+| `--output` | string | Нет | Путь к выходному файлу (поддерживается для формата `md`; по умолчанию `_output_/portfolio_export_%Y%m%d_%H%M%S.md`) |
+| `--with-isin` | flag | Нет | Включить колонку ISIN в вывод Markdown (по умолчанию выключено для защиты приватности) |
 
-### Детальное описание параметров
+> [!NOTE]
+> Параметры `--output` и `--with-isin` действуют при `--format md`. Существующие форматы `csv` и `xlsx` автоматически сохраняют результат в каталог `_output_/` с меткой времени.
 
-#### `--format`
-Формат экспорта данных портфеля.
+## Форматы экспорта
 
-**Доступные значения:**
-- `console` - Вывод в консоль (по умолчанию)
-- `csv` - CSV файл
-- `xlsx` - Excel файл (XLSX)
-- `json` - JSON файл
+### 1. Markdown (`--format md`)
+Канонический формат для отчетов, взаимодействия с LLM и внешними сервисами.
+- **Штамп свежести данных**: включает три scoped-метки (только для ISIN текущего портфеля):
+  - «Позиции актуальны на» (`MAX(portfolio_positions.updated_at)`)
+  - «Каталожные рыночные данные актуальны на» (`MAX(bonds_catalog.market_price_updated_at)`)
+  - «YTM рассчитана на» (`MAX(bonds_catalog.ytm_updated_at)`)
+- **Таблица**: `| Название | Цена | Стоимость, ₽ | Доля, % | YTM, % |`
+  - При указании флага `--with-isin` первой колонкой добавляется `ISIN`: `| ISIN | Название | ...`
+  - Доли `Доля, %` рассчитываются от общей стоимости портфеля (`100 * value / total_value`)
+  - Честная YTM берется из `bonds_catalog.ytm` (брокерский `yield_to_maturity` в рублях игнорируется)
+  - Итоговая строка: количество позиций, общая стоимость, 100% доля
+- **Автономность**: работает полностью локально без сетевых вызовов к TBank API.
 
-**Примеры:**
-```bash
-# Вывод в консоль
-python3 main.py export-portfolio --format console
+### 2. Консоль (`--format console`)
+Вывод классифицированных по категориям (ОФЗ, Корп. облигации, Фонды, Акции, Прочее) таблиц прямо в терминал.
 
-# Экспорт в CSV
-python3 main.py export-portfolio --format csv --output portfolio.csv
+### 3. Excel (`--format xlsx`)
+Сохранение в файл `_output_/portfolio_export_%Y%m%d_%H%M%S.xlsx` с отдельными листами по категориям активов.
 
-# Экспорт в Excel
-python3 main.py export-portfolio --format xlsx --output portfolio.xlsx
-```
+### 4. CSV (`--format csv`)
+Сохранение всех позиций с указанием категории в единый CSV-файл `_output_/portfolio_export_%Y%m%d_%H%M%S.csv`.
 
-#### `--output`
-Путь к выходному файлу для сохранения данных.
-
-**Используется с:** `--format csv`, `--format xlsx`, `--format json`
-**Примеры:**
-```bash
-# Экспорт в CSV файл
-python3 main.py export-portfolio --format csv --output data/portfolio.csv
-
-# Экспорт в Excel файл
-python3 main.py export-portfolio --format xlsx --output reports/portfolio.xlsx
-```
-
-#### `--fields`
-Список полей для включения в экспорт.
-
-**Доступные поля:**
-- `isin` - Международный идентификатор
-- `ticker` - Биржевой тикер
-- `name` - Название облигации
-- `quantity` - Количество облигаций
-- `average_price` - Средняя цена покупки
-- `current_price` - Текущая цена
-- `coupon_rate` - Ставка купона
-- `yield_to_maturity` - Доходность к погашению
-- `risk_level` - Уровень риска
-- `maturity_date` - Дата погашения
-- `currency` - Валюта
-
-**Примеры:**
-```bash
-# Экспорт основных полей
-python3 main.py export-portfolio --fields "isin,name,quantity,current_price,yield_to_maturity"
-
-# Экспорт всех полей
-python3 main.py export-portfolio --fields "isin,ticker,name,quantity,average_price,current_price,coupon_rate,yield_to_maturity,risk_level,maturity_date,currency"
-```
-
-#### `--filter-risk`
-Максимальный уровень риска для фильтрации облигаций.
-
-**Диапазон:** 1-5
-**Примеры:**
-```bash
-# Только надежные облигации
-python3 main.py export-portfolio --filter-risk 2
-
-# Включая средний риск
-python3 main.py export-portfolio --filter-risk 3
-```
-
-#### `--filter-maturity`
-Минимальная дата погашения для фильтрации облигаций.
-
-**Формат:** YYYY-MM-DD
-**Примеры:**
-```bash
-# Облигации с погашением после 2025 года
-python3 main.py export-portfolio --filter-maturity 2025-01-01
-
-# Облигации с погашением после 2027 года
-python3 main.py export-portfolio --filter-maturity 2027-01-01
-```
+### 5. Google Sheets (`--format gsheets`)
+Синхронизация с Google Таблицей, заданной в `config.yaml` (`google_sheet_name`), через сервисный аккаунт (`gcreds.json`).
 
 ## Примеры использования
 
-### 1. Экспорт в консоль
+### Экспорт в Markdown
+```bash
+# Базовый экспорт в каталог _output_/ (без ISIN)
+python3 main.py export-portfolio --format md
+
+# Экспорт в конкретный файл с включением ISIN
+python3 main.py export-portfolio --format md --output _output_/my_portfolio.md --with-isin
+```
+
+### Просмотр в консоли
 ```bash
 python3 main.py export-portfolio --format console
 ```
-**Вывод:**
-```
-========================================================================================================================
-📊 Экспорт портфеля облигаций
-========================================================================================================================
-ISIN         | Название                  | Количество | Цена покупки | Текущая цена | Доходность % | Риск | Погашение
-------------------------------------------------------------------------------------------------------------------------
-RU000A1084K3 | ВТБ-1-5                  | 100        | 1,000        | 1,050        | 16.8         | 2    | 2027-05-15
-RU000A105FZ9 | Сбербанк-001Р-02         | 50         | 950          | 980          | 8.2          | 1    | 2025-12-20
-```
 
-### 2. Экспорт в CSV
+### Экспорт в Excel и CSV
 ```bash
-python3 main.py export-portfolio --format csv --output portfolio.csv
+# Экспорт в XLSX
+python3 main.py export-portfolio --format xlsx
+
+# Экспорт в CSV
+python3 main.py export-portfolio --format csv
 ```
-**Результат:** Создается файл `portfolio.csv` с данными портфеля
-
-### 3. Экспорт в Excel с фильтрацией
-```bash
-python3 main.py export-portfolio --format xlsx --output safe_bonds.xlsx --filter-risk 2 --filter-maturity 2025-01-01
-```
-**Результат:** Создается файл `safe_bonds.xlsx` только с надежными облигациями
-
-### 4. Экспорт выбранных полей
-```bash
-python3 main.py export-portfolio --format csv --output summary.csv --fields "isin,name,quantity,yield_to_maturity"
-```
-**Результат:** Создается файл `summary.csv` с основными полями
-
-## Структура данных
-
-### Доступные поля для экспорта
-
-| Поле | Тип | Описание | Источник |
-|------|-----|----------|----------|
-| `isin` | TEXT | Международный идентификатор | `portfolio_positions` |
-| `ticker` | TEXT | Биржевой тикер | `bonds_catalog` |
-| `name` | TEXT | Название облигации | `bonds_catalog` |
-| `quantity` | REAL | Количество облигаций | `portfolio_positions` |
-| `average_price` | REAL | Средняя цена покупки | `portfolio_positions` |
-| `current_price` | REAL | Текущая цена | `portfolio_positions` |
-| `coupon_rate` | REAL | Ставка купона | `bonds_catalog` |
-| `yield_to_maturity` | REAL | Доходность к погашению | `portfolio_positions` |
-| `risk_level` | INTEGER | Уровень риска | `bonds_catalog` |
-| `maturity_date` | TEXT | Дата погашения | `bonds_catalog` |
-| `currency` | TEXT | Валюта | `portfolio_positions` |
-
-### Форматы экспорта
-
-#### CSV формат
-- Разделитель: запятая
-- Кодировка: UTF-8
-- Заголовки: включены
-
-#### Excel формат (XLSX)
-- Один лист с данными
-- Автоматическая ширина колонок
-- Форматирование чисел
-
-#### JSON формат
-- Массив объектов
-- Вложенная структура
-- Поддержка Unicode
-
-## Алгоритм работы
-
-### 1. Получение данных портфеля
-1. Загружает позиции из `portfolio_positions`
-2. Объединяет с данными из `bonds_catalog`
-3. Вычисляет дополнительные поля
-
-### 2. Фильтрация данных
-1. Применяет фильтр по уровню риска
-2. Применяет фильтр по дате погашения
-3. Валидирует данные
-
-### 3. Выбор полей
-1. Определяет поля для экспорта
-2. Проверяет доступность полей
-3. Формирует структуру данных
-
-### 4. Экспорт
-1. Форматирует данные согласно формату
-2. Сохраняет в файл или выводит в консоль
-3. Проверяет результат экспорта
-
-## Ограничения и особенности
-
-### Требования к данным
-- Портфель должен быть синхронизирован
-- Каталог облигаций должен быть обновлен
-- Данные должны быть валидными
-
-### Ограничения форматов
-- CSV: ограничения на специальные символы
-- Excel: зависимость от библиотеки openpyxl
-- JSON: ограничения на размер файла
-
-### Производительность
-- Время выполнения: <5 секунд
-- Память: зависит от размера портфеля
-- Диск: зависит от формата и размера данных
-
-## Интеграция с другими командами
-
-### Зависимости
-- `sync-portfolio` - для актуальных данных портфеля
-- `update-bonds` - для данных об облигациях
-
-### Использование результатов
-Экспортированные данные используются для:
-- Анализа в Excel
-- Отчетности
-- Интеграции с другими системами
-- Резервного копирования
-
-## Мониторинг и логирование
-
-### Уровни логирования
-- `INFO` - Основные этапы экспорта
-- `DEBUG` - Детальная информация о данных
-- `WARNING` - Проблемы с отдельными записями
-- `ERROR` - Критические ошибки
-
-### Ключевые метрики
-- Количество экспортированных записей
-- Размер выходного файла
-- Время выполнения экспорта
-- Количество отфильтрованных записей
 
 ## Устранение неполадок
 
 ### Проблема: Пустой экспорт
 ```bash
-# Проверить наличие данных в портфеле
-sqlite3 ratings.db "SELECT COUNT(*) FROM portfolio_positions;"
+# Проверить наличие позиций в базе данных PostgreSQL
+python3 main.py check-db --freshness
 
-# Синхронизировать портфель
+# Синхронизировать портфель из брокера
 python3 main.py sync-portfolio
-```
-
-### Проблема: Ошибка записи файла
-```bash
-# Проверить права доступа к папке
-ls -la /path/to/output/directory
-
-# Проверить свободное место на диске
-df -h
-```
-
-### Проблема: Некорректные данные
-```bash
-# Проверить данные портфеля
-sqlite3 ratings.db "SELECT * FROM portfolio_positions LIMIT 5;"
-
-# Проверить данные каталога
-sqlite3 ratings.db "SELECT * FROM bonds_catalog LIMIT 5;"
-```
-
-### Проблема: Ошибка формата
-```bash
-# Проверить доступность библиотек
-pip list | grep openpyxl
-
-# Установить недостающие библиотеки
-pip install openpyxl
-```
-
-## Рекомендации по использованию
-
-### Регулярный экспорт
-```bash
-# Еженедельный экспорт портфеля
-python3 main.py export-portfolio --format xlsx --output reports/weekly_portfolio.xlsx
-
-# Ежемесячный экспорт с фильтрацией
-python3 main.py export-portfolio --format csv --output reports/monthly_safe_bonds.csv --filter-risk 2
-```
-
-### Автоматизация
-```bash
-# Добавить в crontab для еженедельного экспорта
-0 18 * * 5 cd /path/to/portfolio && python3 main.py export-portfolio --format xlsx --output reports/weekly_portfolio.xlsx
-```
-
-### Резервное копирование
-```bash
-# Полный экспорт для резервного копирования
-python3 main.py export-portfolio --format csv --output backup/portfolio_$(date +%Y%m%d).csv
-
-# Экспорт только основных полей
-python3 main.py export-portfolio --format csv --output backup/summary_$(date +%Y%m%d).csv --fields "isin,name,quantity,yield_to_maturity"
-```
-
-### Анализ в Excel
-```bash
-# Экспорт для анализа в Excel
-python3 main.py export-portfolio --format xlsx --output analysis/portfolio_analysis.xlsx --fields "isin,name,quantity,average_price,current_price,yield_to_maturity,risk_level,maturity_date"
-```
-
-### Интеграция с другими системами
-```bash
-# Экспорт в JSON для API
-python3 main.py export-portfolio --format json --output api/portfolio.json
-
-# Экспорт в CSV для импорта в другие системы
-python3 main.py export-portfolio --format csv --output integration/portfolio.csv
 ```

@@ -1329,6 +1329,49 @@ class PortfolioStorage:
         """)
         return [dict(r) for r in cursor.fetchall()]
 
+    def get_portfolio_markdown_rows(self) -> List[Dict[str, Any]]:
+        """Возвращает строки портфеля для Markdown-экспорта (с честной YTM из bonds_catalog).
+
+        Каждая строка portfolio_positions (включая разные брокерские счета)
+        возвращается отдельно; стоимость = quantity * current_price, сортировка DESC.
+        """
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                p.isin,
+                p.name,
+                p.quantity,
+                p.current_price,
+                (COALESCE(p.quantity, 0) * COALESCE(p.current_price, 0)) AS total_value,
+                b.ytm
+            FROM portfolio_positions p
+            LEFT JOIN bonds_catalog b ON b.isin = p.isin
+            ORDER BY total_value DESC NULLS LAST, p.isin, p.account_id
+        """)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_portfolio_markdown_freshness(self) -> Tuple[Optional[datetime], Optional[datetime], Optional[datetime]]:
+        """Возвращает штампы свежести данных, ограниченные только текущими позициями портфеля:
+        (max_positions_updated_at, max_market_price_updated_at, max_ytm_updated_at).
+        """
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                MAX(p.updated_at) AS max_positions_updated_at,
+                MAX(b.market_price_updated_at) AS max_market_price_updated_at,
+                MAX(b.ytm_updated_at) AS max_ytm_updated_at
+            FROM portfolio_positions p
+            LEFT JOIN bonds_catalog b ON b.isin = p.isin
+        """)
+        row = cursor.fetchone()
+        if not row:
+            return None, None, None
+        return (
+            row.get('max_positions_updated_at'),
+            row.get('max_market_price_updated_at'),
+            row.get('max_ytm_updated_at'),
+        )
+
     def save_bond_figi(self, isin: str, figi: str):
         """Сохраняет FIGI облигации в каталоге."""
         with self.conn:

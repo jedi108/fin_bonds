@@ -283,8 +283,17 @@ TBANK_ACCOUNT_IDS="2000123456,2000654321"
 # Показать портфель в консоли
 python3 main.py export-portfolio --format console
 
-# Сохранить портфель в Excel-файл
-python3 main.py export-portfolio --format xls
+# Экспорт портфеля в Markdown со штампом свежести и честной YTM
+python3 main.py export-portfolio --format md
+
+# Экспорт в Markdown с явным путем сохранения и колонкой ISIN
+python3 main.py export-portfolio --format md --output _output_/my_portfolio.md --with-isin
+
+# Сохранить портфель в Excel-файл (XLSX)
+python3 main.py export-portfolio --format xlsx
+
+# Сохранить портфель в CSV-файл
+python3 main.py export-portfolio --format csv
 ```
 
 #### `update-bonds` — Обновление каталога всех облигаций
@@ -516,7 +525,7 @@ python3 main.py export-bonds filtered_bonds.csv --min-maturity 2027-01-01 --max-
 | Команда                | Описание                                                                    |
 | ---------------------- | --------------------------------------------------------------------------- |
 | `sync-portfolio`       | Синхронизирует позиции из разных источников (TBank, Excel) в локальную БД.   |
-| `export-portfolio`     | Экспортирует текущий состав портфеля из БД в XLS или консоль.                |
+| `export-portfolio`     | Экспортирует текущий состав портфеля из БД в MD, XLSX, CSV или консоль.    |
 | `update-bonds`         | Обновляет каталог облигаций (основную информацию) в локальной БД из MOEX API. |
 | `update-market-prices` | Обновляет рыночные цены облигаций через TBank API.                        |
 | `link-companies`       | Привязывает облигации каталога к компаниям-эмитентам (юрлицам): backfill и отчёт по группировке. |

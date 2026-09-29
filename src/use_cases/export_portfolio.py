@@ -5,7 +5,7 @@ import csv
 from pathlib import Path
 from decimal import Decimal
 from typing import Dict, List, Tuple, Any, Optional
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 from tinkoff.invest import Client, RequestError
@@ -24,10 +24,114 @@ except ImportError:
 if 'TYPE_CHECKING' in sys.modules:
     from src.use_cases.factory import UseCaseFactory
 
+def _format_timestamp(val: Any) -> str:
+    """Форматирует метку времени для Markdown отчета; NULL/пусто выводит как '—'."""
+    if not val:
+        return "—"
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, date):
+        return val.strftime("%Y-%m-%d")
+    return str(val)
+
+
+def _render_markdown(
+    rows: List[Dict[str, Any]],
+    freshness: Any,
+    generated_at: Any,
+    with_isin: bool = False,
+) -> str:
+    """Чистая функция рендера отчета портфеля в формате Markdown.
+
+    Не зависит от БД и внешних API.
+    """
+    if isinstance(generated_at, (datetime, date)):
+        gen_str = generated_at.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        gen_str = str(generated_at)
+
+    if isinstance(freshness, dict):
+        pos_dt = freshness.get("max_positions_updated_at")
+        market_dt = freshness.get("max_market_price_updated_at")
+        ytm_dt = freshness.get("max_ytm_updated_at")
+    elif isinstance(freshness, (tuple, list)):
+        pos_dt = freshness[0] if len(freshness) > 0 else None
+        market_dt = freshness[1] if len(freshness) > 1 else None
+        ytm_dt = freshness[2] if len(freshness) > 2 else None
+    else:
+        pos_dt = market_dt = ytm_dt = None
+
+    if with_isin:
+        headers = ["ISIN", "Название", "Цена", "Стоимость, ₽", "Доля, %", "YTM, %"]
+    else:
+        headers = ["Название", "Цена", "Стоимость, ₽", "Доля, %", "YTM, %"]
+
+    row_values: List[Decimal] = []
+    for r in rows:
+        total_val = r.get("total_value")
+        if total_val is not None:
+            val = Decimal(str(total_val))
+        else:
+            qty = Decimal(str(r.get("quantity") or 0))
+            px = Decimal(str(r.get("current_price") or 0))
+            val = qty * px
+        row_values.append(val)
+
+    total_portfolio_value = sum(row_values, Decimal(0))
+
+    table_rows = []
+    for r, val in zip(rows, row_values):
+        name = str(r.get("name") or "—")
+        px = r.get("current_price")
+        px_str = f"{Decimal(str(px)):.2f}" if px is not None else "—"
+        val_str = f"{val:.2f}"
+
+        if total_portfolio_value > Decimal(0):
+            share = (val * Decimal(100)) / total_portfolio_value
+            share_str = f"{share:.2f}"
+        else:
+            share_str = "—"
+
+        ytm = r.get("ytm")
+        ytm_str = f"{Decimal(str(ytm)):.2f}" if ytm is not None else "—"
+
+        if with_isin:
+            isin = str(r.get("isin") or "—")
+            table_rows.append([isin, name, px_str, val_str, share_str, ytm_str])
+        else:
+            table_rows.append([name, px_str, val_str, share_str, ytm_str])
+
+    count = len(rows)
+    total_val_str = f"{total_portfolio_value:.2f}"
+    total_share_str = "100.00" if total_portfolio_value > Decimal(0) else "—"
+
+    if with_isin:
+        summary_row = ["—", f"Итого ({count})", "—", total_val_str, total_share_str, "—"]
+    else:
+        summary_row = [f"Итого ({count})", "—", total_val_str, total_share_str, "—"]
+    table_rows.append(summary_row)
+
+    table_md = tabulate(table_rows, headers=headers, tablefmt="github", disable_numparse=True)
+
+    lines = [
+        f"# Экспорт портфеля на {gen_str}",
+        "",
+        f"- Позиции актуальны на: {_format_timestamp(pos_dt)}",
+        f"- Каталожные рыночные данные актуальны на: {_format_timestamp(market_dt)}",
+        f"- YTM рассчитана на: {_format_timestamp(ytm_dt)}",
+        "",
+        table_md,
+        "",
+    ]
+    return "\n".join(lines)
+
+
 class ExportPortfolioUseCase:
     """
     Сценарий: экспорт данных о портфеле из локальной БД в различные форматы.
     """
+    _render_markdown = staticmethod(_render_markdown)
+
     def __init__(self, config: dict, storage: PortfolioStorage, tinkoff_token: str):
         self.config = config
         self.storage = storage
@@ -44,7 +148,25 @@ class ExportPortfolioUseCase:
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
-        parser.add_argument('--format', type=str, choices=['gsheets', 'xlsx', 'csv', 'console'], required=True, help='Формат вывода.')
+        parser.add_argument(
+            '--format',
+            type=str,
+            choices=['gsheets', 'xlsx', 'csv', 'console', 'md'],
+            required=True,
+            help='Формат вывода (gsheets, xlsx, csv, console, md).'
+        )
+        parser.add_argument(
+            '--output',
+            type=str,
+            default=None,
+            help='Путь к выходному файлу (поддерживается для формата md).'
+        )
+        parser.add_argument(
+            '--with-isin',
+            action='store_true',
+            default=False,
+            help='Включить колонку ISIN в отчет Markdown (по умолчанию выключено).'
+        )
 
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'ExportPortfolioUseCase':
@@ -57,6 +179,14 @@ class ExportPortfolioUseCase:
     def execute(self, args: argparse.Namespace):
         output_format = args.format
         logging.info(f"🚀 Запуск экспорта портфеля в формат: {output_format}")
+
+        if output_format == 'md':
+            self._export_to_markdown(
+                output_path=getattr(args, 'output', None),
+                with_isin=getattr(args, 'with_isin', False),
+            )
+            logging.info(f"\n🏁 Экспорт портфеля в {output_format} завершен.")
+            return
 
         positions = self.storage.get_portfolio_positions()
         if not positions:
@@ -329,6 +459,44 @@ class ExportPortfolioUseCase:
             logging.info(f"✅ Портфель успешно экспортирован в файл: {filename}")
         except Exception as e:
             logging.error(f"Ошибка при сохранении в CSV: {e}", exc_info=True)
+
+    def _export_to_markdown(
+        self,
+        output_path: Optional[str] = None,
+        with_isin: bool = False,
+        generated_at: Optional[datetime] = None,
+    ) -> Path:
+        if generated_at is None:
+            generated_at = datetime.now()
+
+        if output_path:
+            output_file = Path(output_path)
+        else:
+            output_dir = Path("_output_")
+            output_dir.mkdir(exist_ok=True)
+            output_file = output_dir / f"portfolio_export_{generated_at:%Y%m%d_%H%M%S}.md"
+
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        rows = self.storage.get_portfolio_markdown_rows()
+        freshness = self.storage.get_portfolio_markdown_freshness()
+
+        content = self._render_markdown(
+            rows=rows,
+            freshness=freshness,
+            generated_at=generated_at,
+            with_isin=with_isin,
+        )
+
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logging.info(f"✅ Портфель успешно экспортирован в файл: {output_file}")
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении в Markdown: {e}", exc_info=True)
+            raise
+
+        return output_file
 
     def _get_gspread_client(self) -> Optional['gspread.Client']:
         creds_path = Path(self.GCREDS_FILENAME)
