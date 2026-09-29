@@ -1,11 +1,80 @@
 import logging
 import os
+import re
 from datetime import date, datetime, time, timedelta
-from typing import List, Any, Dict
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import List, Any, Dict, Optional
 from pathlib import Path
 
 import yaml
 import pytz
+
+# Каноническая точность ставки купона в каталоге (задача 002.5, P9.4):
+# неограниченный Decimal из формулы MOEX (25.00250000000000000000000001)
+# и repr float-пересчёта (0.10027472527472528) не должны попадать в
+# numeric-колонку bonds_catalog.coupon_rate_percent.
+COUPON_RATE_SCALE = Decimal('0.0001')
+
+
+def round_coupon_rate(value: Any) -> Optional[Decimal]:
+    """Нормализует ставку купона к 4 знакам после запятой (002.5, P9.4).
+
+    Единая точка нормализации для всех каналов записи каталога: расчёт из
+    купона MOEX (api_client.get_bond_data), приём готового COUPONPERCENT
+    (add-bond, fallback api_client), update-floaters, one-off импорт из
+    SQLite. ROUND_HALF_UP повторяет семантику SQL ROUND(numeric, 4);
+    None проходит без изменения, нечисловой мусор даёт None (запись
+    «данных нет» безопаснее падения cron-обновления).
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(COUPON_RATE_SCALE, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+# Суффиксы национальной шкалы в кодах рейтингов провайдеров (002.6):
+# АКРА/НКР пишут 'A-(RU)', MOEX отдаёт 'AAA.ru'/'AAA.RU' (rating_value_code).
+# Приводятся к базовому коду шкалы rating_scale из конфига ('A-', 'AAA').
+_RATING_CODE_SUFFIX_RE = re.compile(r'(?:\(RU\)|\.RU)\s*$')
+
+
+def normalize_rating_code(code: Any) -> str:
+    """Нормализует код кредитного рейтинга к базовому виду шкалы (002.6).
+
+    'A-(RU)' -> 'A-', 'AAA.ru' -> 'AAA', 'aa+(ru)' -> 'AA+'.
+    Пробелы обрезаются, регистр — верхний; None/пустота дают ''.
+    """
+    if code is None:
+        return ''
+    return _RATING_CODE_SUFFIX_RE.sub('', str(code).strip().upper())
+
+
+def rating_code_to_score(code: Any, rating_scale: Optional[Dict[str, int]]) -> Optional[int]:
+    """Маппинг кода рейтинга -> балл по шкале rating_scale из конфига (002.6).
+
+    Ключи шкалы нормализуются так же, как код (normalize_rating_code),
+    поэтому 'A-(RU)' и 'AAA.ru' матчатся на 'A-' и 'AAA'. Для кодов вида
+    'RUAAA' (без точки/скобок) пробуется отбрасывание префикса 'RU'.
+
+    Возвращает None для 'N/A', пустых и вне шкалы кодов: в rating_history
+    пишутся только строки с числовым баллом — потребители (check-changes,
+    generate-plots) сравнивают rating_score как int.
+    """
+    normalized = normalize_rating_code(code)
+    if not normalized or normalized in ('N/A', 'NA', '-'):
+        return None
+    lookup = {
+        normalize_rating_code(key): score
+        for key, score in (rating_scale or {}).items()
+        if isinstance(score, int)
+    }
+    if normalized in lookup:
+        return lookup[normalized]
+    if normalized.startswith('RU') and normalized[2:] in lookup:
+        return lookup[normalized[2:]]
+    return None
 
 
 def setup_logging(level=logging.INFO):

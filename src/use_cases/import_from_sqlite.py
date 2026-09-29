@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, Tuple, TYPE_CHECKING
 import psycopg2
 
 from src.use_cases.base import UseCase
+from src.utils import round_coupon_rate
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -77,6 +78,16 @@ def _to_decimal(value: Any):
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _to_coupon_rate(value: Any):
+    """Ставка купона -> Decimal с канонической точностью 4 знака (002.5, P9.4).
+
+    Float-канал: repr(float) даёт до 17 значащих цифр
+    (repr((0.25/1000)*(365/91)*100) -> 0.10027472527472528), и без округления
+    мусорная точность переехала бы из SQLite REAL в numeric-колонку PG.
+    """
+    return round_coupon_rate(_to_decimal(value))
 
 
 def _to_bool(value: Any):
@@ -129,7 +140,7 @@ TABLE_SPECS: Tuple[TableSpec, ...] = (
         converters=(
             _raw, _raw, _raw, _raw, _raw, _to_decimal,
             _to_date, _to_date, _to_int,
-            _to_decimal, _raw, _to_int, _to_int,
+            _to_coupon_rate, _raw, _to_int, _to_int,
             _to_decimal, _to_bool, _to_bool,
             _to_int, _to_ts, _to_ts, _to_bool,
             _to_bool, _to_bool, _to_decimal,
@@ -173,7 +184,7 @@ TABLE_SPECS: Tuple[TableSpec, ...] = (
             _to_decimal, _to_decimal, _to_decimal,
             _to_decimal, _to_decimal, _raw,
             _to_ts, _to_ts, _to_decimal,
-            _to_decimal,
+            _to_coupon_rate,
         ),
         # account_id в INSERT не входит: в SQLite-схеме его нет, PG подставит
         # DEFAULT '', а inference по трёхколоночному индексу работает и без него.

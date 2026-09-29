@@ -2,11 +2,13 @@
 Интеграционные тесты хранения и пересчёта YTM в PostgreSQL (007_ytm_storage).
 """
 
+import argparse
 from datetime import date, timedelta
 from decimal import Decimal
 import pytest
 
 from src.data_models import Bond
+from src.use_cases.calculate_ytm import CalculateYtmUseCase
 
 
 def test_migration_008_columns_and_dto(db):
@@ -86,7 +88,8 @@ def test_derived_metrics_atomic_update_and_reasons(db):
     # 1. Проверяем расчет после add_bonds_to_catalog
     b1 = db.get_bond_by_isin('RU000TESTYTM1')
     assert b1.ytm is not None
-    assert 0.08 < float(b1.ytm) < 0.12
+    # 005.4 (миграция 013): единицы хранения — проценты годовых
+    assert 8.0 < float(b1.ytm) < 12.0
     assert b1.ytm_null_reason is None
     assert b1.ytm_updated_at is not None
     assert b1.duration_modified is not None
@@ -165,3 +168,94 @@ def test_recalculate_derived_metrics_full_backfill(db):
     assert b_filled.duration_modified is not None
 
 
+
+
+# ---------------------------------------------------------------------------
+# 005.4 / P-E: регрессия тихой ловушки 100x «доля vs проценты»
+# ---------------------------------------------------------------------------
+
+
+def _add_par_bond(db, isin: str, ticker: str):
+    """Паевая бумага (цена = номинал): YTM численно равна купонной ставке (10%)."""
+    bond = Bond(
+        isin=isin,
+        ticker=ticker,
+        name=f'Par Bond {ticker}',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        list_level=1,
+        nominal=Decimal('1000'),
+        maturity_date=date.today() + timedelta(days=365),
+        coupon_quantity_per_year=2,
+        coupon_rate_percent=Decimal('10.0'),
+        market_price=Decimal('1000'),
+    )
+    db.add_bonds_to_catalog([bond])
+
+
+def test_ytm_stored_units_are_percent(db):
+    """005.4 (миграция 013): bonds_catalog.ytm хранится в ПРОЦЕНТАХ годовых.
+
+    Паевая бумага с купоном 10% имеет YTM 10.0. Если писатель вернётся к долям,
+    в колонке окажется 0.1 — и все потребители, смешавшие каталог с CLI-выводом,
+    молча ошибутся в 100 раз (ловушка P-E из 005.4).
+    """
+    _add_par_bond(db, 'RU000TESTUN1', 'UN1')
+
+    stored = db.get_bond_by_isin('RU000TESTUN1')
+    assert stored.ytm is not None
+    value = float(stored.ytm)
+    assert 9.0 < value < 11.0, (
+        f"bonds_catalog.ytm должен хранить проценты годовых (~10.0), получено {value} — "
+        "похоже на долю единицы (ловушка 100x, задача 005.4)"
+    )
+
+
+def test_ytm_catalog_units_match_engine_output(db):
+    """005.4 регрессия: SQL-колонка и вывод движка calculate-ytm — одни единицы.
+
+    Значение bc.ytm, отданное движком как ytm_percent, должно совпадать с
+    хранимым 1:1 (без ×100/÷100): потребитель не может молча смешать
+    SQL-колонку с CLI-выводом.
+    """
+    _add_par_bond(db, 'RU000TESTUN2', 'UN2')
+
+    stored = db.get_bond_by_isin('RU000TESTUN2')
+    assert stored.ytm is not None
+
+    rows = db.get_bonds_yield_table(
+        mode='buy', min_maturity=None, max_maturity=None, max_risk=5,
+        no_amortization=False, monthly_coupons=False, fixed_coupon=False,
+        floating_coupon=False, limit=10, max_listlevel=2, max_ytm=35.0,
+    )
+    assert any(r['isin'] == 'RU000TESTUN2' for r in rows)
+
+    use_case = CalculateYtmUseCase(db=db)
+    enriched = use_case._enrich_bonds_with_ytm(
+        rows, argparse.Namespace(min_ytm=None)
+    )
+    engine_pct = next(
+        b['ytm_percent'] for b in enriched if b['isin'] == 'RU000TESTUN2'
+    )
+    assert engine_pct is not None
+    assert abs(engine_pct - float(stored.ytm)) < 0.05, (
+        f"Единицы bc.ytm ({stored.ytm}) и движка ytm_percent ({engine_pct}) "
+        "расходятся — тихая ловушка 100x (задача 005.4)"
+    )
+
+
+def test_migration_013_column_comment_declares_percent(db):
+    """005.4: конвенция единиц закреплена комментарием на колонке в схеме."""
+    cursor = db._cursor()
+    cursor.execute("""
+        SELECT col_description('bonds_catalog'::regclass,
+                              (SELECT attnum FROM pg_attribute
+                               WHERE attrelid = 'bonds_catalog'::regclass
+                                 AND attname = 'ytm')) AS comment
+    """)
+    row = cursor.fetchone()
+    comment = row['comment'] or ''
+    assert 'процент' in comment.lower(), (
+        f"Ожидается COMMENT ON COLUMN bonds_catalog.ytm с указанием процентов, получено: {comment!r}"
+    )

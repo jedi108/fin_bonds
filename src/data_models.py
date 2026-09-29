@@ -62,7 +62,8 @@ class Bond:
     duration_null_reason: Optional[str] = None
     duration_updated_at: Optional[datetime] = None
 
-    # Доходность к погашению (007_ytm_storage)
+    # Доходность к погашению (007_ytm_storage); единицы — проценты годовых
+    # (005.4, миграция 013: до миграции хранилась долей — тихая ловушка 100x)
     ytm: Optional[Decimal] = None
     ytm_null_reason: Optional[str] = None
     ytm_updated_at: Optional[datetime] = None
@@ -157,6 +158,10 @@ class PortfolioPosition:
     liquidity_loss_ratio: Optional[Decimal] = None # Новое поле для коэффициента потерь ликвидности
     coupon_rate_percent: Optional[Decimal] = None # Новое поле для купонной доходности
     account_id: str = "" # Идентификатор счёта у брокера; '' для Excel-импорта и старых строк
+    # Жизненный цикл позиции (миграция 010, задача 002.1):
+    # active — у брокера и не погашена; matured — бумага погашена;
+    # closed — закрыта (нулевое количество / отсутствует у брокера).
+    status: str = "active"
 
     @classmethod
     def from_tinkoff_api(cls, position: TinkoffPortfolioPosition, instrument: TinkoffInstrument) -> "PortfolioPosition":

@@ -23,6 +23,7 @@ from src.use_cases.calculate_monthly_profit import CalculateMonthlyProfitUseCase
 from src.use_cases.check_changes import CheckChangesUseCase
 from src.use_cases.check_db import CheckDbUseCase
 from src.use_cases.check_offers import CheckOffersUseCase
+from src.use_cases.cleanup_portfolio import CleanupPortfolioUseCase
 from src.use_cases.clear_data import ClearDataUseCase
 from src.use_cases.export_bonds import ExportBondsUseCase
 from src.use_cases.export_monitoring_results import ExportMonitoringResultsUseCase
@@ -48,6 +49,7 @@ from src.use_cases.update_market_prices import UpdateMarketPrices
 from src.use_cases.update_ratings import UpdateRatingsUseCase
 from src.use_cases.update_floaters import UpdateFloatersUseCase
 from src.use_cases.calculate_duration import CalculateDurationUseCase
+from src.use_cases.rebalance_report import RebalanceReportUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +228,7 @@ class UseCaseFactory:
             'export-bonds': ExportBondsUseCase,
             'export-portfolio': ExportPortfolioUseCase,
             'sync-portfolio': SyncPortfolioUseCase,
+            'cleanup-portfolio': CleanupPortfolioUseCase,
             'check-changes': CheckChangesUseCase,
             'check-offers': CheckOffersUseCase,
             'generate-plots': GeneratePlotsUseCase,
@@ -248,6 +251,7 @@ class UseCaseFactory:
             'update-market-prices': UpdateMarketPrices,
             'update-floaters': UpdateFloatersUseCase,
             'calculate-duration': CalculateDurationUseCase,
+            'rebalance-report': RebalanceReportUseCase,
         }
 
     def get_all_use_cases(self) -> List[Type[UseCase]]:

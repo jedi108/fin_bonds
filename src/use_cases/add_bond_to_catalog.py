@@ -12,6 +12,7 @@ from src.use_cases.base import UseCase
 from src.data_models import Bond
 from src.use_cases.update_bonds_catalog import fetch_and_prepare_bond_details
 from src.constants import FLOATING_COUPON_INDICATORS
+from src.utils import round_coupon_rate
 from datetime import datetime
 from dataclasses import asdict
 
@@ -91,7 +92,11 @@ class AddBondToCatalogUseCase(UseCase):
             list_level=int(moex_data.get('LISTLEVEL', 0)),
             currency=moex_data.get('CURRENCYID', 'SUR'),
             nominal=Decimal(str(moex_data.get('FACEVALUE', '0'))),
-            coupon_rate_percent=Decimal(str(moex_data.get('COUPONPERCENT', '0'))),
+            # Готовое значение MOEX нормализуем к 4 знакам (002.5, P9.4):
+            # источник может прислать любую точность, numeric-колонка
+            # сохраняет её литералом. coupon_type выводится из флага
+            # флоатера в add_bonds_to_catalog (002.5, P4).
+            coupon_rate_percent=round_coupon_rate(moex_data.get('COUPONPERCENT', '0')),
             coupon_quantity_per_year=int(coupon_quantity),
             maturity_date=_parse_date(moex_data.get('MATDATE')),
             offer_date=_parse_date(moex_data.get('OFFERDATE')),

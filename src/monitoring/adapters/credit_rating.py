@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any, Callable
 
 from .base import BaseAdapter, MonitoringResult
 from src.use_cases.interfaces import IMoexApiClient
+from src.utils import normalize_rating_code, rating_code_to_score
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,36 @@ class CreditRatingAdapter(BaseAdapter):
 
         # Сохраняем результат в базу
         self.db.add_monitoring_check(isin, self.name, str(current_rating_value))
-        
+
+        # Дублируем рейтинг в rating_history (002.6, вариант 1 — согласован
+        # с 003 задача 4.2, их критерий: count(*) FROM rating_history > 0 и
+        # растёт после апдейтов). rating_history — единый источник для
+        # потребителей: CTE latest_ratings (buy_candidates.sql,
+        # rebalance_export.sql), check-changes, generate-plots.
+        # 'N/A' и коды вне шкалы rating_scale не пишутся: rating_score —
+        # числовой балл, потребители сравнивают его как int. Запись
+        # идемпотентна (уникальный индекс isin+rating_date+rating_code,
+        # миграция 012): повторный прогон за тот же день не плодит дублей.
+        rating_score = rating_code_to_score(current_rating_value, self.config.get('rating_scale', {}))
+        if rating_score is not None:
+            rating_code = normalize_rating_code(current_rating_value)
+            self.db.add_rating(
+                isin=isin, rating_date=self.today,
+                rating_code=rating_code, rating_score=rating_score
+            )
+            logger.debug(f"[{isin}] Рейтинг '{rating_code}' (балл {rating_score}) записан в rating_history.")
+        else:
+            logger.debug(
+                f"[{isin}] Рейтинг '{current_rating_value}' не входит в шкалу rating_scale — "
+                "в rating_history не пишется (остался только в monitoring_checks)."
+            )
+
         # Формируем сообщение
         if current_rating_value == 'N/A':
             message = f"Рейтинг не найден ни одним провайдером"
         else:
             message = f"Рейтинг: {current_rating_value} ({used_provider})"
-        
+
         return MonitoringResult(
             adapter_name=self.name,
             isin=isin,

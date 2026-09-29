@@ -8,6 +8,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from datetime import date
 from src.data_models import Bond
+from src.utils import round_coupon_rate
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,12 @@ class MoexApiClient(IMoexApiClient):
             coupon_period = int(sec_data.get('COUPONPERIOD', 0))
             
             if coupon_value > 0 and coupon_period > 0 and nominal and nominal > 0:
-                # Расчет годовой ставки купона
-                coupon_rate = (coupon_value / nominal) * (Decimal('365') / Decimal(coupon_period)) * 100
+                # Расчет годовой ставки купона; нормализация к 4 знакам (002.5,
+                # P9.4): точный Decimal без округления давал мусорную точность
+                # вида 25.00250000000000000000000001 в numeric-колонке.
+                coupon_rate = round_coupon_rate(
+                    (coupon_value / nominal) * (Decimal('365') / Decimal(coupon_period)) * 100
+                )
         except (ValueError, TypeError, KeyError):
             pass
 
@@ -150,7 +155,9 @@ class MoexApiClient(IMoexApiClient):
             try:
                 coupon_rate_val = sec_data.get('COUPONPERCENT')
                 if coupon_rate_val:
-                    coupon_rate = Decimal(str(coupon_rate_val))
+                    # Готовое значение тоже нормализуем: источник может прислать
+                    # любую точность (002.5, P9.4).
+                    coupon_rate = round_coupon_rate(Decimal(str(coupon_rate_val)))
             except (ValueError, TypeError):
                 pass
         

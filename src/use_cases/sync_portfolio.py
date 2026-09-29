@@ -124,6 +124,46 @@ class SyncPortfolioUseCase(UseCase):
                 for isin, broker, account_id in disappeared:
                     logger.warning(f"  ISIN: {isin}, broker: {broker}, account: {account_id}")
 
+        # Задача 002.1: чистка зомби-позиций при синке — не оставлять активные
+        # строки с нулевой оценкой. Погашенные бумаги (maturity_date <
+        # CURRENT_DATE) помечаются status='matured' (кейс МОНОП 1P02: 35 шт
+        # после погашения 2025-12-04), отсутствующие у брокера (только upsert:
+        # в полном режиме их уже удалила очистка) и нулевые количества —
+        # status='closed'. Позиции с ненулевым количеством и нулевой оценкой на
+        # живых бумагах (кейс ГлобалФ: цена 0 от брокера) НЕ трогаем — это не
+        # ошибка синка, их учитывает гейт свежести (WARN_ZOMBIE_ROWS).
+        _source_brokers = {'tbank': ['TBank'], 'alor': ['Alor']}
+        # Проверка «отсутствует у брокера» осмысленна только в upsert-режиме по
+        # источникам, полноценно покрывающим свои счета (API); для 'all' ответ
+        # покрывает всех брокеров, для excel состав файла полноты не гарантирует.
+        absence_known = args.upsert and args.source != 'excel'
+        closed = self.db.mark_closed_positions(
+            keep_keys={(p.isin, p.broker_name, p.account_id or '') for p in positions_to_save} if absence_known else None,
+            brokers=_source_brokers.get(args.source) if absence_known else None,
+        )
+        matured = self.db.mark_matured_positions()
+        if closed:
+            logger.warning("Зомби-позиции помечены status='closed' при синке:")
+            for row in closed:
+                logger.warning(
+                    f"  ISIN: {row['isin']}, broker: {row['broker_name']}, "
+                    f"account: {row['account_id'] or ''}, qty: {row['quantity']} "
+                    f"(причина: {row['reason']})"
+                )
+        if matured:
+            logger.warning("Погашенные бумаги помечены status='matured' при синке:")
+            for row in matured:
+                logger.warning(
+                    f"  ISIN: {row['isin']}, broker: {row['broker_name']}, "
+                    f"account: {row['account_id'] or ''}, qty: {row['quantity']}"
+                )
+        if closed or matured:
+            logger.info(
+                f"Чистка зомби при синке: closed={len(closed)}, matured={len(matured)}. "
+                f"Ненулевые позиции с нулевой оценкой на живых бумагах не тронуты "
+                f"(гейт: WARN_ZOMBIE_ROWS); разовая чистка — cleanup-portfolio."
+            )
+
         logger.info(f"Проверка: Фактически в БД сохранено {len(self.db.get_portfolio_positions())} позиций.")
         logger.info(f"Синхронизация портфеля успешно завершена. Сохранено позиций: {len(positions_to_save)}")
 

@@ -16,15 +16,22 @@ python3 main.py calculate-ytm [опции]
 | Параметр | Тип | По умолчанию | Описание |
 |----------|-----|--------------|----------|
 | `--mode` | string | обязательный | Режим расчета: `buy` (кандидаты) или `portfolio` (позиции) |
+| `--format` | string | `text` | Формат вывода: `text` — человекочитаемая ASCII-таблица, `json` — машинный формат для агента (см. ниже) |
 | `--min-ytm` | float | `None` | Минимальная YTM для фильтрации (в процентах, например `15.0`) |
-| `--limit` | integer | `50` | Количество облигаций для показа |
+| `--limit` | integer | `50` | Максимум облигаций в выдаче. При активных фильтрах выдачи (`--coupon-freq-max/--coupon-freq-in/--exclude-sovereign`) или в `--format json` лимит применяется к итоговой выдаче |
 | `--max-risk` | integer | `3` | Максимальный уровень риска (1-5) |
-| `--min-maturity` | string | `2025-01-01` | Минимальная дата погашения (YYYY-MM-DD) |
-| `--max-maturity` | string | `2030-12-31` | Максимальная дата погашения (YYYY-MM-DD) |
+| `--max-listlevel` | integer | `2` | Максимальный уровень листинга MOEX для buy-режима (1=высший, 3=третий) |
+| `--max-ytm` | float | `35.0` | Порог отсечения аномальной доходности (YTM ≥ значения = ВДО/дистресс) |
+| `--min-maturity` | string | `None` | Минимальная дата погашения (YYYY-MM-DD). По умолчанию — только непогашенные бумаги (`maturity_date >= сегодня`) |
+| `--max-maturity` | string | `None` | Максимальная дата погашения (YYYY-MM-DD). По умолчанию верхней границы нет — широкое окно (002.3/P9.5; прежние дефолты `2025-01-01`/`2030-12-31` устарели: первый был в прошлом, второй отсекал топ-фиксы 2030+) |
 | `--no-amortization` | flag | `false` | Исключить облигации с амортизацией |
 | `--monthly-coupons` | flag | `false` | Только облигации с ежемесячными купонами (12 раз в год) |
 | `--fixed-coupon` | flag | `false` | Только облигации с фиксированным купоном |
 | `--floating-coupon` | flag | `false` | Только флоатеры |
+| `--coupon-freq-max` | integer | `None` | Максимальная частота купонов в год: `4` = квартальные и реже (005.3/P-C). Взаимоисключимо с `--coupon-freq-in` |
+| `--coupon-freq-in` | string | `None` | Только указанные частоты через запятую, например `2,4` (005.3/P-C). Взаимоисключимо с `--coupon-freq-max` |
+| `--exclude-sovereign` | flag | `false` | Исключить суверенных эмитентов: ОФЗ и евро-РФ (`companies.entity_type='sovereign'`, фолбэк — имя «ОФЗ…») (005.3/P-G) |
+| `--include-held` | flag | `false` | Режим buy: показывать и бумаги, уже лежащие в портфеле (докупки), с бейджем held (доля N%) |
 
 ### Детальное описание параметров
 
@@ -36,6 +43,52 @@ python3 main.py calculate-ytm [опции]
 #### `--min-ytm`
 Фильтрация по минимальной годовой доходности к погашению в процентах.
 При указании порога отсекаются бумаги с меньшей YTM, а также бумаги с намеренным `NULL` (порог не превращает `NULL` в 0).
+
+#### `--coupon-freq-max` / `--coupon-freq-in` (005.3/P-C)
+Фильтр частоты купонов, конвенция общая с `rebalance-report --freq-max/--freq-in`:
+- `--coupon-freq-max 4` — квартальные выплаты и реже (кейс «квартальные максимум»);
+- `--coupon-freq-in 2,4` — только указанные частоты.
+Бумаги с неизвестной частотой (`NULL`) при активном фильтре не проходят. Флаги взаимоисключающие.
+
+#### `--exclude-sovereign` (005.3/P-G)
+Исключает суверенных эмитентов: ОФЗ и евробонды РФ. Определяются по связке с `companies` (`entity_type='sovereign'`), с фолбэком на имя выпуска («ОФЗ…») на случай незаполненной связки.
+
+---
+
+## Машинный формат `--format json` (005.3)
+
+Для LLM-агента: `stdout` — чистый JSON (парсится целиком), логи — только в `stderr`,
+причём в дефолтном режиме (без `-v/--verbose`) логируется лишь уровень WARNING+;
+INFO-логи возвращаются флагом `-v` (R6/P-F).
+
+Контракт согласован с `rebalance-report` (schema_version=1, проценты в `*_pct`):
+
+```json
+{
+  "schema_version": 1,
+  "meta": { "generated_at": "...", "mode": "buy" },
+  "filters": { "mode": "buy", "min_ytm_pct": null, "max_risk": 3,
+               "max_listlevel": 2, "max_ytm_pct": 35.0,
+               "coupon_freq_max": 4, "coupon_freq_in": null,
+               "exclude_sovereign": false, "limit": 50, "...": "..." },
+  "excluded": { "sovereign": 0, "freq": 3, "min_ytm": 0, "max_ytm": 1,
+                "limit_truncated": 12 },
+  "candidates_total": 120,
+  "count": 50,
+  "bonds": [
+    { "isin": "...", "name": "...", "ticker": "...", "price": 95.0,
+      "ytm_pct": 17.35, "ytm_reason": null, "coupon_pct": 15.0, "freq": 4,
+      "coupon_kind": "fix", "risk_level": 1, "list_level": 1,
+      "maturity": "2028-03-16", "amort": false, "ku": false, "issuer": "...",
+      "coupon_month_per_bond": 3.75, "held_badge": null }
+  ]
+}
+```
+
+- Единицы: `ytm_pct`/`coupon_pct` — % годовых; `price`/`avg_price` — рубли за бумагу; `freq` — раз/год; `coupon_month_per_bond` — ₽/мес на одну бумагу (в portfolio-режиме SQL-сумма по позиции нормируется на количество). В portfolio-строках дополнительно `qty`, `avg_price`, `price_change_pct`.
+- Единицы `bonds_catalog.ytm` — те же проценты годовых (задача 005.4, миграция 013): SQL-колонка и вывод команды согласованы 1:1, смешение источников безопасно. Полный справочник единиц — [doc/units_conventions.md](../units_conventions.md).
+- `excluded` — воронка отсечений (R9): сколько бумаг отсеяли фильтры выдачи по причинам; `limit_truncated` — обрезано лимитом выдачи. SQL-стадии (риск/листинг/окно погашения/хранимый потолок YTM) отсекают до выборки — их значения видны в `filters`, в `excluded` они не попадают.
+- При ошибке (например, конфликт флагов) процесс завершается с кодом 1, `stdout` остаётся пустым, сообщение — в `stderr`.
 
 ---
 
@@ -54,6 +107,18 @@ python3 main.py calculate-ytm --mode buy --fixed-coupon --min-ytm 15.0 --limit 1
 ### 3. Анализ с фильтрацией по риску и сроку
 ```bash
 python3 main.py calculate-ytm --mode buy --max-risk 2 --min-maturity 2026-01-01 --limit 10
+```
+
+### 4. Квартальные выплаты максимум, не ОФЗ, машинный JSON (005.3)
+```bash
+python3 main.py calculate-ytm --mode buy --format json \
+    --coupon-freq-max 4 --exclude-sovereign --max-risk 1 --limit 20
+```
+stdout — чистый JSON для агента; воронка отсечений — в блоке `excluded`.
+
+### 5. Подробные логи (INFO/DEBUG) в stderr
+```bash
+python3 main.py -v calculate-ytm --mode portfolio --format json
 ```
 
 ---
@@ -80,7 +145,7 @@ $$\text{DirtyPrice} = \sum_{i=1}^n \frac{CF_i}{(1 + y/f)^{f \cdot t_i}}$$
 
 ## Хранение данных
 
-- Поле `bonds_catalog.ytm` (`NUMERIC`): номинальная годовая доходность долей единицы (например, `0.152500`).
+- Поле `bonds_catalog.ytm` (`NUMERIC`): номинальная годовая доходность в **процентах** (например, `24.01` = 24.01%; единицы унифицированы миграцией `013_ytm_percent_units.sql` — до неё колонка хранила долю единицы, см. [doc/units_conventions.md](../units_conventions.md)).
 - Поле `bonds_catalog.ytm_null_reason` (`TEXT`): код причины, если расчет не применим.
 - Поле `bonds_catalog.ytm_updated_at` (`TIMESTAMPTZ`): метка времени обновления.
 

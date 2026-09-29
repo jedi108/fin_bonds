@@ -19,8 +19,14 @@ from psycopg2.extras import RealDictCursor
 from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond
 from src.migrations import discover_migrations, get_applied_versions
 from src.services.cashflow import calculate_bond_cashflow_metrics
+from src.utils import round_coupon_rate
 
 logger = logging.getLogger(__name__)
+
+# Жизненный цикл позиции portfolio_positions.status (миграция 010, задача 002.1).
+POSITION_STATUS_ACTIVE = 'active'
+POSITION_STATUS_MATURED = 'matured'
+POSITION_STATUS_CLOSED = 'closed'
 
 # Подзапрос «последняя рассчитанная ставка купона флоатера» — общий фрагмент
 # аналитических выборок. metric_value в monitoring_checks хранится строкой
@@ -38,6 +44,68 @@ _LATEST_FLOATER_RATE_JOIN = """
                 )
             ) mc_floater ON bc.isin = mc_floater.isin
 """
+
+# Агрегат доли бумаги в портфеле «сейчас» по ISIN — бейдж held (N%) (задача 002.2).
+# Агрегация через view v_portfolio_positions_valuation обязательна: прямой
+# LEFT JOIN portfolio_positions задвоил бы строки для ISIN на двух счетах
+# (кейс — ГлобалФ 5 шт + 2 шт на разных брокерах/счетах). Зомби-позиции
+# (status matured/closed, миграция 010) дают position_value_rub = 0 и на
+# долю практически не влияют — контракт бейджа единый с buy_candidates.sql.
+_HELD_SHARE_JOIN = """
+            LEFT JOIN (
+                SELECT v.isin,
+                       SUM(v.quantity) AS held_qty,
+                       ROUND(100.0 * SUM(v.position_value_rub)
+                             / NULLIF((SELECT SUM(position_value_rub) FROM v_portfolio_positions_valuation), 0), 2) AS held_share_pct
+                FROM v_portfolio_positions_valuation v
+                GROUP BY v.isin
+            ) held ON held.isin = bc.isin
+"""
+
+# Колонки бейджа для SELECT-списков (алиас held доступен в самом запросе):
+# ведущая запятая — фрагмент подставляется после последней «обычной» колонки.
+# %% — экранированный процент для psycopg2 (в выдаче — 'held (N%)').
+_HELD_BADGE_SELECT = """,
+                CASE WHEN held.isin IS NOT NULL
+                     THEN 'held (' || held.held_share_pct || '%%)' END as held_badge,
+                held.held_share_pct"""
+
+# Прежнее жёсткое исключение ISIN портфеля (include_held=False): запросы
+# остаются идентичны прошлому поведению — обратная совместимость SOP (002.2).
+_LEGACY_PORTFOLIO_EXCLUSION_JOIN = """
+            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+"""
+
+# Агрегат позиций портфеля по ISIN для rebalance-report (005.1): строки разных
+# брокеров/счетов сворачиваются в одну позицию. Стоимость — каноническая оценка
+# из v_portfolio_positions_valuation (контракт A3/002.2: номинальный фолбэк
+# живых позиций, зомби-строки погашенных бумаг — 0). price_x_qty — заготовка
+# взвешенной по количеству фактической цены (фолбэк — market_price каталога).
+_AGGREGATED_PORTFOLIO_SUBQUERY = """
+        SELECT v.isin,
+               MAX(v.ticker) AS pos_ticker,
+               MAX(v.name) AS pos_name,
+               SUM(v.quantity) AS quantity,
+               SUM(v.position_value_rub) AS value_rub,
+               SUM(v.current_price * v.quantity) AS price_x_qty
+        FROM v_portfolio_positions_valuation v
+        GROUP BY v.isin
+"""
+
+
+def _portfolio_exclusion_fragments(include_held: bool) -> Tuple[str, Optional[str], str]:
+    """SQL-фрагменты фильтра «вне портфеля» для скрининговых выборок (002.2).
+
+    Возвращает (join, not_held_condition | None, badge_select):
+    - include_held=False — прежний LEFT JOIN portfolio_positions + условие
+      pp.isin IS NULL; текст запроса не меняется (совместимость вывода).
+    - include_held=True — агрегат доли по ISIN (_HELD_SHARE_JOIN), условие
+      исключения снимается (None — не добавлять в WHERE), в SELECT
+      добавляются held_badge / held_share_pct.
+    """
+    if include_held:
+        return _HELD_SHARE_JOIN, None, _HELD_BADGE_SELECT
+    return _LEGACY_PORTFOLIO_EXCLUSION_JOIN, "pp.isin IS NULL", ""
 
 
 def _row_to_bond(row: Optional[Mapping[str, Any]]) -> Optional[Bond]:
@@ -97,7 +165,7 @@ def _row_to_portfolio_position(row: Mapping[str, Any]) -> Optional[PortfolioPosi
         'current_price', 'currency', 'yield_to_maturity',
         'portfolio_percent', 'current_value', 'broker_name',
         'instrument_type', 'figi', 'liquidity_loss_ratio', 'coupon_rate_percent',
-        'account_id'
+        'account_id', 'status'
     }
 
     # Фильтруем строку, оставляя только ожидаемые и непустые поля
@@ -237,13 +305,21 @@ class PortfolioStorage:
         """Добавляет запись в историю кредитных рейтингов.
 
         rating_code — значение по шкале рейтингов из конфигурации
-        (rating_scale); колонка agency в схеме отсутствует.
+        (rating_scale, в нормализованном виде — см. utils.normalize_rating_code);
+        колонка agency в схеме отсутствует.
+
+        Идемпотентно в пределах дня (002.6): уникальный индекс
+        (isin, rating_date, rating_code) — миграция 012; повторная запись
+        того же кода за ту же дату (перезапуск update-ratings) — no-op.
+        Изменение кода в течение дня создаёт отдельную строку (история
+        изменений сохраняется).
         """
         with self.conn:
             cursor = self._cursor()
             cursor.execute("""
                 INSERT INTO rating_history (isin, rating_date, rating_code, rating_score)
                 VALUES (%s, %s, %s, %s)
+                ON CONFLICT (isin, rating_date, rating_code) DO NOTHING
             """, (isin, rating_date, rating_code, rating_score))
 
     def add_risk_level(self, isin: str, risk_date: date, risk_level: int):
@@ -285,7 +361,10 @@ class PortfolioStorage:
                 bond.offer_date if bond.offer_date else None,
                 bond.coupon_quantity_per_year,
                 bond.coupon_rate_percent if bond.coupon_rate_percent else None,
-                bond.coupon_type,
+                # coupon_type выводим из флага флоатера, если источник его не
+                # принёс (002.5, P4): каталог TBank пишет поле без купонного
+                # типа, NULL ломал бы фильтры coupon_type='FLOAT' в ad-hoc SQL.
+                bond.coupon_type or ('FLOAT' if bond.floating_coupon_flag else 'FIX'),
                 bond.list_level, bond.risk_level,
                 bond.coupon_spread if bond.coupon_spread else None,
                 bond.is_trade_available, bond.is_for_qualified_investors, bond.issue_size,
@@ -475,7 +554,7 @@ class PortfolioStorage:
                 UPDATE bonds_catalog
                 SET list_level = %s, coupon_rate_percent = %s, offer_date = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE isin = %s
-            """, (list_level, coupon_rate, offer_date, isin))
+            """, (list_level, round_coupon_rate(coupon_rate), offer_date, isin))
         self.update_bonds_derived_metrics([isin])
         logger.debug(f"Обновлены MOEX данные для {isin}.")
 
@@ -610,6 +689,155 @@ class PortfolioStorage:
         except psycopg2.Error as e:
             logger.error(f"Ошибка при удалении позиций брокера {broker_name}: {e}")
 
+    # ------------------------------------------------------------------
+    # Зомби-позиции (задача 002.1): погашенные бумаги и нулевые количества
+    # не должны оставаться активными строками с нулевой оценкой.
+    # ------------------------------------------------------------------
+
+    def find_zombies(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Возвращает кандидатов на чистку среди активных позиций (status='active').
+
+        Ключи результата:
+          - 'matured': бумага погашена (maturity_date < CURRENT_DATE) — зомби,
+            чистится (status → 'matured');
+          - 'zero_quantity': нулевое/NULL количество — зомби, чистится
+            (status → 'closed');
+          - 'zero_value_live': ненулевое количество и нулевая/NULL оценка на
+            НЕпогашенной бумаге (класс ГлобалФ: цена 0 от брокера) — это НЕ
+            ошибка синка, позиция не чистится, а гейт свежести считает её
+            через WARN_ZOMBIE_ROWS. Возвращается только для отчёта.
+        """
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                pp.isin, pp.broker_name, pp.account_id, pp.ticker, pp.name,
+                pp.quantity, pp.current_value, pp.status
+            FROM portfolio_positions pp
+            JOIN bonds_catalog c ON c.isin = pp.isin
+            WHERE pp.status = 'active'
+              AND c.maturity_date < CURRENT_DATE
+            ORDER BY pp.isin, pp.broker_name, pp.account_id
+        """)
+        matured = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT
+                pp.isin, pp.broker_name, pp.account_id, pp.ticker, pp.name,
+                pp.quantity, pp.current_value, pp.status
+            FROM portfolio_positions pp
+            WHERE pp.status = 'active'
+              AND COALESCE(pp.quantity, 0) <= 0
+            ORDER BY pp.isin, pp.broker_name, pp.account_id
+        """)
+        zero_quantity = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT
+                pp.isin, pp.broker_name, pp.account_id, pp.ticker, pp.name,
+                pp.quantity, pp.current_value, pp.status,
+                COALESCE(c.maturity_date, CURRENT_DATE) >= CURRENT_DATE AS is_unmatured
+            FROM portfolio_positions pp
+            LEFT JOIN bonds_catalog c ON c.isin = pp.isin
+            WHERE pp.status = 'active'
+              AND COALESCE(pp.quantity, 0) > 0
+              AND (pp.current_value IS NULL OR pp.current_value <= 0)
+              AND COALESCE(c.maturity_date, CURRENT_DATE) >= CURRENT_DATE
+            ORDER BY pp.isin, pp.broker_name, pp.account_id
+        """)
+        zero_value_live = [dict(r) for r in cursor.fetchall()]
+
+        return {
+            'matured': matured,
+            'zero_quantity': zero_quantity,
+            'zero_value_live': zero_value_live,
+        }
+
+    def mark_matured_positions(self) -> List[Dict[str, Any]]:
+        """
+        Помечает status='matured' у активных позиций по погашенным бумагам
+        (maturity_date < CURRENT_DATE). Возвращает список помеченных строк.
+        """
+        try:
+            with self.conn:
+                cursor = self._cursor()
+                cursor.execute("""
+                    UPDATE portfolio_positions pp
+                    SET status = 'matured', updated_at = CURRENT_TIMESTAMP
+                    FROM bonds_catalog c
+                    WHERE c.isin = pp.isin
+                      AND c.maturity_date < CURRENT_DATE
+                      AND pp.status = 'active'
+                    RETURNING pp.isin, pp.broker_name, pp.account_id, pp.quantity
+                """)
+                marked = [dict(r) for r in cursor.fetchall()]
+        except psycopg2.Error as e:
+            logger.error(f"Ошибка при пометке погашенных позиций: {e}")
+            raise
+        if marked:
+            logger.info(f"Помечено status='matured': {len(marked)} позиций.")
+        return marked
+
+    def mark_closed_positions(
+        self,
+        keep_keys: Optional[Set[Tuple[str, str, str]]] = None,
+        brokers: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Помечает status='closed' у активных позиций:
+          - с нулевым/NULL количеством, и/или
+          - отсутствующих в keep_keys — наборе актуальных ключей
+            (isin, broker_name, account_id), если он передан.
+
+        brokers ограничивает область проверки (частичный синк одного брокера:
+        чужие брокерские строки не трогаются до их синка); keep_keys=None
+        означает «проверять только нулевое количество» (cleanup-portfolio).
+        Возвращает список помеченных строк.
+        """
+        query = """
+            SELECT isin, broker_name, account_id, quantity
+            FROM portfolio_positions
+            WHERE status = 'active'
+        """
+        params: List[Any] = []
+        if brokers:
+            query += " AND broker_name = ANY(%s)"
+            params.append(list(brokers))
+        cursor = self._cursor()
+        cursor.execute(query, tuple(params))
+        candidates = cursor.fetchall()
+
+        to_close: List[Dict[str, Any]] = []
+        for row in candidates:
+            account_id = row['account_id'] or ''
+            quantity = row['quantity']
+            key = (row['isin'], row['broker_name'], account_id)
+            if quantity is None or Decimal(str(quantity)) <= 0:
+                to_close.append({**dict(row), 'reason': 'zero_quantity'})
+            elif keep_keys is not None and key not in keep_keys:
+                to_close.append({**dict(row), 'reason': 'absent_at_broker'})
+        if not to_close:
+            return []
+
+        try:
+            with self.conn:
+                upd = self._cursor()
+                for row in to_close:
+                    upd.execute(
+                        """
+                        UPDATE portfolio_positions
+                        SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+                        WHERE isin = %s AND broker_name = %s AND account_id = %s
+                          AND status = 'active'
+                        """,
+                        (row['isin'], row['broker_name'], row['account_id'] or ''),
+                    )
+        except psycopg2.Error as e:
+            logger.error(f"Ошибка при пометке закрытых позиций: {e}")
+            raise
+        logger.info(f"Помечено status='closed': {len(to_close)} позиций.")
+        return to_close
+
     # Таблицы, которые разрешено очищать командой clear-data и seed-data.
     # Белый список для динамического DELETE: имя таблицы плейсхолдером
     # передать нельзя (§8 п.3 корневого ТЗ).
@@ -704,6 +932,7 @@ class PortfolioStorage:
                     liquidity_loss_ratio = COALESCE(excluded.liquidity_loss_ratio,
                                                     portfolio_positions.liquidity_loss_ratio),
                     coupon_rate_percent = excluded.coupon_rate_percent,
+                    status = excluded.status,
                     updated_at = CURRENT_TIMESTAMP
             """
 
@@ -736,6 +965,7 @@ class PortfolioStorage:
                 p.liquidity_loss_ratio,
                 p.coupon_rate_percent,
                 p.account_id,
+                p.status,
                 b.figi
             FROM portfolio_positions p
             LEFT JOIN bonds_catalog b ON p.isin = b.isin
@@ -773,6 +1003,7 @@ class PortfolioStorage:
                 p.liquidity_loss_ratio,
                 p.coupon_rate_percent,
                 p.account_id,
+                p.status,
                 b.figi
             FROM portfolio_positions p
             LEFT JOIN bonds_catalog b ON p.isin = b.isin
@@ -1150,6 +1381,10 @@ class PortfolioStorage:
         - bonds_tradeable_stale_or_missing: торгуемые облигации без актуальной цены
           (market_price IS NULL ИЛИ market_price_updated_at устарел/NULL)
         - portfolio_zero_value_positions: позиции с current_value IS NULL или <= 0
+        - portfolio_zero_rows_suspicious: из них подозрительные — zero-строка на
+          НЕпогашенной бумаге (класс бага синка из 001); зомби-строки погашенных
+          бумаг сюда не входят (002.1, правило A1)
+        - portfolio_zero_value_isins: ISIN-список всех zero-строк через ';'
         - portfolio_total_value: суммарная оценка портфеля
         - last_sync_time: время последней синхронизации (MAX updated_at portfolio_positions)
         - max_market_price_time: время последнего обновления цены
@@ -1184,6 +1419,19 @@ class PortfolioStorage:
                 (SELECT MAX(updated_at) FROM portfolio_positions) AS last_sync_time,
                 (SELECT COUNT(*) FROM portfolio_positions
                  WHERE current_value IS NULL OR current_value <= 0) AS portfolio_zero_value_positions,
+                -- Подозрительные (002.1, правило A1 гейта): zero-строка на
+                -- НЕпогашенной бумаге (брокер занулил живую позицию — класс
+                -- бага из 001). ISIN нет в каталоге или дата погашения
+                -- неизвестна → считаем подозрительной (COALESCE → CURRENT_DATE).
+                (SELECT COUNT(*) FROM portfolio_positions pp
+                 WHERE (pp.current_value IS NULL OR pp.current_value <= 0)
+                   AND COALESCE((SELECT c.maturity_date FROM bonds_catalog c
+                                 WHERE c.isin = pp.isin), CURRENT_DATE) >= CURRENT_DATE
+                ) AS portfolio_zero_rows_suspicious,
+                (SELECT string_agg(DISTINCT isin, ';' ORDER BY isin)
+                   FROM portfolio_positions
+                  WHERE current_value IS NULL OR current_value <= 0
+                ) AS portfolio_zero_value_isins,
                 (SELECT COALESCE(SUM(current_value), 0) FROM portfolio_positions) AS portfolio_total_value,
                 (SELECT MAX(check_date) FROM monitoring_checks) AS monitoring_checks_max_check_date
             FROM bonds_catalog
@@ -1203,6 +1451,8 @@ class PortfolioStorage:
                 'portfolio_max_updated_at': None,
                 'last_sync_time': None,
                 'portfolio_zero_value_positions': 0,
+                'portfolio_zero_rows_suspicious': 0,
+                'portfolio_zero_value_isins': None,
                 'portfolio_total_value': Decimal(0),
                 'monitoring_checks_max_check_date': None,
             }
@@ -1312,7 +1562,11 @@ class PortfolioStorage:
                 metrics.duration_macaulay,
                 metrics.duration_modified,
                 metrics.null_reason,
-                metrics.ytm,
+                # 005.4 (миграция 013): bonds_catalog.ytm хранится в ПРОЦЕНТАХ
+                # годовых (24.01 = 24.01%). Движок возвращает долю (0.2401) —
+                # на границе записи умножаем на 100. Этот метод — единственный
+                # писатель колонки; читатели берут значение как есть.
+                None if metrics.ytm is None else metrics.ytm * 100,
                 metrics.null_reason if metrics.ytm is None else None,
                 r['isin'],
             ))
@@ -1441,13 +1695,15 @@ class PortfolioStorage:
     def update_bond_coupon_rate(self, isin: str, new_rate: Decimal):
         """
         Обновляет процентную ставку купона для указанной облигации.
+        Ставка нормализуется к 4 знакам после запятой (002.5, P9.4):
+        канал зовут update-floaters (RUONIA + spread).
         """
         query = "UPDATE bonds_catalog SET coupon_rate_percent = %s, updated_at = CURRENT_TIMESTAMP WHERE isin = %s"
         cursor = self._cursor()
         try:
             logger.debug(f"DB_WRITE: Preparing to update ISIN {isin} with new rate {new_rate}.")
             with self.conn:
-                cursor.execute(query, (new_rate, isin))
+                cursor.execute(query, (round_coupon_rate(new_rate), isin))
             rowcount = cursor.rowcount
             logger.debug(f"DB_WRITE: Executed UPDATE for ISIN {isin}. Rowcount: {rowcount}.")
 
@@ -1468,21 +1724,31 @@ class PortfolioStorage:
                                only_amortization: bool = False, exclude_amortization: bool = False,
                                limit: int = 20,
                                coupon_freq: Optional[int] = None,
-                               entity_type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Кандидаты на покупку вне портфеля, топ по текущей доходности
+                               entity_type_filter: Optional[str] = None,
+                               include_held: bool = False) -> List[Dict[str, Any]]:
+        """Кандидаты на покупку, топ по текущей доходности
         (режим top команды analyze-buy-candidates).
 
         min_days_to_maturity — минимальный срок до погашения в днях; месяцы
         до погашения считаются делением на 30.0 (не на 30 — иначе целочисленное
         деление PG меняет расчёт, §4 корневого ТЗ).
+
+        include_held=False — позиции портфеля исключены (прежнее поведение);
+        include_held=True — докупаемые позиции остаются в выдаче с бейджем
+        held (доля N%) (задача 002.2).
         """
         cursor = self._cursor()
+        held_join, not_held_condition, held_select = _portfolio_exclusion_fragments(include_held)
 
         conditions = [
             "bc.currency = 'rub'",
             "bc.is_trade_available IS TRUE",
             "bc.perpetual_flag IS NOT TRUE",
-            "pp.isin IS NULL",  # Нет в портфеле
+        ]
+        if not_held_condition is not None:
+            # Нет в портфеле; при include_held=True условие снимается (002.2)
+            conditions.append(not_held_condition)
+        conditions += [
             "bc.company_id IS NOT NULL",
             "bc.is_for_qualified_investors IS NOT TRUE",
             "bc.market_price IS NOT NULL",
@@ -1584,9 +1850,10 @@ class PortfolioStorage:
 
                 rh.rating_code as rating,
                 rh.rating_date
+                {held_select}
 
             FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {held_join}
             JOIN companies co ON co.id = bc.company_id
             LEFT JOIN (
                 SELECT DISTINCT ON (isin) isin, rating_code, rating_date
@@ -1604,16 +1871,27 @@ class PortfolioStorage:
 
     def get_floater_buy_candidates(self, limit: int = 15, max_risk: int = 1,
                                    coupon_freq: Optional[int] = None,
-                                   entity_type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Флоатеры вне портфеля с рассчитанной ставкой и установленным спредом
-        (режим floaters команды analyze-buy-candidates)."""
+                                   entity_type_filter: Optional[str] = None,
+                                   include_held: bool = False) -> List[Dict[str, Any]]:
+        """Флоатеры с рассчитанной ставкой и установленным спредом
+        (режим floaters команды analyze-buy-candidates).
+
+        include_held=False — позиции портфеля исключены (прежнее поведение);
+        include_held=True — докупаемые позиции остаются в выдаче с бейджем
+        held (доля N%) (задача 002.2).
+        """
         cursor = self._cursor()
+        held_join, not_held_condition, held_select = _portfolio_exclusion_fragments(include_held)
 
         conditions = [
             "bc.currency = 'rub'",
             "bc.is_trade_available IS TRUE",
             "bc.perpetual_flag IS NOT TRUE",
-            "pp.isin IS NULL",  # Нет в портфеле
+        ]
+        if not_held_condition is not None:
+            # Нет в портфеле; при include_held=True условие снимается (002.2)
+            conditions.append(not_held_condition)
+        conditions += [
             "bc.company_id IS NOT NULL",
             "bc.is_for_qualified_investors IS NOT TRUE",
             "bc.market_price IS NOT NULL",
@@ -1693,9 +1971,10 @@ class PortfolioStorage:
 
                 rh.rating_code as rating,
                 rh.rating_date
+                {held_select}
 
             FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {held_join}
             JOIN companies co ON co.id = bc.company_id
             LEFT JOIN (
                 SELECT DISTINCT ON (isin) isin, rating_code, rating_date
@@ -1711,10 +1990,21 @@ class PortfolioStorage:
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_portfolio_comparison_candidates(self, max_risk: int = 1, limit: int = 25) -> List[Dict[str, Any]]:
-        """Бумаги вне портфеля с потенциальной доходностью против средней
-        доходности портфеля (режим compare команды analyze-buy-candidates)."""
+    def get_portfolio_comparison_candidates(self, max_risk: int = 1, limit: int = 25,
+                                            include_held: bool = False) -> List[Dict[str, Any]]:
+        """Бумаги с потенциальной доходностью против средней доходности
+        портфеля (режим compare команды analyze-buy-candidates).
+
+        include_held=False — позиции портфеля исключены (прежнее поведение);
+        include_held=True — докупаемые позиции остаются в выдаче с бейджем
+        held (доля N%) (задача 002.2).
+        """
         cursor = self._cursor()
+        held_join, not_held_condition, held_select = _portfolio_exclusion_fragments(include_held)
+        if not_held_condition is not None:
+            not_held_sql = f"AND {not_held_condition}  -- Нет в портфеле"
+        else:
+            not_held_sql = "-- Исключение портфеля снято (include_held, 002.2)"
         query = f"""
             WITH portfolio_avg_yield AS (
                 SELECT
@@ -1751,15 +2041,16 @@ class PortfolioStorage:
                     WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
                     ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
                 END as recommendation
+                {held_select}
 
             FROM bonds_catalog bc
-            LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
+            {held_join}
             {_LATEST_FLOATER_RATE_JOIN}
             CROSS JOIN portfolio_avg_yield pavg
             WHERE bc.currency = 'rub'
                 AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
                 AND bc.perpetual_flag IS NOT TRUE
-                AND pp.isin IS NULL  -- Нет в портфеле
+                {not_held_sql}
                 AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
                 AND bc.market_price IS NOT NULL  -- Есть рыночная цена
                 AND bc.risk_level <= %s  -- Только низкорисковые
@@ -2005,10 +2296,11 @@ class PortfolioStorage:
                               max_risk: int, no_amortization: bool = False,
                               monthly_coupons: bool = False, fixed_coupon: bool = False,
                               floating_coupon: bool = False, limit: int = 50,
-                              max_listlevel: int = 2, max_ytm: float = 35.0) -> List[Dict[str, Any]]:
+                              max_listlevel: int = 2, max_ytm: float = 35.0,
+                              include_held: bool = False) -> List[Dict[str, Any]]:
         """Строки таблицы доходностей для команды calculate-ytm.
 
-        mode='buy' — кандидаты на покупку вне портфеля (цена рыночная),
+        mode='buy' — кандидаты на покупку (цена рыночная),
         mode='portfolio' — позиции портфеля (цена средняя покупки). Сам расчёт
         YTM остаётся в use-case'е. Динамические фильтры — статические строки;
         даты, уровень риска и лимит передаются параметрами.
@@ -2016,9 +2308,44 @@ class PortfolioStorage:
         В buy-режиме дополнительно отсекаются бумаги третьего эшелона
         (list_level > max_listlevel, NULL проходит) и аномальные доходности
         (ytm > max_ytm, % годовых — маркер ВДО/дистресса; NULL проходит).
+
+        include_held (только mode='buy'): False — позиции портфеля исключены
+        (прежнее поведение); True — докупаемые позиции остаются в выдаче
+        с бейджем held (доля N%) (задача 002.2).
+
+        Окно погашения (002.3/P9.5): min_maturity/max_maturity — явные даты
+        'YYYY-MM-DD' или None. max_maturity=None — верхней границы нет
+        (широкое окно по умолчанию; прежний дефолт '2030-12-31' отсекал
+        топ-фиксы 2030+). min_maturity=None — нижняя граница = CURRENT_DATE
+        (уже погашенные бумаги не показываются; прежний дефолт '2025-01-01'
+        был в прошлом).
         """
         if mode not in ('buy', 'portfolio'):
             raise ValueError(f"Неизвестный режим таблицы доходностей: {mode!r}")
+
+        # 002.3/P9.5: окно погашения собирается динамически — None не
+        # подставляется параметром (сравнение с NULL отсекло бы все строки):
+        # без нижней границы берём только непогашенные, верхняя отсутствует.
+        maturity_filters = []
+        if min_maturity:
+            maturity_filters.append(("bc.maturity_date >= %s", min_maturity))
+        else:
+            maturity_filters.append(("bc.maturity_date >= CURRENT_DATE", None))
+        if max_maturity:
+            maturity_filters.append(("bc.maturity_date <= %s", max_maturity))
+        maturity_filter_sql = "".join(
+            f"\n                AND {clause}" for clause, _ in maturity_filters
+        )
+        maturity_params = [value for _, value in maturity_filters if value is not None]
+
+        # 002.2: жёсткое исключение портфеля только при include_held=False
+        # (запрос идентичен прежнему); при True позиции портфеля показываются
+        # с бейджем held (N%) — агрегат по ISIN через view оценки (см. A3).
+        if mode == 'buy':
+            held_join = _HELD_SHARE_JOIN if include_held else ""
+            held_select = _HELD_BADGE_SELECT if include_held else ""
+            not_held_filter = "" if include_held else """
+                AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)"""
 
         if mode == 'buy':
             body = f"""
@@ -2054,17 +2381,22 @@ class PortfolioStorage:
                 CASE
                     WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
                     ELSE 'Фиксированный'
-                END as coupon_type
+                END as coupon_type,
+                -- 005.1 (rebalance-report): эмитент/флаг КУ в каждой строке —
+                -- человекочитаемые поля и фильтры тулкита; добавка колонок
+                -- существующий вывод calculate-ytm не меняет.
+                bc.is_for_qualified_investors as ku,
+                co.name as issuer,
+                co.entity_type{held_select}
             FROM bonds_catalog bc
+            LEFT JOIN companies co ON co.id = bc.company_id
             {_LATEST_FLOATER_RATE_JOIN}
+            {held_join}
             WHERE bc.currency = 'rub'
                 AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE
-                AND bc.maturity_date >= %s
-                AND bc.maturity_date <= %s
+                AND bc.perpetual_flag IS NOT TRUE{maturity_filter_sql}
                 AND bc.risk_level <= %s
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
-                AND bc.isin NOT IN (SELECT isin FROM portfolio_positions)
+                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL{not_held_filter}
                 AND (bc.list_level IS NULL OR bc.list_level <= %s)
                 AND (bc.ytm IS NULL OR bc.ytm <= %s)
         """
@@ -2110,15 +2442,20 @@ class PortfolioStorage:
                 CASE
                     WHEN bc.floating_coupon_flag IS TRUE THEN 'Плавающий'
                     ELSE 'Фиксированный'
-                END as coupon_type
+                END as coupon_type,
+                -- 005.3 (calculate-ytm): эмитент/флаг КУ/тип сущности в каждой
+                -- строке — фильтр --exclude-sovereign и JSON-выдача; добавка
+                -- колонок существующий вывод команды не меняет.
+                bc.is_for_qualified_investors as ku,
+                co.name as issuer,
+                co.entity_type
             FROM portfolio_positions pp
             JOIN bonds_catalog bc ON pp.isin = bc.isin
+            LEFT JOIN companies co ON co.id = bc.company_id
             {_LATEST_FLOATER_RATE_JOIN}
             WHERE bc.currency = 'rub'
                 AND pp.current_price > 0
-                AND pp.quantity > 0
-                AND bc.maturity_date >= %s
-                AND bc.maturity_date <= %s
+                AND pp.quantity > 0{maturity_filter_sql}
                 AND bc.risk_level <= %s
                 AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
         """
@@ -2134,14 +2471,147 @@ class PortfolioStorage:
             filters += " AND bc.floating_coupon_flag IS TRUE"
 
         query = body + filters + " ORDER BY bc.ytm DESC NULLS LAST, real_yield_percent DESC NULLS LAST LIMIT %s"
-        # bc.ytm хранится долей (0.35 = 35%), порог CLI задан в процентах
-        params = [min_maturity, max_maturity, max_risk]
+        # 005.4 (миграция 013): bc.ytm хранится в процентах годовых (24.01 =
+        # 24.01%), порог CLI --max-ytm тоже в процентах — сравнение 1:1;
+        # параметры окна погашения — динамические (002.3/P9.5)
+        params = [*maturity_params, max_risk]
         if mode == 'buy':
-            params += [max_listlevel, max_ytm / 100.0]
+            params += [max_listlevel, max_ytm]
         params += [limit]
 
         cursor = self._cursor()
         cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_rebalance_portfolio_rows(self) -> List[Dict[str, Any]]:
+        """Позиции портфеля, агрегированные по ISIN, для rebalance-report (005.1).
+
+        Каждому ISIN — одна строка: количество/стоимость просуммированы по всем
+        счетам, цена — фактическая (взвешенная по количеству current_price,
+        фолбэк market_price каталога; для занулённых брокером позиций это
+        честный 0). Стоимость — каноническая оценка view
+        v_portfolio_positions_valuation (контракт A3/002.2). Имя/тикер/эмитент
+        проставляются из каталога (анти-P-D: человекочитаемые поля даёт
+        хранилище, агент ISIN по памяти не придумывает). YTM хранится в
+        процентах годовых (005.4, миграция 013) и отдаётся как есть —
+        расчётный движок use-case'а читает её без конвертации.
+        """
+        cursor = self._cursor()
+        cursor.execute(f"""
+            SELECT
+                a.isin,
+                COALESCE(bc.ticker, a.pos_ticker) AS ticker,
+                COALESCE(bc.name, a.pos_name) AS name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) AS coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.maturity_date,
+                bc.offer_date,
+                bc.risk_level,
+                bc.list_level,
+                bc.amortization_flag,
+                bc.floating_coupon_flag,
+                bc.perpetual_flag,
+                bc.is_for_qualified_investors AS ku,
+                bc.market_price,
+                bc.ytm,
+                bc.ytm_null_reason,
+                bc.ytm_updated_at,
+                co.id AS company_id,
+                co.name AS issuer,
+                co.entity_type,
+                a.quantity,
+                a.value_rub,
+                COALESCE(
+                    CASE WHEN a.quantity > 0 AND a.price_x_qty IS NOT NULL
+                         THEN ROUND(a.price_x_qty / a.quantity, 4) END,
+                    bc.market_price
+                ) AS price
+            FROM ({_AGGREGATED_PORTFOLIO_SUBQUERY}) a
+            LEFT JOIN bonds_catalog bc ON bc.isin = a.isin
+            LEFT JOIN companies co ON co.id = bc.company_id
+            {_LATEST_FLOATER_RATE_JOIN}
+            ORDER BY a.value_rub DESC NULLS LAST, a.isin
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_scenario_universe_rows(self, isins: List[str]) -> List[Dict[str, Any]]:
+        """Строки каталога для ISIN, НЕ лежащих в портфеле — покупки сценария (005.2).
+
+        Форма строки повторяет get_rebalance_portfolio_rows (quantity/value_rub
+        = 0 — позиции ещё нет), чтобы сценарный расчёт в use-case'е шёл по одним
+        ключам для держимых и покупаемых бумаг. company_id нужен сценарию для
+        ошибки NO_COMPANY_LINK (блок 0 артефакта A2/002.4). Фильтров скрининга
+        нет — поиск по явному списку ISIN из scenario.json (анти-P-D: ISIN
+        приходит из вывода тулкита, не из памяти агента).
+        """
+        if not isins:
+            return []
+        cursor = self._cursor()
+        cursor.execute(f"""
+            SELECT
+                bc.isin,
+                bc.ticker,
+                bc.name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) AS coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.maturity_date,
+                bc.offer_date,
+                bc.risk_level,
+                bc.list_level,
+                bc.amortization_flag,
+                bc.floating_coupon_flag,
+                bc.perpetual_flag,
+                bc.is_for_qualified_investors AS ku,
+                bc.market_price,
+                bc.ytm,
+                bc.ytm_null_reason,
+                bc.ytm_updated_at,
+                co.id AS company_id,
+                co.name AS issuer,
+                co.entity_type,
+                0 AS quantity,
+                0 AS value_rub
+            FROM bonds_catalog bc
+            LEFT JOIN companies co ON co.id = bc.company_id
+            {_LATEST_FLOATER_RATE_JOIN}
+            WHERE bc.isin = ANY(%s)
+        """, (list(isins),))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_portfolio_redemption_events(self, months: int = 6) -> List[Dict[str, Any]]:
+        """Позиции портфеля с погашением/офертой на горизонте months месяцев (005.1).
+
+        Сырьё для календаря redemptions_6m (пул реинвеста): по одной строке на
+        ISIN с канонической оценкой позиции и обеими датами (maturity/offer);
+        выбор ближайшего события и суммы — в use-case'е. Погашенные позиции
+        (дата в прошлом) в окно не попадают автоматически.
+        """
+        if months <= 0:
+            raise ValueError("months должен быть положительным числом")
+        cursor = self._cursor()
+        cursor.execute(f"""
+            SELECT
+                a.isin,
+                COALESCE(bc.name, a.pos_name) AS name,
+                COALESCE(bc.ticker, a.pos_ticker) AS ticker,
+                co.name AS issuer,
+                a.quantity,
+                a.value_rub AS position_value_rub,
+                bc.maturity_date,
+                bc.offer_date
+            FROM ({_AGGREGATED_PORTFOLIO_SUBQUERY}) a
+            JOIN bonds_catalog bc ON bc.isin = a.isin
+            LEFT JOIN companies co ON co.id = bc.company_id
+            WHERE (bc.maturity_date IS NOT NULL
+                   AND bc.maturity_date >= CURRENT_DATE
+                   AND bc.maturity_date < CURRENT_DATE + make_interval(months => %s))
+               OR (bc.offer_date IS NOT NULL
+                   AND bc.offer_date >= CURRENT_DATE
+                   AND bc.offer_date < CURRENT_DATE + make_interval(months => %s))
+            ORDER BY a.isin
+        """, (months, months))
         return [dict(row) for row in cursor.fetchall()]
 
     def get_last_risk_listlevel(self, limit: int) -> List[Dict[str, Any]]:

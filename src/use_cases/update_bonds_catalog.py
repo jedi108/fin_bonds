@@ -61,6 +61,10 @@ def fetch_and_prepare_bond_details(bond: Bond) -> BondDTO:
         is_for_qualified_investors=bond.for_qual_investor_flag,
         list_level=None,  # Будет заполнено из MOEX
         coupon_rate_percent=None,  # Будет заполнено из MOEX
+        # Купонный тип синхронен флагу (002.5, P4): 'FIX'/'FLOAT' — те же
+        # значения, что пишет backfill миграции 011 и ждёт ad-hoc SQL
+        # с фильтром coupon_type='FLOAT'.
+        coupon_type='FLOAT' if bond.floating_coupon_flag else 'FIX',
         coupon_spread=None
     )
 

@@ -110,6 +110,15 @@ class TestAnalyzeBuyCandidatesParser:
         assert args.limit == 30
         assert args.max_risk == 2
 
+    def test_include_held_flag(self):
+        """002.2: --include-held есть во всех трёх режимах, по умолчанию False."""
+        parser = self._create_parser()
+        for mode in ('top', 'floaters', 'compare'):
+            args = parser.parse_args([mode])
+            assert args.include_held is False
+            args_held = parser.parse_args([mode, '--include-held'])
+            assert args_held.include_held is True
+
 
 class TestAnalyzeBuyCandidatesStorage:
     """Интеграционные тесты выборки кандидатов из базы данных."""
@@ -328,3 +337,119 @@ class TestAnalyzeBuyCandidatesStorage:
         assert fl['coupon_type'] == 'FLOAT'
         # coupon payment = (21.75 * 1000 / 100) / 12 = 18.125 -> 18.13
         assert Decimal(str(fl['coupon_payment_per_bond'])) == Decimal('18.13')
+
+    def _insert_held_position(self, db: PortfolioStorage, isin: str, ticker: str, name: str,
+                              quantity: Decimal, two_accounts: bool = False):
+        """Позиция портфеля; two_accounts=True кладёт ISIN на два счета (кейс задвоения 002.2)."""
+        cur = db._cursor()
+        rows = [(isin, ticker, name, float(quantity), 1000.0, 1000.0, 'tbank', 'A1')]
+        if two_accounts:
+            rows.append((isin, ticker, name, 2.0, 1000.0, 1000.0, 'tbank', 'A2'))
+        cur.executemany(
+            "INSERT INTO portfolio_positions (isin, ticker, name, quantity, average_price, "
+            "current_price, broker_name, account_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            rows,
+        )
+
+    def test_get_top_buy_candidates_include_held(self, db: PortfolioStorage):
+        """002.2: include_held=True возвращает позиции портфеля с бейджем held (N%),
+        по умолчанию они исключены; ISIN на двух счетах не задваивает строки."""
+        comp_id = self._insert_company(db, 'ГТЛК', 'company')
+        now = datetime.now(timezone.utc)
+        # Held-бумага с высокой доходностью — «лучшая докупка» (кейс ГТЛК 002P-04)
+        self._insert_bond(
+            db,
+            isin='RU000HELD001',
+            ticker='HELD1',
+            name='Held Bond 1',
+            company_id=comp_id,
+            coupon_rate_percent=Decimal('25.0'),
+            market_price=Decimal('1000.0'),
+            market_price_updated_at=now,
+            risk_level=1,
+        )
+        self._insert_bond(
+            db,
+            isin='RU000FREE001',
+            ticker='FREE1',
+            name='Free Bond 1',
+            company_id=comp_id,
+            coupon_rate_percent=Decimal('10.0'),
+            market_price=Decimal('1000.0'),
+            market_price_updated_at=now,
+            risk_level=1,
+        )
+        self._insert_held_position(db, 'RU000HELD001', 'HELD1', 'Held Bond 1',
+                                   Decimal('5'), two_accounts=True)  # 5 шт + 2 шт
+
+        # По умолчанию позиции портфеля исключены (обратная совместимость)
+        default_rows = db.get_top_buy_candidates(max_risk=1)
+        assert [r['isin'] for r in default_rows] == ['RU000FREE001']
+
+        # include_held=True: held-бумага видна ровно одной строкой, с бейджем
+        rows = db.get_top_buy_candidates(max_risk=1, include_held=True)
+        held_rows = [r for r in rows if r['isin'] == 'RU000HELD001']
+        assert len(held_rows) == 1
+        assert 'RU000FREE001' in [r['isin'] for r in rows]
+        # Доля: (5 + 2) * 1000 = 7000 из 7000 всего портфеля = 100.00%
+        assert held_rows[0]['held_share_pct'] == Decimal('100.00')
+        assert held_rows[0]['held_badge'] == 'held (100.00%)'
+
+    def test_get_floater_buy_candidates_include_held(self, db: PortfolioStorage):
+        """002.2: include_held=True для режима floaters."""
+        comp_id = self._insert_company(db, 'ВТБ', 'company')
+        now = datetime.now(timezone.utc)
+        self._insert_bond(
+            db,
+            isin='RU000HELDFLT',
+            ticker='HFLT1',
+            name='Held Floater 1',
+            company_id=comp_id,
+            floating_coupon_flag=True,
+            coupon_spread=Decimal('1.5'),
+            coupon_quantity_per_year=12,
+            market_price=Decimal('980.0'),
+            market_price_updated_at=now,
+            risk_level=1,
+        )
+        cur = db._cursor()
+        cur.execute(
+            "INSERT INTO monitoring_checks (isin, check_date, metric_name, metric_value) "
+            "VALUES ('RU000HELDFLT', CURRENT_DATE, 'floater_coupon_calculator', '21.5')"
+        )
+        self._insert_held_position(db, 'RU000HELDFLT', 'HFLT1', 'Held Floater 1', Decimal('3'))
+
+        assert db.get_floater_buy_candidates(max_risk=1) == []
+        rows = db.get_floater_buy_candidates(max_risk=1, include_held=True)
+        assert len(rows) == 1
+        assert rows[0]['isin'] == 'RU000HELDFLT'
+        assert rows[0]['held_badge'] == 'held (100.00%)'
+
+    def test_get_portfolio_comparison_candidates_include_held(self, db: PortfolioStorage):
+        """002.2: include_held=True для режима compare."""
+        comp_id = self._insert_company(db, 'Газпром', 'company')
+        now = datetime.now(timezone.utc)
+        for isin, ticker, rate in (
+            ('RU000HELD001', 'HELD1', '25.0'),
+            ('RU000FREE001', 'FREE1', '10.0'),
+        ):
+            self._insert_bond(
+                db,
+                isin=isin,
+                ticker=ticker,
+                name=ticker,
+                company_id=comp_id,
+                coupon_rate_percent=Decimal(rate),
+                market_price=Decimal('1000.0'),
+                market_price_updated_at=now,
+                risk_level=1,
+            )
+        self._insert_held_position(db, 'RU000HELD001', 'HELD1', 'HELD1', Decimal('5'))
+
+        default_rows = db.get_portfolio_comparison_candidates(max_risk=1)
+        assert 'RU000HELD001' not in [r['isin'] for r in default_rows]
+
+        rows = db.get_portfolio_comparison_candidates(max_risk=1, include_held=True)
+        held = next(r for r in rows if r['isin'] == 'RU000HELD001')
+        assert held['held_badge'] == 'held (100.00%)'
+        assert held['held_share_pct'] == Decimal('100.00')

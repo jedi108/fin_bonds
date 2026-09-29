@@ -30,6 +30,9 @@ def test_freshness_empty_db(db):
     assert freshness['bonds_with_stale_market_price'] == 0
     assert freshness['portfolio_positions_rows'] == 0
     assert freshness['portfolio_max_updated_at'] is None
+    assert freshness['portfolio_zero_value_positions'] == 0
+    assert freshness['portfolio_zero_rows_suspicious'] == 0
+    assert freshness['portfolio_zero_value_isins'] is None
     assert freshness['monitoring_checks_max_check_date'] is None
 
 
@@ -126,6 +129,9 @@ def test_freshness_with_data_fresh_stale_and_null(db):
     assert freshness['portfolio_max_updated_at'] == fresh_time
     assert freshness['last_sync_time'] == fresh_time
     assert freshness['portfolio_zero_value_positions'] == 1  # позиция без current_value
+    # 002.1: RU000A1 не погашена (maturity 2030) → zero-строка подозрительная
+    assert freshness['portfolio_zero_rows_suspicious'] == 1
+    assert freshness['portfolio_zero_value_isins'] == 'RU000A1'
     assert freshness['portfolio_total_value'] == Decimal(0)
     assert freshness['monitoring_checks_max_check_date'] == check_d
 
@@ -158,6 +164,7 @@ def test_use_case_freshness_json_output(db, capsys):
     expected_keys = {
         'generated_at',
         'status',
+        'gate_status',
         'is_fresh',
         'issues',
         'bonds_catalog_rows',
@@ -169,6 +176,8 @@ def test_use_case_freshness_json_output(db, capsys):
         'bonds_tradeable_stale_or_missing',
         'portfolio_positions_rows',
         'portfolio_zero_value_positions',
+        'portfolio_zero_rows_suspicious',
+        'portfolio_zero_rows_isins',
         'portfolio_total_value',
         'portfolio_max_updated_at',
         'monitoring_checks_max_check_date',
@@ -182,6 +191,9 @@ def test_use_case_freshness_json_output(db, capsys):
     assert data['bonds_with_market_price'] == 0
     assert data['is_fresh'] is False
     assert data['status'] == 'CRITICAL'
+    # Канонический статус гейта v2 (артефакт A1) согласован с SQL-точкой:
+    # портфель пуст → первый порядок проверок A1 даёт EMPTY_PORTFOLIO
+    assert data['gate_status'] == 'EMPTY_PORTFOLIO'
     assert data['issues']
 
 
@@ -220,6 +232,8 @@ def test_freshness_gate_empty_price_catalog_is_critical(db, capsys):
     assert data['portfolio_zero_value_positions'] == 0
     assert data['is_fresh'] is False
     assert data['status'] == 'CRITICAL'
+    # 002.1: канонический статус v2 согласован с SQL-гейтом (A1)
+    assert data['gate_status'] == 'CRITICAL_NO_PRICES'
     assert any('рыночных цен пуст' in issue for issue in data['issues'])
 
 
@@ -243,6 +257,13 @@ def test_cli_freshness_contracts(db):
     python_bin = sys.executable
     env = os.environ.copy()
     env['PYTHONPATH'] = '.'
+    # Подпроцесс main.py должен работать с той же тестовой БД, что и фикстура:
+    # load_dotenv не перекрывает уже выставленные переменные окружения, поэтому
+    # явный POSTGRES_DSN защищает и от случайного выхода на боевой DSN из .env
+    # (fail-fast по версии миграций ловит расхождение, но лучше не ходить туда вовсе).
+    test_dsn = env.get('POSTGRES_DSN_TEST')
+    assert test_dsn, "POSTGRES_DSN_TEST не задан — CLI-тест не может идти на тестовую БД"
+    env['POSTGRES_DSN'] = test_dsn
 
     # 1. Успешный запуск --freshness --json: rc == 0, stdout ровно валидный JSON
     res = subprocess.run(
@@ -279,3 +300,109 @@ def test_cli_freshness_contracts(db):
     assert res_err2.returncode != 0
     assert res_err2.stdout == ""
     assert res_err2.stderr != ""
+
+
+# ---------------------------------------------------------------------------
+# Гейт v2 (задача 002.1): зомби-строки не блокируют ребалансировку
+# ---------------------------------------------------------------------------
+
+def _make_fresh_catalog(db, isin: str, maturity: date):
+    """Торгуемая бумага со свежей ценой — чтобы гейт дошёл до проверки zero-строк."""
+    db.add_bonds_to_catalog([make_bond(isin, f'Бонд {isin}')])
+    now = datetime.now(timezone.utc)
+    with db.conn.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE bonds_catalog
+            SET is_trade_available = TRUE, market_price = 1000.0, market_price_updated_at = %s
+            WHERE isin = %s
+            """,
+            (now, isin),
+        )
+
+
+def test_zombie_rows_are_warning_not_critical(db, capsys):
+    """002.1, кейс сессии 2026-09-29: погашенная МОНОП (zero-строка) +
+    ГлобалФ (цена 0 от брокера) → WARN_ZOMBIE_ROWS, is_fresh=true,
+    ручной разбор не требуется."""
+    now = datetime.now(timezone.utc)
+    # Погашенная бумага с zero-оценкой (МОНОП 1P02)
+    db.add_bonds_to_catalog([Bond(
+        isin='RU000A10AA02', name='МОНОП 1P02', nominal=Decimal(1000),
+        maturity_date=date(2025, 12, 4), currency='RUB',
+    )])
+    # Живая бумага, брокер дал цену 0 (ГлобалФ 1P5)
+    _make_fresh_catalog(db, 'RU000A108VZ0', maturity=date(2028, 3, 14))
+    with db.conn.cursor() as cursor:
+        cursor.execute(
+            "UPDATE bonds_catalog SET market_price = 0 WHERE isin = 'RU000A108VZ0'"
+        )
+        cursor.execute(
+            """
+            INSERT INTO portfolio_positions (isin, broker_name, account_id, quantity, current_price, current_value, updated_at)
+            VALUES
+              ('RU000A10AA02', 'TBank', 't1', 35, 0, 0, %s),
+              ('RU000A108VZ0', 'TBank', 't1', 5, 0, 0, %s),
+              ('RU000A108VZ0', 'Alor', 'a1', 2, 0, 0, %s)
+            """,
+            (now, now, now),
+        )
+    db.conn.commit()
+
+    use_case = CheckDbUseCase(config={}, db=db)
+
+    class Args:
+        freshness = True
+        json = True
+        query = None
+        limit = 10
+        fail_stale = False
+
+    use_case.execute(Args())
+    data = json.loads(capsys.readouterr().out.strip())
+
+    assert data['portfolio_positions_rows'] == 3
+    assert data['portfolio_zero_value_positions'] == 3
+    # Погашенная МОНОП не подозрительная, ГлобалФ (2 строки) — подозрительные
+    assert data['portfolio_zero_rows_suspicious'] == 2
+    assert data['portfolio_zero_rows_isins'] == 'RU000A108VZ0;RU000A10AA02'
+    # Главное: зомби-строки не дают ложного CRITICAL и не ломают is_fresh
+    assert data['gate_status'] == 'WARN_ZOMBIE_ROWS'
+    assert data['status'] == 'WARNING'
+    assert data['is_fresh'] is True
+
+
+def test_more_than_two_suspicious_zero_rows_is_critical(db, capsys):
+    """002.1: >2 zero-строк на НЕпогашенных бумагах — массовый сбой синка
+    (класс бага из 001) → CRITICAL_ZERO_VALUATION, is_fresh=false."""
+    now = datetime.now(timezone.utc)
+    for i in (1, 2, 3):
+        _make_fresh_catalog(db, f'RU000B000000{i}', maturity=date(2030, 1, 1))
+    with db.conn.cursor() as cursor:
+        for i in (1, 2, 3):
+            cursor.execute(
+                """
+                INSERT INTO portfolio_positions (isin, broker_name, account_id, quantity, current_price, current_value, updated_at)
+                VALUES (%s, 'TBank', 't1', 10, 0, 0, %s)
+                """,
+                (f'RU000B000000{i}', now),
+            )
+    db.conn.commit()
+
+    use_case = CheckDbUseCase(config={}, db=db)
+
+    class Args:
+        freshness = True
+        json = True
+        query = None
+        limit = 10
+        fail_stale = False
+
+    use_case.execute(Args())
+    data = json.loads(capsys.readouterr().out.strip())
+
+    assert data['portfolio_zero_value_positions'] == 3
+    assert data['portfolio_zero_rows_suspicious'] == 3
+    assert data['gate_status'] == 'CRITICAL_ZERO_VALUATION'
+    assert data['status'] == 'CRITICAL'
+    assert data['is_fresh'] is False

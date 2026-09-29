@@ -1,10 +1,10 @@
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import logging
 import sys
-from typing import Dict, Any, List, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 
@@ -14,6 +14,177 @@ from src.use_cases.base import UseCase
 # Предотвращаем циклический импорт для type hints
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
+
+
+def _format_dt(val):
+    """Метка времени -> ISO-строка с таймзоной (NULL/пусто -> None)."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=timezone.utc)
+        return val.isoformat()
+    return str(val)
+
+
+def _format_date(val):
+    """Дата/метка времени -> 'YYYY-MM-DD' (NULL/пусто -> None)."""
+    if val is None:
+        return None
+    if isinstance(val, (date, datetime)):
+        return val.strftime('%Y-%m-%d')
+    return str(val)
+
+
+def classify_freshness(
+    freshness_data: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> Tuple[List[str], List[str], str, bool]:
+    """Гейт свежести данных (контракт 001/002; WARN vs CRITICAL по P1/002).
+
+    Общая точка классификации для check-db и rebalance-report (005.1):
+    одинаковые пороги и тексты инцидентов. Инцидент 2026-09-29: пустой каталог
+    цен давал «0 устаревших из 0» и считался OK — поэтому пустота цен/портфеля
+    трактуется как критическое нарушение, а не как отсутствие проблем.
+
+    Returns:
+        (critical_issues, warning_issues, gate_status, is_fresh).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    bonds_with_market_price = int(freshness_data.get('bonds_with_market_price') or 0)
+    tradeable_count = int(freshness_data.get('bonds_tradeable_count') or 0)
+    stale_or_missing = int(freshness_data.get('bonds_tradeable_stale_or_missing') or 0)
+    portfolio_rows = int(freshness_data.get('portfolio_positions_rows') or 0)
+    zero_value_positions = int(freshness_data.get('portfolio_zero_value_positions') or 0)
+    # Правило A1 (002.1): подозрительные = zero-строки на НЕпогашенных
+    # бумагах (класс бага синка из 001); зомби-строки погашенных бумаг
+    # подозрительными не считаются и CRITICAL не дают.
+    zero_rows_suspicious = int(freshness_data.get('portfolio_zero_rows_suspicious') or 0)
+    zero_rows_isins = freshness_data.get('portfolio_zero_value_isins') or ''
+
+    last_sync_time = freshness_data.get('last_sync_time')
+    if isinstance(last_sync_time, datetime) and last_sync_time.tzinfo is None:
+        last_sync_time = last_sync_time.replace(tzinfo=timezone.utc)
+    # Порог «3 дня» — точным сравнением меток, как в A1
+    # (last_sync_time < NOW() - INTERVAL '3 days'), а не целыми сутками
+    # через (.days): floor расходился бы с SQL-гейтом в окне 3–4 дня.
+    sync_stale = last_sync_time is None or last_sync_time < now - timedelta(days=3)
+
+    stale_share_limit = tradeable_count * 0.2
+    stale_share_ok = stale_or_missing <= stale_share_limit
+
+    critical_issues: List[str] = []
+    warning_issues: List[str] = []
+
+    if bonds_with_market_price == 0:
+        critical_issues.append(
+            "Каталог рыночных цен пуст: ни у одной облигации не заполнен market_price"
+        )
+    if not stale_share_ok:
+        warning_issues.append(
+            f"Без актуальной рыночной цены {stale_or_missing} из {tradeable_count} "
+            f"торгуемых облигаций — превышен порог 20%"
+        )
+    elif stale_or_missing > 0:
+        warning_issues.append(
+            f"Без актуальной рыночной цены {stale_or_missing} из {tradeable_count} "
+            f"торгуемых облигаций (в пределах порога 20%)"
+        )
+    if portfolio_rows == 0:
+        critical_issues.append("Портфель пуст: в portfolio_positions нет ни одной позиции")
+    if zero_rows_suspicious > 2:
+        critical_issues.append(
+            f"Подозрительных позиций с нулевой/отсутствующей оценкой на "
+            f"НЕпогашенных бумагах: {zero_rows_suspicious} (порог >2) — массовый "
+            f"сбой синка; ISIN: {zero_rows_isins or 'n/a'}"
+        )
+    elif zero_value_positions > 0:
+        # WARN_ZOMBIE_ROWS: данные свежие, ребалансировке не мешает,
+        # вручную не разбирать (002.1).
+        warning_issues.append(
+            f"WARN_ZOMBIE_ROWS: zero-строк в портфеле {zero_value_positions}, "
+            f"из них подозрительных (непогашенные) {zero_rows_suspicious} (в пределах "
+            f"порога); это зомби/легитимно занулённые брокером строки — "
+            f"разбирать вручную не нужно. ISIN: {zero_rows_isins or 'n/a'}"
+        )
+    if last_sync_time is None:
+        critical_issues.append("Нет метки последней синхронизации портфеля (last_sync_time = NULL)")
+    elif sync_stale:
+        critical_issues.append(
+            f"Портфель не синхронизировался дольше 3 дней "
+            f"(последняя синхронизация: {_format_dt(last_sync_time)})"
+        )
+
+    is_fresh = (
+        bonds_with_market_price > 0
+        and stale_share_ok
+        and portfolio_rows > 0
+        and zero_rows_suspicious <= 2
+        and last_sync_time is not None
+        and not sync_stale
+    )
+
+    # Канонический статус гейта v2 (артефакт A1, freshness_check.sql):
+    # тот же порядок проверок, что в SQL — обе точки гейта обязаны
+    # возвращать согласованное значение.
+    if portfolio_rows == 0:
+        gate_status = "EMPTY_PORTFOLIO"
+    elif zero_rows_suspicious > 2:
+        gate_status = "CRITICAL_ZERO_VALUATION"
+    elif tradeable_count == 0 or bonds_with_market_price == 0:
+        gate_status = "CRITICAL_NO_PRICES"
+    elif not stale_share_ok:
+        gate_status = "STALE_PRICES"
+    elif sync_stale:
+        gate_status = "STALE_PORTFOLIO"
+    elif zero_value_positions > 0:
+        gate_status = "WARN_ZOMBIE_ROWS"
+    else:
+        gate_status = "OK"
+
+    return critical_issues, warning_issues, gate_status, is_fresh
+
+
+def build_freshness_report(
+    freshness_data: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Собирает канонический JSON-отчёт свежести (команда check-db --freshness --json).
+
+    Использует classify_freshness — тот же гейт, что и rebalance-report (005.1).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    generated_at = now.isoformat()
+
+    critical_issues, warning_issues, gate_status, is_fresh = classify_freshness(freshness_data, now)
+
+    issues = critical_issues + warning_issues
+    status = "CRITICAL" if critical_issues else ("WARNING" if warning_issues else "OK")
+
+    return {
+        "generated_at": generated_at,
+        "status": status,
+        "gate_status": gate_status,
+        "is_fresh": is_fresh,
+        "issues": issues,
+        "bonds_catalog_rows": int(freshness_data.get('bonds_catalog_rows') or 0),
+        "bonds_catalog_max_updated_at": _format_dt(freshness_data.get('bonds_catalog_max_updated_at')),
+        "bonds_with_market_price": int(freshness_data.get('bonds_with_market_price') or 0),
+        "market_price_max_updated_at": _format_dt(freshness_data.get('market_price_max_updated_at')),
+        "bonds_with_stale_market_price": int(freshness_data.get('bonds_with_stale_market_price') or 0),
+        "bonds_tradeable_count": int(freshness_data.get('bonds_tradeable_count') or 0),
+        "bonds_tradeable_stale_or_missing": int(freshness_data.get('bonds_tradeable_stale_or_missing') or 0),
+        "portfolio_positions_rows": int(freshness_data.get('portfolio_positions_rows') or 0),
+        "portfolio_zero_value_positions": int(freshness_data.get('portfolio_zero_value_positions') or 0),
+        "portfolio_zero_rows_suspicious": int(freshness_data.get('portfolio_zero_rows_suspicious') or 0),
+        "portfolio_zero_rows_isins": freshness_data.get('portfolio_zero_value_isins') or '',
+        "portfolio_total_value": float(Decimal(str(freshness_data.get('portfolio_total_value') or 0))),
+        "portfolio_max_updated_at": _format_dt(freshness_data.get('portfolio_max_updated_at')),
+        "monitoring_checks_max_check_date": _format_date(freshness_data.get('monitoring_checks_max_check_date')),
+    }
 
 class CheckDbUseCase(UseCase):
     """
@@ -68,121 +239,23 @@ class CheckDbUseCase(UseCase):
 
         if is_freshness:
             freshness_data = self.db.get_db_freshness()
-
-            now = datetime.now(timezone.utc)
-            generated_at = now.isoformat()
-
-            def format_dt(val):
-                if val is None:
-                    return None
-                if isinstance(val, datetime):
-                    if val.tzinfo is None:
-                        val = val.replace(tzinfo=timezone.utc)
-                    return val.isoformat()
-                return str(val)
-
-            def format_date(val):
-                if val is None:
-                    return None
-                if isinstance(val, (date, datetime)):
-                    return val.strftime('%Y-%m-%d')
-                return str(val)
-
-            bonds_with_market_price = int(freshness_data.get('bonds_with_market_price') or 0)
-            tradeable_count = int(freshness_data.get('bonds_tradeable_count') or 0)
-            stale_or_missing = int(freshness_data.get('bonds_tradeable_stale_or_missing') or 0)
-            portfolio_rows = int(freshness_data.get('portfolio_positions_rows') or 0)
-            zero_value_positions = int(freshness_data.get('portfolio_zero_value_positions') or 0)
-            total_value = Decimal(str(freshness_data.get('portfolio_total_value') or 0))
-
-            last_sync_time = freshness_data.get('last_sync_time')
-            if isinstance(last_sync_time, datetime) and last_sync_time.tzinfo is None:
-                last_sync_time = last_sync_time.replace(tzinfo=timezone.utc)
-            sync_age_days = (now - last_sync_time).days if last_sync_time is not None else None
-
-            # Гейт свежести. Инцидент 2026-09-29: пустой каталог цен давал
-            # «0 устаревших из 0» и считался OK — поэтому пустота цен/портфеля
-            # трактуется как критическое нарушение, а не как отсутствие проблем.
-            stale_share_limit = tradeable_count * 0.2
-            stale_share_ok = stale_or_missing <= stale_share_limit
-
-            critical_issues: List[str] = []
-            warning_issues: List[str] = []
-
-            if bonds_with_market_price == 0:
-                critical_issues.append(
-                    "Каталог рыночных цен пуст: ни у одной облигации не заполнен market_price"
-                )
-            if not stale_share_ok:
-                warning_issues.append(
-                    f"Без актуальной рыночной цены {stale_or_missing} из {tradeable_count} "
-                    f"торгуемых облигаций — превышен порог 20%"
-                )
-            elif stale_or_missing > 0:
-                warning_issues.append(
-                    f"Без актуальной рыночной цены {stale_or_missing} из {tradeable_count} "
-                    f"торгуемых облигаций (в пределах порога 20%)"
-                )
-            if portfolio_rows == 0:
-                critical_issues.append("Портфель пуст: в portfolio_positions нет ни одной позиции")
-            if zero_value_positions > 0:
-                critical_issues.append(
-                    f"Позиций с нулевой или отсутствующей оценкой "
-                    f"(current_value IS NULL или <= 0): {zero_value_positions}"
-                )
-            if last_sync_time is None:
-                critical_issues.append("Нет метки последней синхронизации портфеля (last_sync_time = NULL)")
-            elif sync_age_days > 3:
-                critical_issues.append(
-                    f"Портфель не синхронизировался дольше 3 дней "
-                    f"(последняя синхронизация: {format_dt(last_sync_time)})"
-                )
-
-            is_fresh = (
-                bonds_with_market_price > 0
-                and stale_share_ok
-                and portfolio_rows > 0
-                and zero_value_positions == 0
-                and last_sync_time is not None
-                and sync_age_days <= 3
-            )
-            issues = critical_issues + warning_issues
-            status = "CRITICAL" if critical_issues else ("WARNING" if warning_issues else "OK")
-
-            report = {
-                "generated_at": generated_at,
-                "status": status,
-                "is_fresh": is_fresh,
-                "issues": issues,
-                "bonds_catalog_rows": int(freshness_data.get('bonds_catalog_rows') or 0),
-                "bonds_catalog_max_updated_at": format_dt(freshness_data.get('bonds_catalog_max_updated_at')),
-                "bonds_with_market_price": bonds_with_market_price,
-                "market_price_max_updated_at": format_dt(freshness_data.get('market_price_max_updated_at')),
-                "bonds_with_stale_market_price": int(freshness_data.get('bonds_with_stale_market_price') or 0),
-                "bonds_tradeable_count": tradeable_count,
-                "bonds_tradeable_stale_or_missing": stale_or_missing,
-                "portfolio_positions_rows": portfolio_rows,
-                "portfolio_zero_value_positions": zero_value_positions,
-                "portfolio_total_value": float(total_value),
-                "portfolio_max_updated_at": format_dt(freshness_data.get('portfolio_max_updated_at')),
-                "monitoring_checks_max_check_date": format_date(freshness_data.get('monitoring_checks_max_check_date')),
-            }
+            report = build_freshness_report(freshness_data)
 
             if is_json:
                 print(json.dumps(report, ensure_ascii=False))
             else:
                 print(f"Database Freshness Report (at {report['generated_at']}):")
-                print(f"- Status: {report['status']} (is_fresh: {str(report['is_fresh']).lower()})")
+                print(f"- Status: {report['status']} / gate: {report['gate_status']} (is_fresh: {str(report['is_fresh']).lower()})")
                 for issue in report['issues']:
                     print(f"  ! {issue}")
                 print(f"- Bonds catalog: {report['bonds_catalog_rows']} rows (last updated: {report['bonds_catalog_max_updated_at'] or 'null'})")
                 print(f"- Market prices: {report['bonds_with_market_price']} bonds (last updated: {report['market_price_max_updated_at'] or 'null'}, stale: {report['bonds_with_stale_market_price']})")
                 print(f"- Tradeable bonds: {report['bonds_tradeable_count']} (stale or missing price: {report['bonds_tradeable_stale_or_missing']})")
                 print(f"- Portfolio positions: {report['portfolio_positions_rows']} rows (last updated: {report['portfolio_max_updated_at'] or 'null'})")
-                print(f"- Portfolio valuation: total {report['portfolio_total_value']} (zero/NULL value positions: {report['portfolio_zero_value_positions']})")
+                print(f"- Portfolio valuation: total {report['portfolio_total_value']} (zero/NULL value positions: {report['portfolio_zero_value_positions']}, suspicious (unmatured): {report['portfolio_zero_rows_suspicious']}, ISINs: {report['portfolio_zero_rows_isins'] or 'n/a'})")
                 print(f"- Monitoring checks: last check date {report['monitoring_checks_max_check_date'] or 'null'}")
 
-            if fail_stale and not is_fresh:
+            if fail_stale and not report['is_fresh']:
                 self.logger.error("Freshness gate failed (is_fresh=false) — exit 1 (--fail-stale)")
                 sys.exit(1)
 

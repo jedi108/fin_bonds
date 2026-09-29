@@ -74,11 +74,22 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
             help='Исключить ОФЗ (только корпоративные эмитенты)',
         )
 
+    @staticmethod
+    def _add_include_held_argument(parser: argparse.ArgumentParser):
+        """Флаг --include-held: показывать бумаги портфеля (докупки) с бейджем held (N%) (002.2)."""
+        parser.add_argument(
+            '--include-held',
+            dest='include_held',
+            action='store_true',
+            help='Показывать и бумаги, уже лежащие в портфеле (докупки), '
+                 'с бейджем held (доля N%%). По умолчанию позиции портфеля исключены',
+        )
+
     @classmethod
     def setup_parser(cls, subparser: argparse.ArgumentParser):
         """Настройка парсера аргументов."""
         subparsers = subparser.add_subparsers(dest='mode', help='Режим анализа')
-        
+
         # Режим: топ по доходности
         top_parser = subparsers.add_parser('top', help='Топ бумаг по доходности')
         top_parser.add_argument('--limit', type=int, default=20, help='Количество бумаг (по умолчанию: 20)')
@@ -89,17 +100,20 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         top_parser.add_argument('--amortization', action='store_true', help='Только амортизируемые облигации')
         top_parser.add_argument('--no-amortization', action='store_true', help='Исключить амортизируемые облигации')
         cls._add_filter_arguments(top_parser)
-        
+        cls._add_include_held_argument(top_parser)
+
         # Режим: флоатеры
         floater_parser = subparsers.add_parser('floaters', help='Анализ флоатеров для покупки')
         floater_parser.add_argument('--limit', type=int, default=15, help='Количество бумаг (по умолчанию: 15)')
         cls._add_risk_arguments(floater_parser, default=1)
         cls._add_filter_arguments(floater_parser)
-        
+        cls._add_include_held_argument(floater_parser)
+
         # Режим: сравнение с портфелем
         compare_parser = subparsers.add_parser('compare', help='Сравнение с текущим портфелем')
         compare_parser.add_argument('--limit', type=int, default=25, help='Количество бумаг (по умолчанию: 25)')
         cls._add_risk_arguments(compare_parser, default=1)
+        cls._add_include_held_argument(compare_parser)
 
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'AnalyzeBuyCandidatesUseCase':
@@ -161,6 +175,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
             limit=args.limit,
             coupon_freq=coupon_freq,
             entity_type_filter=entity_type_filter,
+            include_held=getattr(args, 'include_held', False),
         )
 
         if not rows:
@@ -181,6 +196,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
             max_risk=max_risk,
             coupon_freq=coupon_freq,
             entity_type_filter=entity_type_filter,
+            include_held=getattr(args, 'include_held', False),
         )
 
         if not rows:
@@ -196,6 +212,7 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         rows = self.db.get_portfolio_comparison_candidates(
             max_risk=max_risk,
             limit=args.limit,
+            include_held=getattr(args, 'include_held', False),
         )
 
         if not rows:
@@ -210,9 +227,9 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         print(f"\n{'='*155}")
         print(f"📊 Топ бумаг для покупки по текущей купонной доходности")
         print(f"{'='*155}")
-        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Эмитент':<22} | {'Купон %':<7} | {'Выплат':<6} | {'Купон ₽':<7} | {'₽/мес':<6} | {'Цена':<7} | {'Куп.дох %':<9} | {'Риск':<4} | {'До погаш.':<9} | {'Тип':<12}")
-        print("-" * 155)
-        
+        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Эмитент':<22} | {'Купон %':<7} | {'Выплат':<6} | {'Купон ₽':<7} | {'₽/мес':<6} | {'Цена':<7} | {'Куп.дох %':<9} | {'Риск':<4} | {'До погаш.':<9} | {'Тип':<12} | {'Портфель':<15}")
+        print("-" * 173)
+
         for row in rows:
             try:
                 coupon_rate = float(row.get('coupon_rate') or row.get('coupon_rate_percent') or 0)
@@ -235,7 +252,8 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                       f"{coupon_yield:<9.2f} | "
                       f"{row.get('risk_level') or 'N/A':<4} | "
                       f"{months_to_maturity:<9.1f} | "
-                      f"{row.get('bond_type', 'Обычная'):<12}")
+                      f"{row.get('bond_type', 'Обычная'):<12} | "
+                      f"{row.get('held_badge') or '':<15}")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при выводе строки: {e}")
                 continue
@@ -247,9 +265,9 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         print(f"\n{'='*155}")
         print(f"📊 Флоатеры для покупки")
         print(f"{'='*155}")
-        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Эмитент':<22} | {'Ставка %':<8} | {'Спред':<6} | {'Выплат':<6} | {'Купон ₽':<7} | {'₽/мес':<6} | {'Цена':<7} | {'Куп.дох %':<9} | {'Риск':<4} | {'До погаш.':<9}")
-        print("-" * 155)
-        
+        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Эмитент':<22} | {'Ставка %':<8} | {'Спред':<6} | {'Выплат':<6} | {'Купон ₽':<7} | {'₽/мес':<6} | {'Цена':<7} | {'Куп.дох %':<9} | {'Риск':<4} | {'До погаш.':<9} | {'Портфель':<15}")
+        print("-" * 173)
+
         for row in rows:
             try:
                 calculated_rate = float(row.get('calculated_coupon_rate') or row.get('coupon_rate') or 0)
@@ -273,7 +291,8 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                       f"{market_price:<7.0f} | "
                       f"{coupon_yield:<9.2f} | "
                       f"{row.get('risk_level') or 'N/A':<4} | "
-                      f"{months_to_maturity:<9.1f}")
+                      f"{months_to_maturity:<9.1f} | "
+                      f"{row.get('held_badge') or '':<15}")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при выводе строки: {e}")
                 continue
@@ -285,19 +304,19 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         print(f"\n{'='*120}")
         print(f"📊 Сравнение с текущим портфелем")
         print(f"{'='*120}")
-        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<25} | {'Купон %':<6} | {'Риск':<4} | {'Доходн. %':<9} | {'Разница':<7} | {'Рекомендация':<15}")
-        print("-" * 120)
-        
+        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<25} | {'Купон %':<6} | {'Риск':<4} | {'Доходн. %':<9} | {'Разница':<7} | {'Рекомендация':<15} | {'Портфель':<15}")
+        print("-" * 138)
+
         for row in rows:
             try:
                 coupon_rate = float(row['coupon_rate_percent']) if row['coupon_rate_percent'] else 0
                 potential_yield = float(row['potential_yield_percent']) if row['potential_yield_percent'] else 0
                 yield_diff = float(row['yield_vs_portfolio']) if row['yield_vs_portfolio'] else 0
-                
+
                 # Отладочная информация для RU000A10B7T7
                 if row['isin'] == 'RU000A10B7T7':
                     logger.debug(f"DEBUG: {row['isin']} - coupon_rate: {coupon_rate}, potential_yield: {potential_yield}")
-                
+
                 print(f"{row['isin']:<12} | "
                       f"{row['ticker'] or 'N/A':<8} | "
                       f"{row['name'][:25] if row['name'] else 'N/A':<25} | "
@@ -305,7 +324,8 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
                       f"{row['risk_level'] or 'N/A':<4} | "
                       f"{potential_yield:<9.1f} | "
                       f"{yield_diff:<7.1f} | "
-                      f"{row['recommendation']:<15}")
+                      f"{row['recommendation']:<15} | "
+                      f"{row.get('held_badge') or '':<15}")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при выводе строки: {e}")
                 continue

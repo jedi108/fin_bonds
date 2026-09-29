@@ -92,6 +92,9 @@ def _render_markdown(
         else:
             share_str = "—"
 
+        # ytm приходит из get_portfolio_markdown_rows уже в процентах годовых
+        # (005.4, миграция 013) — печатаем как есть. До миграции под заголовком
+        # «YTM, %» молча печаталась доля (0.24 вместо 24.01) — ловушка 100x.
         ytm = r.get("ytm")
         ytm_str = f"{Decimal(str(ytm)):.2f}" if ytm is not None else "—"
 

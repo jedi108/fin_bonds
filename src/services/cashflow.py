@@ -54,9 +54,13 @@ def calculate_bond_cashflow_metrics(
 ) -> CashflowMetrics:
     """
     Чистая функция cashflow-решателя.
-    
+
     Возвращает ytm (долей единицы), duration_macaulay и duration_modified (в годах),
     либо null_reason с одной из контрактных причин.
+
+    Единицы ytm — внутренний контракт движка (005.4): хранение (bonds_catalog.ytm)
+    и вывод CLI — в процентах годовых; конвертация ×100 выполняется на границах
+    записи (update_bonds_derived_metrics) и расчёта на лету (_enrich_bonds_with_ytm).
     """
     # 1. Валидация флагов до расчёта горизонта по дате
     if perpetual_flag:

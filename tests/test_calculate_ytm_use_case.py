@@ -412,8 +412,13 @@ def test_calculate_ytm_max_listlevel_filters_third_tier(db):
     assert 'RU000TESTLL3' not in isins
 
 
-def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_fraction: Decimal):
-    """Создаёт бумагу с канонической YTM, записанной напрямую в каталог."""
+def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_percent: Decimal,
+                              maturity: date = None):
+    """Создаёт бумагу с канонической YTM, записанной напрямую в каталог.
+
+    Единицы — проценты годовых (005.4, миграция 013): bc.ytm хранится
+    в процентах, как его печатает CLI.
+    """
     tomorrow = date.today() + timedelta(days=365)
     bond = Bond(
         isin=isin,
@@ -424,7 +429,7 @@ def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_fraction: Decimal)
         is_trade_available=True,
         list_level=1,
         nominal=Decimal('1000'),
-        maturity_date=tomorrow,
+        maturity_date=maturity or tomorrow,
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
@@ -436,7 +441,7 @@ def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_fraction: Decimal)
             UPDATE bonds_catalog
             SET ytm = %s, ytm_null_reason = NULL, ytm_updated_at = CURRENT_TIMESTAMP
             WHERE isin = %s
-        """, (ytm_fraction, isin))
+        """, (ytm_percent, isin))
 
 
 def _make_buy_args(max_ytm: float) -> argparse.Namespace:
@@ -458,7 +463,7 @@ def _make_buy_args(max_ytm: float) -> argparse.Namespace:
 
 def test_calculate_ytm_max_ytm_filters_distress(db):
     """012-C: бумага с YTM 45% не попадает в результаты при --max-ytm 35."""
-    _add_bond_with_stored_ytm(db, 'RU000TESTVD1', 'VD1', Decimal('0.45'))
+    _add_bond_with_stored_ytm(db, 'RU000TESTVD1', 'VD1', Decimal('45'))
 
     use_case = CalculateYtmUseCase(db=db)
     bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
@@ -467,7 +472,7 @@ def test_calculate_ytm_max_ytm_filters_distress(db):
 
 def test_calculate_ytm_max_ytm_keeps_normal_yield(db):
     """012-C: бумага с YTM 28% попадает в результаты при --max-ytm 35."""
-    _add_bond_with_stored_ytm(db, 'RU000TESTVD2', 'VD2', Decimal('0.28'))
+    _add_bond_with_stored_ytm(db, 'RU000TESTVD2', 'VD2', Decimal('28'))
 
     use_case = CalculateYtmUseCase(db=db)
     bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
@@ -500,3 +505,161 @@ def test_calculate_ytm_max_ytm_filters_unbackfilled_fallback(db):
     bonds = use_case._get_bonds_for_buying(_make_buy_args(max_ytm=35.0))
     assert 'RU000TESTVD3' not in [b['isin'] for b in bonds]
 
+
+def test_calculate_ytm_buy_mode_include_held(db):
+    """002.2: --include-held в режиме buy показывает бумаги портфеля с бейджем held (N%);
+    по умолчанию (include_held отсутствует в args) они исключены — совместимость."""
+    tomorrow = date.today() + timedelta(days=365)
+    bond = Bond(
+        isin='RU000TESTIH1',
+        ticker='IH1',
+        name='Include Held 1',
+        currency='rub',
+        risk_level=1,
+        is_trade_available=True,
+        nominal=Decimal('1000'),
+        maturity_date=tomorrow,
+        coupon_quantity_per_year=2,
+        coupon_rate_percent=Decimal('20.0'),
+        market_price=Decimal('1000'),
+    )
+    db.add_bonds_to_catalog([bond])
+    pos = PortfolioPosition(
+        isin='RU000TESTIH1',
+        ticker='IH1',
+        name='Include Held 1',
+        quantity=Decimal('10'),
+        average_price=Decimal('900.0'),
+        current_price=Decimal('1000.0'),
+        current_value=Decimal('10000.0'),
+        currency='rub',
+        broker_name='tbank',
+    )
+    db.add_portfolio_positions([pos])
+
+    use_case = CalculateYtmUseCase(db=db)
+    base_args = dict(
+        mode='buy',
+        min_ytm=None,
+        max_risk=5,
+        min_maturity='2020-01-01',
+        max_maturity='2040-01-01',
+        no_amortization=False,
+        monthly_coupons=False,
+        fixed_coupon=False,
+        floating_coupon=False,
+        limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
+    )
+
+    # Старые Namespace без include_held: прежнее поведение — исключение портфеля
+    args = argparse.Namespace(**base_args)
+    assert 'RU000TESTIH1' not in {b['isin'] for b in use_case._get_bonds_for_buying(args)}
+
+    # --include-held: бумага из портфеля видна с бейджем held (доля N%)
+    args_held = argparse.Namespace(include_held=True, **base_args)
+    rows = use_case._get_bonds_for_buying(args_held)
+    held = next(b for b in rows if b['isin'] == 'RU000TESTIH1')
+    assert held['held_share_pct'] == Decimal('100.00')
+    assert held['held_badge'] == 'held (100.00%)'
+
+
+def test_calculate_ytm_parser_defaults_wide_window():
+    """002.3/P9.5: без явных флагов окно погашения открыто — дефолты дат убраны."""
+    parser = argparse.ArgumentParser()
+    CalculateYtmUseCase.setup_parser(parser)
+    args = parser.parse_args(['--mode', 'buy'])
+    assert args.min_maturity is None
+    assert args.max_maturity is None
+
+
+def _make_default_window_args(mode: str = 'buy') -> argparse.Namespace:
+    """args с дефолтами CLI 002.3 (min/max-maturity не заданы)."""
+    return argparse.Namespace(
+        mode=mode,
+        min_ytm=None,
+        max_risk=5,
+        min_maturity=None,
+        max_maturity=None,
+        no_amortization=False,
+        monthly_coupons=False,
+        fixed_coupon=False,
+        floating_coupon=False,
+        limit=10,
+        max_listlevel=2,
+        max_ytm=35.0,
+    )
+
+
+def test_calculate_ytm_default_window_keeps_long_bonds(db):
+    """002.3: кейс РЕСО-2034 — бумага с погашением за горизонтом старого дефолта
+    2030-12-31 попадает в выдачу с открытым окном по умолчанию."""
+    in_2034 = date.today() + timedelta(days=8 * 365)
+    _add_bond_with_stored_ytm(db, 'RU000TESTWM1', 'WM1', Decimal('23.9'), maturity=in_2034)
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_bonds_for_buying(_make_default_window_args())
+    assert 'RU000TESTWM1' in [b['isin'] for b in bonds]
+
+
+def test_calculate_ytm_narrow_window_still_cuts_long_bonds(db):
+    """002.3: кейс Сэтл-2030 — явное узкое окно 2029-12-31 отсекает бумагу 2030 г.,
+    широкое окно 2036-12-31 (первый прогон доход-запроса) — нет."""
+    seattle_maturity = date.today() + timedelta(days=1255)  # ~ 2030-03
+    _add_bond_with_stored_ytm(db, 'RU000TESTWM2', 'WM2', Decimal('24.0'), maturity=seattle_maturity)
+
+    use_case = CalculateYtmUseCase(db=db)
+
+    args_narrow = _make_default_window_args()
+    args_narrow.max_maturity = '2029-12-31'
+    assert 'RU000TESTWM2' not in [b['isin'] for b in use_case._get_bonds_for_buying(args_narrow)]
+
+    args_wide = _make_default_window_args()
+    args_wide.max_maturity = '2036-12-31'
+    assert 'RU000TESTWM2' in [b['isin'] for b in use_case._get_bonds_for_buying(args_wide)]
+
+
+def test_calculate_ytm_default_min_hides_matured(db):
+    """002.3/P9.5: без --min-maturity уже погашенные бумаги не показываются
+    (нижняя граница = сегодня); старый дефолт 2025-01-01 их пропускал."""
+    yesterday = date.today() - timedelta(days=1)
+    _add_bond_with_stored_ytm(db, 'RU000TESTZB1', 'ZB1', Decimal('20'), maturity=yesterday)
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_bonds_for_buying(_make_default_window_args())
+    assert 'RU000TESTZB1' not in [b['isin'] for b in bonds]
+
+    # Явная дата в прошлом — осознанный выбор пользователя, фильтр ей подчиняется
+    args_explicit = _make_default_window_args()
+    args_explicit.min_maturity = '2020-01-01'
+    assert 'RU000TESTZB1' in [b['isin'] for b in use_case._get_bonds_for_buying(args_explicit)]
+
+
+def test_calculate_ytm_default_window_portfolio_mode(db):
+    """002.3/P9.5: в режиме portfolio открытое окно по умолчанию показывает
+    длинную позицию и скрывает погашенную (зомби)."""
+    in_2034 = date.today() + timedelta(days=8 * 365)
+    yesterday = date.today() - timedelta(days=1)
+    _add_bond_with_stored_ytm(db, 'RU000TESTPL1', 'PL1', Decimal('23.9'), maturity=in_2034)
+    _add_bond_with_stored_ytm(db, 'RU000TESTPL2', 'PL2', Decimal('20'), maturity=yesterday)
+
+    pos_long = PortfolioPosition(
+        isin='RU000TESTPL1', ticker='PL1', name='Distress Test PL1',
+        quantity=Decimal('10'), average_price=Decimal('1000.0'),
+        current_price=Decimal('1000.0'), current_value=Decimal('10000.0'),
+        currency='rub', broker_name='tbank',
+    )
+    pos_zombie = PortfolioPosition(
+        isin='RU000TESTPL2', ticker='PL2', name='Distress Test PL2',
+        quantity=Decimal('10'), average_price=Decimal('1000.0'),
+        current_price=Decimal('1000.0'), current_value=Decimal('10000.0'),
+        currency='rub', broker_name='tbank',
+    )
+    db.add_portfolio_positions([pos_long, pos_zombie])
+
+    use_case = CalculateYtmUseCase(db=db)
+    bonds = use_case._get_portfolio_bonds(_make_default_window_args(mode='portfolio'))
+    isins = [b['isin'] for b in bonds]
+    assert 'RU000TESTPL1' in isins
+    assert 'RU000TESTPL2' not in isins
