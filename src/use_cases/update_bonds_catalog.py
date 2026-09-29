@@ -108,6 +108,10 @@ class UpdateBondsCatalogUseCase(UseCase):
             '--prices-only', action='store_true',
             help='Обновить только рыночные цены, без обновления каталога'
         )
+        parser.add_argument(
+            '--recalculate-derived-metrics', action='store_true',
+            help='Пересчитать производные метрики (дюрация, YTM) для всех бумаг в каталоге'
+        )
 
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'UpdateBondsCatalogUseCase':
@@ -117,6 +121,13 @@ class UpdateBondsCatalogUseCase(UseCase):
     def execute(self, args: argparse.Namespace):
         self.logger.info(f"Запуск use case для обновления каталога облигаций (источник: {args.source})...")
         try:
+            if getattr(args, 'recalculate_derived_metrics', False):
+                self.logger.info("🔄 Пересчёт производных метрик (дюрация, YTM) в каталоге...")
+                count = self.db.update_bonds_derived_metrics()
+                self.logger.info(f"✅ Пересчитано производных метрик для {count} бумаг.")
+                if not args.update_prices and not args.prices_only:
+                    return
+
             # Если только цены, пропускаем обновление каталога
             if not args.prices_only:
                 if args.source in ['all', 'tbank']:

@@ -331,7 +331,7 @@ class PortfolioStorage:
                     updated_at = CURRENT_TIMESTAMP
             """, bonds_data)
         logger.info(f"Добавлено/обновлено {len(bonds_data)} облигаций в каталоге.")
-        self.update_bonds_duration([b.isin for b in bonds_dto_list])
+        self.update_bonds_derived_metrics([b.isin for b in bonds_dto_list])
 
     def add_or_update_bond(self, isin: str, ticker: str, name: str):
         """Вставляет или обновляет карточку облигации по минимальному набору полей.
@@ -476,7 +476,7 @@ class PortfolioStorage:
                 SET list_level = %s, coupon_rate_percent = %s, offer_date = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE isin = %s
             """, (list_level, coupon_rate, offer_date, isin))
-        self.update_bonds_duration([isin])
+        self.update_bonds_derived_metrics([isin])
         logger.debug(f"Обновлены MOEX данные для {isin}.")
 
     def get_full_catalog(self) -> List[Bond]:
@@ -1095,7 +1095,7 @@ class PortfolioStorage:
                     logger.error(f"Ошибка обновления цены для {isin}: {e}")
 
         if updated_isins:
-            self.update_bonds_duration(updated_isins)
+            self.update_bonds_derived_metrics(updated_isins)
 
         return updated_count
 
@@ -1210,7 +1210,7 @@ class PortfolioStorage:
     def save_market_price(self, isin: str, price: Decimal, source: str = 'tbank'):
         """Сохраняет рыночную цену одной облигации, источник и метку времени,
 
-        и пересчитывает дюрацию.
+        и пересчитывает производные метрики (дюрацию и YTM).
         """
         with self.conn:
             cursor = self._cursor()
@@ -1221,18 +1221,18 @@ class PortfolioStorage:
                     market_price_updated_at = CURRENT_TIMESTAMP
                 WHERE isin = %s
             """, (price, source, isin))
-        self.update_bonds_duration([isin])
+        self.update_bonds_derived_metrics([isin])
 
-    def update_bonds_duration(
+    def update_bonds_derived_metrics(
         self,
         isins: Optional[List[str]] = None,
         valuation_date: Optional[date] = None
     ) -> int:
-        """Пересчитывает дюрацию Маколея и модифицированную дюрацию для списка ISIN
+        """Пересчитывает дюрацию Маколея, модифицированную дюрацию и YTM для списка ISIN
 
         или для всех бумаг в каталоге.
-        Обновляет duration_macaulay, duration_modified, duration_null_reason и
-        duration_updated_at (включая осознанный NULL).
+        Обновляет duration_macaulay, duration_modified, duration_null_reason, duration_updated_at,
+        а также ytm, ytm_null_reason и ytm_updated_at (включая осознанный NULL).
         """
         cursor = self._cursor()
         if isins is not None:
@@ -1275,6 +1275,8 @@ class PortfolioStorage:
                 metrics.duration_macaulay,
                 metrics.duration_modified,
                 metrics.null_reason,
+                metrics.ytm,
+                metrics.null_reason if metrics.ytm is None else None,
                 r['isin'],
             ))
 
@@ -1284,11 +1286,22 @@ class PortfolioStorage:
                 SET duration_macaulay = %s,
                     duration_modified = %s,
                     duration_null_reason = %s,
-                    duration_updated_at = CURRENT_TIMESTAMP
+                    duration_updated_at = CURRENT_TIMESTAMP,
+                    ytm = %s,
+                    ytm_null_reason = %s,
+                    ytm_updated_at = CURRENT_TIMESTAMP
                 WHERE isin = %s
             """, update_data)
 
         return len(update_data)
+
+    def update_bonds_duration(
+        self,
+        isins: Optional[List[str]] = None,
+        valuation_date: Optional[date] = None
+    ) -> int:
+        """Обратная совместимость: делегирует в update_bonds_derived_metrics."""
+        return self.update_bonds_derived_metrics(isins=isins, valuation_date=valuation_date)
 
     def get_portfolio_durations(self) -> List[Dict[str, Any]]:
         """Возвращает позиции портфеля с дюрацией и параметрами облигаций."""
