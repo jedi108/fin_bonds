@@ -80,6 +80,13 @@ class SyncPortfolioUseCase(UseCase):
             logger.warning("Не найдено ни одной позиции для сохранения. Синхронизация завершена.")
             return
 
+        # Гарантируем ненулевой current_value для всех позиций
+        for p in positions_to_save:
+            if not p.current_value or p.current_value <= Decimal(0):
+                qty = p.quantity or Decimal(0)
+                px  = p.current_price or Decimal(0)
+                p.current_value = qty * px
+
         # Получаем старый портфель для сравнения (до изменений)
         old_positions = self.db.get_portfolio_positions()
         old_keys = set((p.isin, p.broker_name, p.account_id) for p in old_positions)
@@ -200,17 +207,19 @@ class SyncPortfolioUseCase(UseCase):
             # Заполняем недостающие данные значениями по умолчанию
             row = row.where(pd.notnull(row), None)
             try:
+                _qty = Decimal(str(row.get('quantity', 0)))
+                _px  = Decimal(str(row.get('current_price', 0)))
                 positions.append(DataModelPortfolioPosition(
                     isin=row.get('isin'),
                     ticker=row.get('ticker'),
                     name=row.get('name'),
                     broker_name=row.get('broker_name'),
-                    quantity=Decimal(str(row.get('quantity', 0))),
+                    quantity=_qty,
                     average_price=Decimal(str(row.get('average_price', 0))),
-                    current_price=Decimal(str(row.get('coupon_rate_percent', 0))), # Используем ставку купона как текущую цену для простоты
-                    yield_to_maturity=Decimal(0),  # Пока не рассчитываем
-                    portfolio_percent=Decimal(0), # Будет рассчитано позже
-                    current_value=Decimal(0),   # Будет рассчитано позже
+                    current_price=_px,
+                    yield_to_maturity=None,  # Пока не рассчитываем YTM
+                    portfolio_percent=Decimal(0),  # Будет рассчитано позже
+                    current_value=_qty * _px,  # qty * current_price в рублях за 1 шт.
                 ))
             except Exception as e:
                 logger.error(f"Ошибка конвертации строки для isin {row.get('isin')}: {e}")

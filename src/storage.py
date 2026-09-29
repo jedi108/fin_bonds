@@ -697,9 +697,12 @@ class PortfolioStorage:
                     currency = excluded.currency,
                     yield_to_maturity = excluded.yield_to_maturity,
                     portfolio_percent = excluded.portfolio_percent,
-                    current_value = excluded.current_value,
+                    current_value = COALESCE(NULLIF(excluded.current_value, 0),
+                                             excluded.quantity * excluded.current_price,
+                                             portfolio_positions.current_value, 0),
                     instrument_type = excluded.instrument_type,
-                    liquidity_loss_ratio = excluded.liquidity_loss_ratio,
+                    liquidity_loss_ratio = COALESCE(excluded.liquidity_loss_ratio,
+                                                    portfolio_positions.liquidity_loss_ratio),
                     coupon_rate_percent = excluded.coupon_rate_percent,
                     updated_at = CURRENT_TIMESTAMP
             """
@@ -730,6 +733,8 @@ class PortfolioStorage:
                 p.current_value,
                 p.broker_name,
                 p.instrument_type,
+                p.liquidity_loss_ratio,
+                p.coupon_rate_percent,
                 p.account_id,
                 b.figi
             FROM portfolio_positions p
@@ -765,6 +770,8 @@ class PortfolioStorage:
                 p.current_value,
                 p.broker_name,
                 p.instrument_type,
+                p.liquidity_loss_ratio,
+                p.coupon_rate_percent,
                 p.account_id,
                 b.figi
             FROM portfolio_positions p

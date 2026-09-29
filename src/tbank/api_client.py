@@ -81,18 +81,22 @@ class TbankApiClient(ITbankApiClient):
                         logger.debug(f"Пропуск инструмента {instrument.ticker} (тип: {instrument.instrument_type}).")
                         continue
 
+                    qty = self._convert_money_value(pos.quantity)
+                    px  = self._convert_money_value(pos.current_price)
+                    val = qty * px  # current_price уже в рублях за 1 шт.
+
                     positions.append(PortfolioPosition(
                         isin=instrument.isin,
                         ticker=instrument.ticker,
                         name=instrument.name,
-                        quantity=self._convert_money_value(pos.quantity),
+                        quantity=qty,
                         average_price=self._convert_money_value(pos.average_position_price),
-                        current_price=self._convert_money_value(pos.current_price),
+                        current_price=px,
                         yield_to_maturity=None,  # expected_yield - это ₽ брокера, а не YTM%
                         broker_name="TBank",
                         portfolio_percent=Decimal(0),
-                        current_value=Decimal(0),
-                        instrument_type=instrument.instrument_type, # Добавлено: передаем instrument_type
+                        current_value=val,
+                        instrument_type=instrument.instrument_type,
                         account_id=account.id,
                     ))
         return positions

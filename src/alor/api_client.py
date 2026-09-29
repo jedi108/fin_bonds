@@ -162,6 +162,7 @@ class AlorApiClient(IAlorApiClient):
                         quantity=Decimal(str(pos.get('qty', 0))),
                         average_price=avg_price_corrected,
                         current_price=current_price_corrected,
+                        current_value=Decimal(str(pos.get('qty', 0))) * current_price_corrected,
                         broker_name="Alor",
                         currency=pos.get('currency'),
                         instrument_type="corp_bond" if symbol.startswith("RU") and len(symbol) == 12 else None,
