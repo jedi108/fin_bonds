@@ -4,6 +4,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
 LOG_FILE="$PROJECT_DIR/cron.log"
 
+# Блокировка от параллельного запуска (с fin_bonds.timer или двойного вызова вручную)
+exec 200>/tmp/fin_bonds_update.lock
+flock -n 200 || {
+    echo "[$(date)] Обновление уже запущено другим процессом. Завершение." >> "$LOG_FILE"
+    exit 0
+}
+
 # Переходим в директорию с проектом. Если не удается - выходим из скрипта.
 cd "$PROJECT_DIR" || { echo "Could not cd to $PROJECT_DIR" >> "$LOG_FILE"; exit 1; }
 

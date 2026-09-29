@@ -108,6 +108,12 @@ class UpdateLiquidityUseCase(UseCase):
                     self._update_position_liquidity(position.isin, position.broker_name, liquidity_result.value)
                     updated_count += 1
                     logger.info(f"Обновлена ликвидность для {position.isin} ({position.broker_name}): {liquidity_result.value}")
+                elif liquidity_result and liquidity_result.status == 'unavailable':
+                    logger.info(
+                        f"Биржевой стакан пуст для {position.isin} ({position.broker_name}) "
+                        "(вероятно, торги закрыты или вне торговой сессии MOEX 10:00–18:45 МСК). "
+                        "Предыдущее значение liquidity_loss_ratio сохранено без изменений."
+                    )
                 else:
                     logger.warning(f"Не удалось получить данные о ликвидности для {position.isin}")
 
