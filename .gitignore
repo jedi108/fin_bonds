@@ -54,6 +54,7 @@ debug_*.html
 !requirements.txt
 !requirements-dev.txt
 *.yaml
+!config.example.yaml
 *.yml
 *.jsonl
 *.jsonl.gz
