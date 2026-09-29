@@ -1954,6 +1954,12 @@ class PortfolioStorage:
                     THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
                     ELSE NULL
                 END as real_yield_percent,
+                bc.market_price,
+                bc.ytm,
+                bc.ytm_null_reason,
+                bc.ytm_updated_at,
+                bc.floating_coupon_flag,
+                bc.perpetual_flag,
                 -- Общая сумма купонных выплат в месяц по всем бумагам в строке
                 ROUND(
                     (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.coupon_quantity_per_year * 1,
@@ -1991,6 +1997,12 @@ class PortfolioStorage:
                 pp.average_price,
                 pp.current_price,
                 pp.quantity,
+                bc.market_price,
+                bc.ytm,
+                bc.ytm_null_reason,
+                bc.ytm_updated_at,
+                bc.floating_coupon_flag,
+                bc.perpetual_flag,
                 CASE
                     WHEN pp.average_price IS NOT NULL AND pp.average_price > 0
                     THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100
@@ -2034,7 +2046,7 @@ class PortfolioStorage:
         if floating_coupon:
             filters += " AND bc.floating_coupon_flag IS TRUE"
 
-        query = body + filters + " ORDER BY real_yield_percent DESC NULLS LAST LIMIT %s"
+        query = body + filters + " ORDER BY bc.ytm DESC NULLS LAST, real_yield_percent DESC NULLS LAST LIMIT %s"
         params = [min_maturity, max_maturity, max_risk, limit]
 
         cursor = self._cursor()

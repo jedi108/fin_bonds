@@ -1,15 +1,15 @@
 """
 Use case для расчета и отображения YTM (доходности к погашению) облигаций.
 """
-import logging
 import argparse
-from typing import TYPE_CHECKING, List, Dict, Any, Optional
-from decimal import Decimal
 from datetime import date, datetime
-import math
+from decimal import Decimal
+import logging
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
-from src.use_cases.base import UseCase
+from src.services.cashflow import calculate_bond_cashflow_metrics
 from src.storage import PortfolioStorage
+from src.use_cases.base import UseCase
 
 # Предотвращаем циклический импорт для type hints
 if TYPE_CHECKING:
@@ -22,10 +22,11 @@ class CalculateYtmUseCase(UseCase):
     """
     Рассчитывает и отображает YTM (доходность к погашению) для облигаций.
     Поддерживает два режима:
-    1. Анализ облигаций для покупки (по текущей рыночной цене)
-    2. Анализ уже купленных облигаций (по средней цене покупки)
+    1. buy: кандидаты на покупку по рыночной цене каталога (mark-to-market)
+    2. portfolio: позиции портфеля по рыночной цене каталога (mark-to-market),
+       при этом средняя цена покупки остаётся справочной колонкой.
     """
-    
+
     def __init__(self, db: PortfolioStorage):
         self.db = db
 
@@ -34,7 +35,7 @@ class CalculateYtmUseCase(UseCase):
         """Добавляет аргументы для команды расчета YTM."""
         parser.add_argument('--mode', type=str, choices=['buy', 'portfolio'], required=True,
                            help='Режим анализа: buy - для покупки, portfolio - уже купленные')
-        parser.add_argument('--min-ytm', type=float, default=0.0,
+        parser.add_argument('--min-ytm', type=float, default=None,
                            help='Минимальная YTM для фильтрации (в процентах)')
         parser.add_argument('--max-risk', type=int, default=3,
                            help='Максимальный уровень риска (1-5)')
@@ -60,46 +61,87 @@ class CalculateYtmUseCase(UseCase):
 
     def execute(self, args: argparse.Namespace):
         logger.info(f"🚀 Запуск расчета YTM в режиме: {args.mode}")
-        
+
         try:
             if args.mode == 'buy':
                 self._analyze_bonds_for_buying(args)
             elif args.mode == 'portfolio':
                 self._analyze_portfolio_bonds(args)
-                
+
         except Exception as e:
             logger.exception(f"Ошибка при расчете YTM: {e}")
 
     def _analyze_bonds_for_buying(self, args: argparse.Namespace):
         """Анализ облигаций для покупки по текущей рыночной цене."""
         logger.info("📊 Анализ облигаций для покупки...")
-        
+
         bonds = self._get_bonds_for_buying(args)
         if not bonds:
             logger.info("ℹ️ Не найдено облигаций, соответствующих критериям.")
             return
-            
+
         logger.info(f"📈 Найдено {len(bonds)} облигаций для анализа")
-        
-        # Выводим результаты в виде таблицы
         self._print_bonds_table(bonds, "Облигации для покупки (по текущей цене)")
 
     def _analyze_portfolio_bonds(self, args: argparse.Namespace):
         """Анализ уже купленных облигаций по средней цене покупки."""
         logger.info("💼 Анализ облигаций в портфеле...")
-        
+
         bonds = self._get_portfolio_bonds(args)
         if not bonds:
             logger.info("ℹ️ В портфеле нет облигаций, соответствующих критериям.")
             return
-            
+
         logger.info(f"📈 Найдено {len(bonds)} облигаций в портфеле")
-        
-        # Выводим результаты в виде таблицы
-        self._print_bonds_table(bonds, "Облигации в портфеле (по средней цене покупки)")
+        self._print_bonds_table(bonds, "Облигации в портфеле (mark-to-market YTM)")
+
+    def _enrich_bonds_with_ytm(self, bonds: List[Dict[str, Any]], args: argparse.Namespace) -> List[Dict[str, Any]]:
+        """
+        Обогащает строки канонической YTM:
+        - Если ytm_updated_at задан: берёт сохранённый bc.ytm или bc.ytm_null_reason.
+        - Если ytm_updated_at IS NULL (до backfill): временный расчёт через общий cashflow-решатель.
+        - Переводит долю единицы в проценты (100 * y).
+        - Фильтрует по args.min_ytm без приведения NULL к 0.
+        """
+        enriched = []
+        for bond in bonds:
+            if bond.get('ytm_updated_at') is not None:
+                if bond.get('ytm') is not None:
+                    bond['ytm_percent'] = float(bond['ytm']) * 100.0
+                    bond['ytm_reason'] = None
+                else:
+                    bond['ytm_percent'] = None
+                    bond['ytm_reason'] = bond.get('ytm_null_reason') or 'not_applicable'
+            else:
+                # Временная совместимость до выполнения общего backfill
+                price = bond.get('market_price') or bond.get('current_price')
+                metrics = calculate_bond_cashflow_metrics(
+                    valuation_date=date.today(),
+                    nominal=bond.get('nominal'),
+                    maturity_date=bond.get('maturity_date'),
+                    coupon_quantity_per_year=bond.get('coupon_quantity_per_year'),
+                    coupon_rate_percent=bond.get('coupon_rate_percent'),
+                    market_price=price,
+                    perpetual_flag=bond.get('perpetual_flag'),
+                    floating_coupon_flag=bond.get('floating_coupon_flag'),
+                    amortization_flag=bond.get('amortization_flag'),
+                )
+                if metrics.ytm is not None:
+                    bond['ytm_percent'] = float(metrics.ytm) * 100.0
+                    bond['ytm_reason'] = None
+                else:
+                    bond['ytm_percent'] = None
+                    bond['ytm_reason'] = metrics.null_reason
+
+            if args.min_ytm is not None:
+                if bond['ytm_percent'] is None or bond['ytm_percent'] < args.min_ytm:
+                    continue
+
+            enriched.append(bond)
+        return enriched
 
     def _get_bonds_for_buying(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
-        """Получает облигации для покупки с расчетом YTM по текущей цене."""
+        """Получает облигации для покупки с канонической YTM по рыночной цене."""
         bonds = self.db.get_bonds_yield_table(
             mode='buy',
             min_maturity=args.min_maturity,
@@ -111,88 +153,11 @@ class CalculateYtmUseCase(UseCase):
             floating_coupon=args.floating_coupon,
             limit=args.limit,
         )
-
-        # Добавляем расчет YTM для каждой облигации
-        for bond in bonds:
-            try:
-                nominal = float(bond['nominal'])
-                coupon_rate = float(bond['coupon_rate_percent'])
-                market_price = float(bond['current_price'])
-                maturity_date = bond['maturity_date']
-                coupon_frequency = int(bond['coupon_quantity_per_year'])
-                amortization_flag = bool(bond['amortization_flag'])
-
-                ytm = self._calculate_ytm(
-                    nominal, coupon_rate, market_price,
-                    maturity_date, coupon_frequency, amortization_flag
-                )
-                bond['ytm_percent'] = ytm
-
-            except Exception as e:
-                logger.error(f"Ошибка при расчете YTM для {bond.get('isin', 'Unknown')}: {e}")
-                bond['ytm_percent'] = None
-
-        return bonds
-
-    def _calculate_ytm(self, nominal: float, coupon_rate: float, market_price: float, 
-                      maturity_date: str, coupon_frequency: int, amortization_flag: bool) -> Optional[float]:
-        """
-        Рассчитывает YTM (доходность к погашению) для облигации.
-        
-        Args:
-            nominal: Номинал облигации
-            coupon_rate: Годовая купонная ставка (%)
-            market_price: Текущая рыночная цена
-            maturity_date: Дата погашения (YYYY-MM-DD)
-            coupon_frequency: Частота купонных выплат в год
-            amortization_flag: Флаг наличия амортизации
-            
-        Returns:
-            YTM в процентах или None если не удалось рассчитать
-        """
-        try:
-            # Рассчитываем время до погашения в годах
-            # psycopg2 возвращает DATE нативно (date); строка — легаси-формат
-            if isinstance(maturity_date, str):
-                maturity = datetime.strptime(maturity_date, '%Y-%m-%d').date()
-            else:
-                maturity = maturity_date
-            today = date.today()
-            years_to_maturity = (maturity - today).days / 365.25
-            
-            if years_to_maturity <= 0:
-                return None
-            
-            # Годовой купон в рублях
-            annual_coupon = nominal * coupon_rate / 100
-            
-            # Для простоты пока используем упрощенную формулу YTM
-            # В будущем можно реализовать итеративный метод Ньютона-Рафсона
-            
-            if amortization_flag:
-                # Для облигаций с амортизацией используем упрощенную формулу
-                # Учитываем амортизацию и время до погашения
-                current_yield = annual_coupon / market_price
-                capital_gain = (nominal - market_price) / years_to_maturity
-                
-                # Корректируем на амортизацию (уменьшаем доходность)
-                amortization_adjustment = 0.25  # 25% снижение из-за амортизации
-                ytm = (current_yield + (capital_gain / market_price)) * (1 - amortization_adjustment)
-            else:
-                # Для обычных облигаций используем формулу текущей доходности + прирост капитала
-                capital_gain = (nominal - market_price) / years_to_maturity
-                current_yield = annual_coupon / market_price
-                ytm = current_yield + (capital_gain / market_price)
-            
-            return ytm * 100  # Конвертируем в проценты
-            
-        except Exception as e:
-            logger.error(f"Ошибка при расчете YTM: {e}")
-            return None
+        return self._enrich_bonds_with_ytm(bonds, args)
 
     def _get_portfolio_bonds(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
-        """Получает облигации из портфеля с расчетом YTM по средней цене покупки."""
-        return self.db.get_bonds_yield_table(
+        """Получает облигации из портфеля с канонической mark-to-market YTM."""
+        bonds = self.db.get_bonds_yield_table(
             mode='portfolio',
             min_maturity=args.min_maturity,
             max_maturity=args.max_maturity,
@@ -203,58 +168,56 @@ class CalculateYtmUseCase(UseCase):
             floating_coupon=args.floating_coupon,
             limit=args.limit,
         )
+        return self._enrich_bonds_with_ytm(bonds, args)
 
     def _print_bonds_table(self, bonds: List[Dict[str, Any]], title: str):
         """Выводит таблицу с облигациями в консоль."""
         if not bonds:
             return
-            
+
         print(f"\n{'='*80}")
         print(f"📊 {title}")
         print(f"{'='*80}")
-        
-        # Определяем заголовки в зависимости от режима
+
         if 'average_price' in bonds[0]:
             # Режим портфеля
-            headers = [
-                "ISIN", "Тикер", "Название", "Номинал", "Купон %", 
-                "Частота", "Погашение", "Риск", "Лист", "Амортиз.",
-                "Ср.цена", "Тек.цена", "Кол-во", "Доходн. %", "Измен.цены %", "Купон/мес", "Тип купона"
-            ]
-            
-            # Выводим заголовки
-            print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<30} | {'Номинал':<7} | {'Купон %':<6} | "
+            print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<26} | {'Номинал':<7} | {'Купон %':<6} | "
                   f"{'Частота':<7} | {'Погашение':<10} | {'Риск':<4} | {'Лист':<4} | {'Амортиз.':<8} | "
-                  f"{'Ср.цена':<8} | {'Тек.цена':<8} | {'Кол-во':<6} | {'Доходн. %':<9} | {'Измен.цены %':<11} | {'Купон/мес':<10} | {'Тип купона':<12}")
-            print("-" * 172)
-            
+                  f"{'Ср.цена':<8} | {'Тек.цена':<8} | {'Кол-во':<6} | {'YTM %':<24} | {'Измен.цены %':<11} | {'Купон/мес':<10} | {'Тип купона':<12}")
+            print("-" * 180)
+
             for i, bond in enumerate(bonds):
                 try:
-                    # Преобразуем строковые значения в числа
-                    nominal = float(bond['nominal']) if bond['nominal'] else 0
-                    coupon_rate = float(bond['coupon_rate_percent']) if bond['coupon_rate_percent'] else 0
-                    coupon_freq = int(float(bond['coupon_quantity_per_year'])) if bond['coupon_quantity_per_year'] else 0
-                    avg_price = float(bond['average_price']) if bond['average_price'] else 0
-                    curr_price = float(bond['current_price']) if bond['current_price'] else 0
-                    quantity = float(bond['quantity']) if bond['quantity'] else 0
-                    real_yield = float(bond['real_yield_percent']) if bond['real_yield_percent'] else 0
-                    price_change = float(bond['price_change_percent']) if bond['price_change_percent'] else 0
-                    total_monthly_coupon = float(bond['total_monthly_coupon_payment']) if bond['total_monthly_coupon_payment'] else 0
-                    
+                    nominal = float(bond['nominal']) if bond.get('nominal') else 0
+                    coupon_rate = float(bond['coupon_rate_percent']) if bond.get('coupon_rate_percent') else 0
+                    coupon_freq = int(float(bond['coupon_quantity_per_year'])) if bond.get('coupon_quantity_per_year') else 0
+                    avg_price = float(bond['average_price']) if bond.get('average_price') else 0
+                    curr_price = float(bond.get('market_price') or bond.get('current_price') or 0)
+                    quantity = float(bond['quantity']) if bond.get('quantity') else 0
+                    price_change = float(bond['price_change_percent']) if bond.get('price_change_percent') else 0
+                    total_monthly_coupon = float(bond['total_monthly_coupon_payment']) if bond.get('total_monthly_coupon_payment') else 0
+
+                    ytm = bond.get('ytm_percent')
+                    if ytm is not None:
+                        ytm_str = f"{ytm:.2f}%"
+                    else:
+                        reason = bond.get('ytm_reason') or 'Н/Д'
+                        ytm_str = f"— ({reason})"
+
                     print(f"{bond['isin']:<12} | "
                           f"{bond['ticker'] or 'N/A':<8} | "
-                          f"{bond['name'][:30] if bond['name'] else 'N/A':<30} | "
+                          f"{(bond['name'] or 'N/A')[:26]:<26} | "
                           f"{nominal:<7.0f} | "
                           f"{coupon_rate:<6.1f} | "
                           f"{coupon_freq:<7} | "
-                          f"{bond['maturity_date'] or 'N/A':<10} | "
-                          f"{bond['risk_level'] or 'N/A':<4} | "
-                          f"{bond['list_level'] or 'N/A':<4} | "
-                          f"{'Да' if bond['amortization_flag'] else 'Нет':<8} | "
+                          f"{str(bond['maturity_date']) if bond.get('maturity_date') else 'N/A':<10} | "
+                          f"{bond['risk_level'] if bond.get('risk_level') is not None else 'N/A':<4} | "
+                          f"{bond['list_level'] if bond.get('list_level') is not None else 'N/A':<4} | "
+                          f"{'Да' if bond.get('amortization_flag') else 'Нет':<8} | "
                           f"{avg_price:<8.2f} | "
                           f"{curr_price:<8.2f} | "
                           f"{quantity:<6.0f} | "
-                          f"{real_yield:<9.2f} | "
+                          f"{ytm_str:<24} | "
                           f"{price_change:<11.2f} | "
                           f"{total_monthly_coupon:<10.0f} | "
                           f"{bond.get('coupon_type', 'N/A'):<12}")
@@ -264,54 +227,49 @@ class CalculateYtmUseCase(UseCase):
                     continue
         else:
             # Режим покупки
-            headers = [
-                "ISIN", "Тикер", "Название", "Номинал", "Купон %", 
-                "Частота", "Погашение", "Риск", "Лист", "Амортиз.",
-                "Тек.цена", "Доходн. %", "YTM %", "Купон/мес", "Тип купона"
-            ]
-            
-            # Выводим заголовки
-            print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<30} | {'Номинал':<7} | {'Купон %':<6} | "
+            print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<26} | {'Номинал':<7} | {'Купон %':<6} | "
                   f"{'Частота':<7} | {'Погашение':<10} | {'Риск':<4} | {'Лист':<4} | {'Амортиз.':<8} | "
-                  f"{'Тек.цена':<8} | {'Доходн. %':<9} | {'YTM %':<7} | {'Купон/мес':<10} | {'Тип купона':<12}")
-            print("-" * 149)
-            
+                  f"{'Тек.цена':<8} | {'YTM %':<24} | {'Купон/мес':<10} | {'Тип купона':<12}")
+            print("-" * 155)
+
             for bond in bonds:
                 try:
-                    # Преобразуем строковые значения в числа
-                    nominal = float(bond['nominal']) if bond['nominal'] else 0
-                    coupon_rate = float(bond['coupon_rate_percent']) if bond['coupon_rate_percent'] else 0
-                    coupon_freq = int(float(bond['coupon_quantity_per_year'])) if bond['coupon_quantity_per_year'] else 0
-                    curr_price = float(bond['current_price']) if bond['current_price'] else 0
-                    real_yield = float(bond['real_yield_percent']) if bond['real_yield_percent'] else 0
-                    total_monthly_coupon = float(bond['total_monthly_coupon_payment']) if bond['total_monthly_coupon_payment'] else 0
-                    
-                    # Получаем YTM
+                    nominal = float(bond['nominal']) if bond.get('nominal') else 0
+                    coupon_rate = float(bond['coupon_rate_percent']) if bond.get('coupon_rate_percent') else 0
+                    coupon_freq = int(float(bond['coupon_quantity_per_year'])) if bond.get('coupon_quantity_per_year') else 0
+                    curr_price = float(bond.get('market_price') or bond.get('current_price') or 0)
+                    total_monthly_coupon = float(bond['total_monthly_coupon_payment']) if bond.get('total_monthly_coupon_payment') else 0
+
                     ytm = bond.get('ytm_percent')
-                    ytm_str = f"{ytm:.2f}" if ytm is not None else "N/A"
-                    
+                    if ytm is not None:
+                        ytm_str = f"{ytm:.2f}%"
+                    else:
+                        reason = bond.get('ytm_reason') or 'Н/Д'
+                        ytm_str = f"— ({reason})"
+
                     print(f"{bond['isin']:<12} | "
                           f"{bond['ticker'] or 'N/A':<8} | "
-                          f"{bond['name'][:30] if bond['name'] else 'N/A':<30} | "
+                          f"{(bond['name'] or 'N/A')[:26]:<26} | "
                           f"{nominal:<7.0f} | "
                           f"{coupon_rate:<6.1f} | "
                           f"{coupon_freq:<7} | "
-                          f"{bond['maturity_date'] or 'N/A':<10} | "
-                          f"{bond['risk_level'] or 'N/A':<4} | "
-                          f"{bond['list_level'] or 'N/A':<4} | "
-                          f"{'Да' if bond['amortization_flag'] else 'Нет':<8} | "
+                          f"{str(bond['maturity_date']) if bond.get('maturity_date') else 'N/A':<10} | "
+                          f"{bond['risk_level'] if bond.get('risk_level') is not None else 'N/A':<4} | "
+                          f"{bond['list_level'] if bond.get('list_level') is not None else 'N/A':<4} | "
+                          f"{'Да' if bond.get('amortization_flag') else 'Нет':<8} | "
                           f"{curr_price:<8.2f} | "
-                          f"{real_yield:<9.2f} | "
-                          f"{ytm_str:<7} | "
+                          f"{ytm_str:<24} | "
                           f"{total_monthly_coupon:<10.0f} | "
                           f"{bond.get('coupon_type', 'N/A'):<12}")
                 except Exception as e:
                     print(f"Ошибка при форматировании строки: {e}")
                     print(f"Данные: {bond}")
                     continue
-        
+
         print(f"{'='*80}")
-        print(f"�� Всего облигаций: {len(bonds)}")
-        print(f"💡 Доходн. % = (Купонная ставка × Номинал) / Цена покупки × 100%")
-        print(f"💡 YTM % = Доходность к погашению с учетом времени и амортизации")
+        print(f"📊 Всего облигаций: {len(bonds)}")
+        print(f"💡 YTM % — каноническая доходность к погашению (mark-to-market по рыночной чистой цене).")
+        print(f"💡 Для флоатеров, бессрочных и амортизируемых бумаг отображается «— (причина)» без упрощенных формул.")
+        if 'average_price' in bonds[0]:
+            print(f"💡 Ср.цена — средняя цена покупки портфеля (справочная колонка, не подменяет YTM).")
         print(f"{'='*80}\n")
