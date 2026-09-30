@@ -5,6 +5,9 @@ P0: текущий портфель (лист PORTFOLIO). 019: candidate project
 rebalance-report (build_report + default_args, второго скринера нет).
 020: schema v3 — публикуются SCHEMA (самодокументация контракта) и
 CANDIDATES, CONTROL расширен кандидатными ключами и consumer_rule.
+025: schema v4 — CONTROL несёт cash контекст канонического снапшота
+(cash_available_rub / investable_total_rub / cash_updated_at; unknown —
+пустая ячейка, не 0), CANDIDATES — canonical credit_rating кандидата.
 """
 from __future__ import annotations
 
@@ -30,7 +33,9 @@ logger = logging.getLogger(__name__)
 # v2 (007, 008): ytm_reason/duration_reason — причины пустых ytm_pct/duration;
 # valuation_source/valuation_warning — происхождение canonical valuation (008).
 # v3 (020): SCHEMA (самодокументация) + CANDIDATES (кандидаты buy-выборки).
-SCHEMA_VERSION = 3
+# v4 (025): CONTROL + cash контекст (cash_available_rub/investable_total_rub/
+# cash_updated_at; unknown = пустая ячейка), CANDIDATES + credit_rating.
+SCHEMA_VERSION = 4
 PORTFOLIO_HEADERS = (
     "isin",
     "name",
@@ -120,6 +125,7 @@ def _iso(value: Any) -> Optional[str]:
 # 019: транспортные колонки будущего листа CANDIDATES — контракт из задачи.
 # Значения берутся только из строк канонического скринера rebalance-report
 # (screener.fixed[] / screener.floater[]), второго screener для ChatGPT нет.
+# 025: + credit_rating — последний canonical рейтинг из строки скринера.
 CANDIDATE_HEADERS = (
     "candidate_type",
     "rank",
@@ -135,6 +141,7 @@ CANDIDATE_HEADERS = (
     "maturity_date",
     "offer_date",
     "amortization_flag",
+    "credit_rating",
     "risk_level",
     "list_level",
     "ku",
@@ -158,7 +165,8 @@ CANDIDATE_SCHEMA = (
     ("maturity_date", "ISO date", "Maturity date"),
     ("offer_date", "ISO date or empty", "Offer (put/call) date"),
     ("amortization_flag", "boolean", "TRUE when nominal amortization exists"),
-    ("risk_level", "count", "Risk level (Tinkoff)"),
+    ("credit_rating", "string or empty", "Latest canonical credit rating of the candidate (last rating_history row by ISIN, copied from the canonical screener row); empty when the bond has no rating row"),
+    ("risk_level", "count", "Risk level (Tinkoff); a separate Tinkoff scale — NOT a substitute for credit_rating"),
     ("list_level", "count", "MOEX listing level"),
     ("ku", "boolean", "TRUE when the bond is available only to qualified investors"),
     ("issuer_pct_current", "percent", "Current issuer share in the portfolio BEFORE the hypothetical purchase (the candidate itself is not counted in it)"),
@@ -172,13 +180,16 @@ SCHEMA_HEADERS = ("sheet", "field", "type_or_unit", "description")
 
 CONTROL_SCHEMA = (
     ("sync_status", "string", "WRITING while data sheets are being written; READY only after PORTFOLIO and CANDIDATES are written and both row counts verified (commit-marker)"),
-    ("schema_version", "count", "Version of the sheet contract (3 = SCHEMA + CANDIDATES added)"),
+    ("schema_version", "count", "Version of the sheet contract (4 = cash context in CONTROL and credit_rating in CANDIDATES)"),
     ("snapshot_id", "string", "UTC snapshot id (YYYYMMDDThhmmssZ) identifying one sync run"),
     ("generated_at", "ISO datetime", "UTC time when the snapshot was generated"),
     ("gate_status", "string", "Freshness gate result (OK/WARN/BLOCKED); exports with not-fresh data are not published"),
     ("is_fresh", "boolean", "Always TRUE: exports that fail the freshness gate are not published"),
     ("positions_count", "count", "Number of data rows in PORTFOLIO; verify before use"),
-    ("portfolio_value_rub", "RUB", "Total portfolio valuation"),
+    ("portfolio_value_rub", "RUB", "Bonds-only valuation: the sum of PORTFOLIO value_rub. NOT including cash"),
+    ("cash_available_rub", "RUB or empty", "Free available RUB cash across the configured broker accounts, from the canonical portfolio snapshot (only sync-portfolio writes it). An EMPTY cell means cash is unknown (never synced, or the last sync failed) — treat it as unknown, NOT as zero"),
+    ("investable_total_rub", "RUB or empty", "portfolio_value_rub + cash_available_rub (bonds + free cash = total investable capital); empty when cash is unknown"),
+    ("cash_updated_at", "ISO datetime or empty", "Timestamp of the last successful cash sync; empty when cash is unknown. A stale value means cash may be outdated (a failed sync does not clear the snapshot)"),
     ("portfolio_updated_at", "ISO datetime", "When portfolio positions were last updated in the source DB"),
     ("market_updated_at", "ISO datetime", "When market prices were last updated in the source DB. Limitation: this is a DB write timestamp — the source trade timestamp is not stored, so freshness means recently written to DB, not recently traded"),
     ("warnings", "JSON or empty", "JSON list of freshness gate warnings; empty when none"),
@@ -191,7 +202,9 @@ CONTROL_SCHEMA = (
 CONSUMER_RULE = (
     "Read CONTROL first. Use data only when sync_status=READY.\n"
     "Read SCHEMA before interpreting PORTFOLIO or CANDIDATES.\n"
-    "Verify positions_count and candidates_count."
+    "Verify positions_count and candidates_count.\n"
+    "Empty cash_available_rub / investable_total_rub / cash_updated_at mean "
+    "unknown cash, not zero."
 )
 
 
@@ -228,9 +241,10 @@ def build_candidates_payload(
     Источник — только report['screener'] (fixed[]/floater[]): FIX и FLOAT идут
     в один набор, rank — с 1 отдельно внутри типа, порядок сохраняет ranking
     канонического скринера (экспортёр ничего не пересортировывает). qty/value
-    не экспортируются — у кандидата они 0 и ничего не добавляют; rating и
-    duration/liquidity не добавляются (покрытие вне портфеля неполное, их нет
-    в каноническом скринере). metadata (filters, candidates_total,
+    не экспортируются — у кандидата они 0 и ничего не добавляют; duration и
+    liquidity не добавляются (покрытие вне портфеля неполное, их нет в
+    каноническом скринере); credit_rating добавлен в 025 — он есть в
+    canonical screener row (023). metadata (filters, candidates_total,
     fixed_matched, floater_matched, excluded) переносится из отчёта без
     пересчёта.
     """
@@ -256,6 +270,7 @@ def build_candidates_payload(
                 "maturity_date": row["maturity"],
                 "offer_date": row["offer"],
                 "amortization_flag": row["amort"],
+                "credit_rating": row["credit_rating"],
                 "risk_level": row["risk_level"],
                 "list_level": row["list_level"],
                 "ku": row["ku"],
@@ -406,6 +421,15 @@ class SyncChatgptPortfolioUseCase(UseCase):
         report = self._report_builder(candidate_report_args())
         candidate_meta, candidate_rows = build_candidates_payload(report)
 
+        # 025: cash контекст канонического снапшота — тот же canonical reader,
+        # что у rebalance-report (022): PortfolioStorage.get_available_cash_rub.
+        # Никакого broker API; unknown cash публикуется пустой ячейкой, не 0.
+        cash = self.db.get_available_cash_rub()
+        cash_known = bool(cash.get("cash_known"))
+        cash_available_rub = (
+            round(_float(cash.get("cash_available_rub")), 2) if cash_known else None
+        )
+
         snapshot_id = now.strftime("%Y%m%dT%H%M%SZ")
         control = {
             "schema_version": SCHEMA_VERSION,
@@ -415,6 +439,13 @@ class SyncChatgptPortfolioUseCase(UseCase):
             "is_fresh": True,
             "positions_count": len(table_rows),
             "portfolio_value_rub": round(total_value, 2),
+            "cash_available_rub": cash_available_rub,
+            "investable_total_rub": (
+                round(total_value + cash_available_rub, 2)
+                if cash_available_rub is not None
+                else None
+            ),
+            "cash_updated_at": _iso(cash.get("cash_updated_at")) if cash_known else None,
             "portfolio_updated_at": _iso(freshness.get("portfolio_max_updated_at")),
             "market_updated_at": _iso(freshness.get("market_price_max_updated_at")),
             "warnings": json.dumps(warnings, ensure_ascii=False) if warnings else "",

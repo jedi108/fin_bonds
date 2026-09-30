@@ -44,6 +44,11 @@ CalculateYtmUseCase._enrich_bond_with_ytm через import (не subprocess и 
   (freq_min/freq_max/freq_in, exclude_sovereign, min_credit_rating,
   max_position_value, лимит эмитента 15% — переиспользуется
   scenario.issuer_limits), а не только покупки.
+
+025 — canonical bond row дополняется share_pct (аддитивно, версия контракта
+не меняется — та же policy, что в 023 для credit_rating): CSV различает
+«Доля выпуска, %» (share_pct) и «Доля эмитента, %» (issuer_pct) — раньше
+под «Доля, %» уходила агрегированная доля эмитента (подтверждённый баг).
 """
 import argparse
 import calendar
@@ -72,6 +77,8 @@ logger = logging.getLogger(__name__)
 # 2 (задача 022): portfolio дополняется cash-полями канонического снапшота
 # (securities_value_rub, cash_available_rub, investable_total_rub,
 # cash_updated_at); total_value и арифметика долей не меняются.
+# 025 оставляет версию 2: share_pct в canonical bond row — аддитивное
+# изменение (та же policy, что в 023 для credit_rating).
 SCHEMA_VERSION = 2
 
 # Лимит концентрации эмитента, % портфеля (план ребалансировки 001/002).
@@ -90,18 +97,24 @@ _SCREENER_POOL_LIMIT = 10000
 # Ключи строки бумаги в ответе (portfolio.positions и screener.fixed/floater).
 # 023: credit_rating — настоящий рейтинг кандидата (latest rating_history),
 # risk_level остаётся отдельным полем/фильтром.
+# 025: share_pct — доля выпуска (value / total_value * 100) рядом с
+# issuer_pct: CSV-колонка «Доля, %» раньше писала issuer_pct под именем,
+# выглядевшим как доля выпуска (подтверждённый баг) — теперь различаются.
 BOND_ROW_KEYS = (
-    'isin', 'name', 'ticker', 'qty', 'price', 'value',
+    'isin', 'name', 'ticker', 'qty', 'price', 'value', 'share_pct',
     'ytm_pct', 'ytm_reason', 'coupon_pct', 'freq',
     'coupon_kind', 'risk_level', 'list_level', 'maturity', 'offer',
     'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge', 'credit_rating',
 )
 
 # Заголовки CSV целевого портфеля (UTF-8 BOM, русские заголовки, строка ИТОГО).
+# 025: доля выпуска и доля эмитента — разные колонки (Доля выпуска = share_pct,
+# Доля эмитента = issuer_pct; раньше под «Доля, %» шёл issuer_pct).
 CSV_HEADERS = [
     'ISIN', 'Название', 'Тикер', 'Эмитент', 'Кол-во', 'Цена',
-    'Стоимость, ₽', 'Доля, %', 'YTM, %', 'Купон, %', 'Частота купонов',
-    'Тип купона', 'Риск', 'Листинг', 'Погашение', 'Оферта', 'Бейдж',
+    'Стоимость, ₽', 'Доля выпуска, %', 'Доля эмитента, %', 'YTM, %',
+    'Купон, %', 'Частота купонов', 'Тип купона', 'Риск', 'Листинг',
+    'Погашение', 'Оферта', 'Бейдж',
 ]
 
 # ---------------------------------------------------------------------------
@@ -592,6 +605,9 @@ class RebalanceReportUseCase(UseCase):
             'qty': round(_to_float(row.get('quantity')) or 0.0, 4),
             'price': round(_to_float(price_raw), 4) if price_raw is not None else None,
             'value': value,
+            # 025: доля выпуска — раньше считалась, но не возвращалась, из-за
+            # чего CSV писал issuer_pct под заголовком, похожим на долю выпуска.
+            'share_pct': share_pct,
             'ytm_pct': round(_to_float(row.get('ytm_percent')), 2)
             if row.get('ytm_percent') is not None else None,
             'ytm_reason': row.get('ytm_reason'),
@@ -1495,7 +1511,10 @@ class RebalanceReportUseCase(UseCase):
                 writer.writerow([
                     pos['isin'], pos['name'] or '', pos['ticker'] or '', pos['issuer'],
                     fmt_num(pos['qty'], 0), fmt_num(pos['price']),
-                    fmt_num(pos['value']), fmt_num(pos['issuer_pct']),
+                    # 025: доля выпуска (share_pct) и доля эмитента (issuer_pct)
+                    # — разные колонки; раньше под «Доля, %» шёл issuer_pct.
+                    fmt_num(pos['value']), fmt_num(pos['share_pct']),
+                    fmt_num(pos['issuer_pct']),
                     fmt_num(pos['ytm_pct']), fmt_num(pos['coupon_pct']),
                     pos['freq'] if pos['freq'] is not None else '',
                     'Плавающий' if pos['coupon_kind'] == 'float' else 'Фиксированный',
@@ -1505,6 +1524,9 @@ class RebalanceReportUseCase(UseCase):
                 ])
             writer.writerow([
                 'ИТОГО', f"позиций: {len(positions)}", '', '', '', '',
-                fmt_num(total_value), '100.00', '', '', '', '', '', '', '', '', '',
+                # 100% — сумма долей выпусков (share_pct); доли эмитентов
+                # агрегированы по колонке «Доля эмитента, %».
+                fmt_num(total_value), '100.00', '',
+                '', '', '', '', '', '', '', '', '',
             ])
         return str(path)

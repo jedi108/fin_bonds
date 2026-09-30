@@ -23,8 +23,13 @@ from src.use_cases.sync_chatgpt_portfolio import (
 
 
 class FakeDb:
-    def __init__(self, rows, freshness=None):
+    def __init__(self, rows, freshness=None, cash=None):
         self.rows = rows
+        self.cash = cash or {
+            "cash_available_rub": None,
+            "cash_updated_at": None,
+            "cash_known": False,
+        }
         self.freshness = freshness or {
             "bonds_with_market_price": 100,
             "bonds_tradeable_count": 100,
@@ -43,6 +48,10 @@ class FakeDb:
 
     def get_chatgpt_portfolio_rows(self):
         return [dict(row) for row in self.rows]
+
+    def get_available_cash_rub(self):
+        """Canonical cash reader (022) — тот же контракт, что у storage."""
+        return dict(self.cash)
 
 
 class FakeYtmEngine:
@@ -191,14 +200,14 @@ def test_reason_columns_follow_value_columns():
         PORTFOLIO_HEADERS.index("duration_reason")
         == PORTFOLIO_HEADERS.index("modified_duration") + 1
     )
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_build_payload_row_values_match_headers_order():
     """Каждая ячейка строки лежит на позиции своего заголовка."""
     control, rows = build_payload(make_rows())
 
-    assert control["schema_version"] == 3
+    assert control["schema_version"] == 4
     assert len(rows[0]) == len(PORTFOLIO_HEADERS)
     expected = {
         "isin": "RU000A",
@@ -307,7 +316,7 @@ def test_valuation_columns_follow_value_column():
         PORTFOLIO_HEADERS.index("valuation_warning")
         == PORTFOLIO_HEADERS.index("valuation_source") + 1
     )
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_valuation_warning_by_source():
@@ -673,6 +682,7 @@ def screener_row(**overrides):
         "qty": 0.0,
         "price": 950.0,
         "value": 0.0,
+        "share_pct": 0.0,
         "ytm_pct": 15.0,
         "ytm_reason": None,
         "coupon_pct": 12.0,
@@ -687,6 +697,7 @@ def screener_row(**overrides):
         "issuer": "Issuer",
         "issuer_pct": None,
         "held_badge": None,
+        "credit_rating": "AA-",
     }
     row.update(overrides)
     return row
@@ -758,6 +769,7 @@ def test_candidate_projection_fields_match_source_screener():
         "maturity_date": source["maturity"],
         "offer_date": source["offer"],
         "amortization_flag": source["amort"],
+        "credit_rating": source["credit_rating"],
         "risk_level": source["risk_level"],
         "list_level": source["list_level"],
         "ku": source["ku"],
@@ -799,7 +811,7 @@ def test_candidate_projection_carries_screener_metadata():
 def test_p0_portfolio_payload_not_touched_by_candidate_export():
     """P0 PORTFOLIO payload не меняется кандидатным экспортом: колонки те же
     (v3 поднимает только версию контракта), candidate_type/rank не протекают."""
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     assert PORTFOLIO_HEADERS[0] == "isin"
     assert "candidate_type" not in PORTFOLIO_HEADERS
     assert "rank" not in PORTFOLIO_HEADERS
@@ -901,11 +913,12 @@ def test_candidates_payload_built_from_canonical_report(db):
 
 
 # ---------------------------------------------------------------------------
-# 020: schema v3 — SCHEMA + CANDIDATES в атомарном протоколе публикации
+# 020/025: schema v4 — SCHEMA + CANDIDATES + cash-контекст в атомарном
+# протоколе публикации
 # ---------------------------------------------------------------------------
 
 
-def make_v3_use_case(db_rows, publisher, report_builder=None):
+def make_v4_use_case(db_rows, publisher, report_builder=None):
     return SyncChatgptPortfolioUseCase(
         FakeDb(db_rows),
         publisher=publisher,
@@ -926,7 +939,7 @@ def test_schema_documents_every_header_in_order():
 def test_schema_documents_control_keys():
     """Все ключи CONTROL (sync_status + payload) описаны в SCHEMA — без пропусков
     и без устаревших записей."""
-    use_case = make_v3_use_case(sample_rows(), FakePublisher())
+    use_case = make_v4_use_case(sample_rows(), FakePublisher())
     control, _rows, _candidates = use_case._build_payload(
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
@@ -961,18 +974,34 @@ def test_schema_describes_units_and_semantics():
     # limitation: freshness market price по DB write timestamp.
     assert "DB write timestamp" in rows[("CONTROL", "market_updated_at")][3]
     assert "trade timestamp" in rows[("CONTROL", "market_updated_at")][3]
+    # 025: cash-поля и различие bonds-only / investable описаны в SCHEMA.
+    assert rows[("CONTROL", "cash_available_rub")][2] == "RUB or empty"
+    assert rows[("CONTROL", "investable_total_rub")][2] == "RUB or empty"
+    assert "NOT including cash" in rows[("CONTROL", "portfolio_value_rub")][3]
+    assert "unknown, NOT as zero" in rows[("CONTROL", "cash_available_rub")][3]
+    assert (
+        rows[("CONTROL", "investable_total_rub")][3]
+        == "portfolio_value_rub + cash_available_rub (bonds + free cash = total investable capital); empty when cash is unknown"
+    )
+    assert "last successful cash sync" in rows[("CONTROL", "cash_updated_at")][3]
+    # 025: credit_rating кандидата — canonical, risk_level рейтингом не служит.
+    assert rows[("CANDIDATES", "credit_rating")][2] == "string or empty"
+    assert "rating_history" in rows[("CANDIDATES", "credit_rating")][3]
+    assert "NOT a substitute for credit_rating" in rows[("CANDIDATES", "risk_level")][3]
+    # 025: consumer rule предупреждает о пустых cash-ячейках.
+    assert "unknown cash, not zero" in CONSUMER_RULE
 
 
 def test_build_payload_v3_control_fields_and_candidates():
     """schema v3: control несёт кандидатов и контракт потребителя; кандидатные
     строки — третий элемент payload, count совпадает."""
-    use_case = make_v3_use_case(sample_rows(), FakePublisher())
+    use_case = make_v4_use_case(sample_rows(), FakePublisher())
 
     control, rows, candidate_rows = use_case._build_payload(
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
 
-    assert control["schema_version"] == 3
+    assert control["schema_version"] == 4
     assert control["positions_count"] == len(rows)
     assert control["candidates_count"] == len(candidate_rows) == 3
     assert json.loads(control["candidate_meta"]) == {
@@ -986,10 +1015,66 @@ def test_build_payload_v3_control_fields_and_candidates():
     assert control["consumer_rule"] == CONSUMER_RULE
 
 
+def test_build_payload_v4_control_carries_known_cash():
+    """schema v4: известный cash из canonical reader попадает в CONTROL,
+    investable_total_rub = portfolio_value_rub + cash_available_rub."""
+    db = FakeDb(
+        sample_rows(),
+        cash={
+            "cash_available_rub": 1234.56,
+            "cash_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
+            "cash_known": True,
+        },
+    )
+    use_case = SyncChatgptPortfolioUseCase(
+        db,
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+        report_builder=lambda _args: fake_screener_report(),
+    )
+    control, _rows, _candidates = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    assert control["schema_version"] == 4
+    assert control["portfolio_value_rub"] == 25000
+    assert control["cash_available_rub"] == 1234.56
+    assert control["investable_total_rub"] == 26234.56
+    assert control["cash_updated_at"] == "2026-09-30T09:00:00+00:00"
+
+
+def test_build_payload_v4_unknown_cash_is_empty_not_zero():
+    """unknown cash (sync ещё не выполнялся): CONTROL публикует пустые
+    значения (publisher пишет их как пустые ячейки), не нули."""
+    use_case = make_v4_use_case(sample_rows(), FakePublisher())
+    control, _rows, _candidates = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    assert control["cash_available_rub"] is None
+    assert control["investable_total_rub"] is None
+    assert control["cash_updated_at"] is None
+
+
+def test_candidates_projection_carries_credit_rating():
+    """025: CANDIDATES переносит canonical credit_rating из строки скринера."""
+    report = fake_screener_report()
+    report["screener"]["fixed"][0]["credit_rating"] = "AA"
+    report["screener"]["fixed"][1]["credit_rating"] = None
+
+    _, rows = build_candidates_payload(report)
+
+    assert candidate_cell(rows[0], "credit_rating") == "AA"
+    assert candidate_cell(rows[1], "credit_rating") is None
+    assert CANDIDATE_HEADERS.index("credit_rating") == CANDIDATE_HEADERS.index(
+        "amortization_flag"
+    ) + 1
+
+
 def test_execute_publishes_v3_sheets_to_publisher():
     """execute передаёт в publisher один снапшот: PORTFOLIO + SCHEMA + CANDIDATES."""
     publisher = FakePublisher()
-    use_case = make_v3_use_case(sample_rows(), publisher)
+    use_case = make_v4_use_case(sample_rows(), publisher)
 
     use_case.execute(None)
 
@@ -1041,7 +1126,7 @@ def test_publisher_writes_schema_and_candidates_between_writing_and_ready():
 
     publisher.publish(
         control={
-            "schema_version": 3,
+            "schema_version": 4,
             "positions_count": 2,
             "candidates_count": 2,
             "contract_sheet": "SCHEMA",

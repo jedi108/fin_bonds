@@ -347,6 +347,11 @@ class TestGoldenSchema:
         # бейдж held с долей
         assert by_isin['RU000A0FIX01']['held_badge'] == 'held (66.67%)'
         assert by_isin['RU000A0FIX02']['held_badge'] == 'held (33.33%)'
+        # 025: share_pct — доля выпуска рядом с issuer_pct (аддитивное поле)
+        assert by_isin['RU000A0FIX01']['share_pct'] == 66.67
+        assert by_isin['RU000A0FIX02']['share_pct'] == 33.33
+        assert by_isin['RU000A0FIX01']['issuer_pct'] == 66.67
+        assert by_isin['RU000A0FIX02']['issuer_pct'] == 33.33
 
     def test_concentrations_block(self):
         conc = self.report['concentrations']
@@ -1052,6 +1057,98 @@ class TestCsvArtifact:
         report = _build_report(db, csv_out=str(csv_path))
         assert csv_path.is_file()
         assert report['artifacts']['target_portfolio_csv'] == str(csv_path)
+
+
+# ---------------------------------------------------------------------------
+# CSV-доли (025): доля выпуска vs доля эмитента
+# ---------------------------------------------------------------------------
+
+class TestCsvShares:
+    """Подтверждённый баг 025: CSV «Доля, %» писала issuer_pct — агрегированную
+    долю эмитента — под заголовком, выглядевшим как доля выпуска. Теперь
+    «Доля выпуска, %» = share_pct, «Доля эмитента, %» = issuer_pct."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, db):
+        # Альфа: две серии (10000 + 5000 = 15000 -> эмитент 75%), Бета: 5000 (25%).
+        alfa = _insert_company(db, 'Альфа Пром')
+        beta = _insert_company(db, 'Бета Финанс')
+        _insert_bond(db, isin='RU000A0SHR01', ticker='SHR01', name='Альфа 001P-01',
+                     company_id=alfa, coupon_quantity_per_year=12,
+                     coupon_rate_percent=Decimal('20.0'))
+        _insert_bond(db, isin='RU000A0SHR02', ticker='SHR02', name='Альфа 002P-01',
+                     company_id=alfa, coupon_quantity_per_year=4,
+                     coupon_rate_percent=Decimal('15.0'))
+        _insert_bond(db, isin='RU000A0SHRBT', ticker='SHRBT', name='Бета БО-01',
+                     company_id=beta, coupon_quantity_per_year=4,
+                     coupon_rate_percent=Decimal('15.0'))
+        _insert_position(db, 'RU000A0SHR01', quantity=10, price=1000)
+        _insert_position(db, 'RU000A0SHR02', quantity=10, price=500)
+        _insert_position(db, 'RU000A0SHRBT', quantity=10, price=500)
+        db.conn.commit()
+
+    def _parse_csv(self, db, tmp_path, **overrides):
+        csv_path = tmp_path / 'target.csv'
+        _build_report(db, csv_out=str(csv_path), **overrides)
+        text = csv_path.read_text(encoding='utf-8-sig')
+        rows = list(csv.reader(text.strip().splitlines()))
+        header, data, total = rows[0], rows[1:-1], rows[-1]
+        assert header == CSV_HEADERS
+        assert total[0] == 'ИТОГО'
+        idx = {name: header.index(name) for name in
+               ('Стоимость, ₽', 'Доля выпуска, %', 'Доля эмитента, %')}
+        return data, total, idx
+
+    def test_issue_share_vs_issuer_share_for_same_issuer_series(self, db, tmp_path):
+        """Серии одного эмитента: share_pct разные, issuer_pct одинаковый."""
+        data, _total, idx = self._parse_csv(db, tmp_path)
+        by_isin = {row[0]: row for row in data}
+
+        alfa_01, alfa_02 = by_isin['RU000A0SHR01'], by_isin['RU000A0SHR02']
+        # разные доли выпусков (50% и 25%), одинаковая доля эмитента (75%)
+        assert alfa_01[idx['Доля выпуска, %']] == '50.00'
+        assert alfa_02[idx['Доля выпуска, %']] == '25.00'
+        assert alfa_01[idx['Доля эмитента, %']] == '75.00'
+        assert alfa_02[idx['Доля эмитента, %']] == '75.00'
+        # чужой эмитент — своя доля выпуска и эмитента
+        assert by_isin['RU000A0SHRBT'][idx['Доля выпуска, %']] == '25.00'
+        assert by_isin['RU000A0SHRBT'][idx['Доля эмитента, %']] == '25.00'
+
+    def test_issue_shares_sum_to_100(self, db, tmp_path):
+        """Сумма Доля выпуска по всем строкам ≈ 100%."""
+        data, _total, idx = self._parse_csv(db, tmp_path)
+        total_share = sum(float(row[idx['Доля выпуска, %']]) for row in data)
+        assert total_share == pytest.approx(100.0)
+
+    def test_total_row_correct(self, db, tmp_path):
+        """ИТОГО: стоимость портфеля и 100% в колонке доли выпуска."""
+        data, total, idx = self._parse_csv(db, tmp_path)
+        expected_total = sum(float(row[idx['Стоимость, ₽']]) for row in data)
+        assert float(total[idx['Стоимость, ₽']]) == expected_total
+        # 100% — сумма долей выпусков; доля эмитента в ИТОГО не суммируется
+        assert total[idx['Доля выпуска, %']] == '100.00'
+        assert total[idx['Доля эмитента, %']] == ''
+
+    def test_scenario_target_csv_shares_sum_to_100(self, db, tmp_path):
+        """Целевой портфель после сделок: сумма долей выпусков ≈ 100%."""
+        csv_path = tmp_path / 'target.csv'
+        scenario_path = tmp_path / 'scenario.json'
+        scenario_path.write_text(
+            json.dumps({'trades': [{'isin': 'RU000A0SHR01', 'qty_delta': -4}]}),
+            encoding='utf-8',
+        )
+        use_case = RebalanceReportUseCase(db=db, rating_scale=_RATING_SCALE)
+        report = use_case.build_report(_make_args(
+            scenario=str(scenario_path), csv_out=str(csv_path),
+        ))
+        assert report['artifacts']['target_portfolio_csv'] == str(csv_path)
+        text = csv_path.read_text(encoding='utf-8-sig')
+        rows = list(csv.reader(text.strip().splitlines()))
+        header = rows[0]
+        idx = header.index('Доля выпуска, %')
+        data = [row for row in rows[1:-1]]
+        total_share = sum(float(row[idx]) for row in data)
+        assert total_share == pytest.approx(100.0)
 
 
 # ---------------------------------------------------------------------------

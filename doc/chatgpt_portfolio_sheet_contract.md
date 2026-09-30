@@ -5,7 +5,7 @@
 портфеля и кандидатного контекста для ревью ребалансировки внешним агентом
 (ChatGPT). Документ не содержит данных портфеля — только формат.
 
-Рабочие листы (schema_version = 3): `CONTROL`, `SCHEMA`, `PORTFOLIO`,
+Рабочие листы (schema_version = 4): `CONTROL`, `SCHEMA`, `PORTFOLIO`,
 `CANDIDATES`. Других листов нет.
 
 Runtime source-of-truth для потребителя — сам лист `SCHEMA` в таблице: он
@@ -27,8 +27,13 @@ Runtime source-of-truth для потребителя — сам лист `SCHEM
 5. `CONTROL.snapshot_id` (`YYYYMMDDThhmmssZ`, UTC) и `generated_at`
    идентифицируют момент снапшота; `portfolio_updated_at` /
    `market_updated_at` — свежесть исходных данных в БД.
+6. Инвестиционный капитал = `portfolio_value_rub + cash_available_rub`
+   (`investable_total_rub`). Пустые `cash_available_rub` /
+   `investable_total_rub` / `cash_updated_at` означают «cash неизвестен»
+   (sync ещё не выполнялся или последний sync не удался) — это НЕ ноль:
+   не считать свободные деньги нулём и не предполагать их отсутствие.
 
-## CONTROL — ключи (schema_version = 3)
+## CONTROL — ключи (schema_version = 4)
 
 | Ключ | Смысл |
 |---|---|
@@ -39,14 +44,21 @@ Runtime source-of-truth для потребителя — сам лист `SCHEM
 | `gate_status` | Результат freshness-гейта (`OK`/`WARN`/`BLOCKED`); экспорт блокируется при нехороших данных |
 | `is_fresh` | Всегда `true` — не прошедшие гейт экспорты не публикуются |
 | `positions_count` | Число строк данных в `PORTFOLIO` |
-| `portfolio_value_rub` | Суммарная оценка портфеля, рубли |
+| `portfolio_value_rub` | Стоимость облигационных позиций (сумма `PORTFOLIO.value_rub`); **не включает** cash |
+| `cash_available_rub` | Свободный доступный RUB по настроенным брокерским счетам из канонического снапшота (пишет только `sync-portfolio`). Пустая ячейка — cash неизвестен (sync ещё не выполнялся или последний sync не удался); неизвестность **не равна** нулю |
+| `investable_total_rub` | `portfolio_value_rub + cash_available_rub` — облигации плюс свободный cash (инвестиционный капитал); пусто, если cash неизвестен |
+| `cash_updated_at` | Время последнего успешного cash sync; пусто, если cash неизвестен. Устаревшее значение — cash мог устареть (неудачный sync не затирает снапшот) |
 | `portfolio_updated_at` | Время последнего обновления позиций портфеля |
 | `market_updated_at` | Время последнего обновления рыночных цен (по timestamp записи в БД — см. «Ограничение свежести») |
 | `warnings` | JSON-список предупреждений гейта или пусто |
 | `candidates_count` | Число строк данных в `CANDIDATES` |
 | `candidate_meta` | JSON metadata кандидатного набора из канонического скринера, без пересчёта: `filters`, `candidates_total`, `fixed_matched`, `floater_matched`, `excluded` |
 | `contract_sheet` | Имя листа с описанием всех полей: `SCHEMA` |
-| `consumer_rule` | Короткий машинный контракт потребителя (совпадает с «Protocol чтения» выше) |
+| `consumer_rule` | Короткий машинный контракт потребителя (совпадает с «Protocol чтения» выше + правило «пустые cash-поля = неизвестность, не ноль») |
+
+Cash-поля (`cash_available_rub` / `investable_total_rub` / `cash_updated_at`)
+принадлежат тому же snapshot'у, что и позиции: они публикуются в том же
+атомарном протоколе и читаются только при `sync_status = READY`.
 
 ## SCHEMA — самодокументация контракта
 
@@ -60,7 +72,7 @@ Runtime source-of-truth для потребителя — сам лист `SCHEM
 - Семантика пустых значений: пустая ячейка значения — осознанный NULL из
   canonical-модели, причина лежит в соседней колонке `*_reason` (см. ниже).
 
-## PORTFOLIO — колонки (schema_version = 3)
+## PORTFOLIO — колонки (schema_version = 4)
 
 | Колонка | Единицы / формат | Смысл |
 |---|---|---|
@@ -91,7 +103,7 @@ Runtime source-of-truth для потребителя — сам лист `SCHEM
 | `duration_reason` | строка или пусто | Причина пустых `duration`/`modified_duration` |
 | `liquidity_loss_pct` | % (0–100) | Оценка потерь при выходе из позиции по рынку (взвешенная по позиции); имя унаследовано, в БД колонка называется `liquidity_loss_ratio`, но хранит проценты |
 
-## CANDIDATES — колонки (schema_version = 3)
+## CANDIDATES — колонки (schema_version = 4)
 
 Кандидаты buy-выборки канонического скринера rebalance-report:
 `screener.fixed[]` и `screener.floater[]` идут в один набор на одном листе,
@@ -117,14 +129,16 @@ shrink не оставляет хвостов предыдущего снапш�
 | `maturity_date` | ISO-дата | Погашение |
 | `offer_date` | ISO-дата или пусто | Оферта |
 | `amortization_flag` | TRUE/FALSE | Есть амортизация номинала |
-| `risk_level` | целое | Уровень риска (Tinkoff) |
+| `credit_rating` | строка или пусто | Последний canonical кредитный рейтинг кандидата (latest `rating_history` по ISIN, перенесён из строки канонического скринера); пусто — строки рейтинга нет |
+| `risk_level` | целое | Уровень риска (Tinkoff); отдельная шкала, **не** заменяет `credit_rating` |
 | `list_level` | целое | Уровень листинга MOEX |
 | `ku` | TRUE/FALSE | Бумага доступна только квалифицированным инвесторам |
 | `issuer_pct_current` | % (доля × 100) | Текущая доля эмитента в портфеле **до** гипотетической покупки (сам кандидат в ней не учтён) |
 | `held_badge` | строка или пусто | Непустой, если кандидат уже держится в портфеле (контекст `include_held=True`); формат `held (N%)` |
 
-Кандидаты — не портфель: у них нет qty/value/rating/duration/liquidity
-(покрытие вне портфеля неполное, этих полей нет в каноническом скринере).
+Кандидаты — не портфель: у них нет qty/value/duration/liquidity (покрытие вне
+портфеля неполное, этих полей нет в каноническом скринере); рейтинг с 025
+есть — canonical `credit_rating` из строки скринера (023).
 
 ## Семантика пустых значений и причин NULL
 
@@ -214,3 +228,11 @@ timestamp записи в БД (`market_price_updated_at`): timestamp сделк
     `contract_sheet`, `consumer_rule`;
   - атомарный протокол записи расширен на обе таблицы данных:
     WRITING → SCHEMA → PORTFOLIO → CANDIDATES → verify обеих → READY.
+- **4** — cash контекст и рейтинг кандидатов (025):
+  - в `CONTROL` добавлены `cash_available_rub`, `investable_total_rub`,
+    `cash_updated_at` — cash канонического снапшота (022) в том же snapshot;
+    пустая ячейка = неизвестность, не ноль; `portfolio_value_rub` уточнён:
+    это стоимость облигационных позиций, без cash;
+  - в `CANDIDATES` добавлена колонка `credit_rating` — последний canonical
+    рейтинг из строки канонического скринера (023); `risk_level` явно помечен
+    как отдельная шкала Tinkoff, не замена рейтинга.

@@ -637,6 +637,34 @@ class TestScenarioCsv:
         assert '15500.00' not in text.split('ИТОГО')[-1]  # там 15000.00
         assert '15000.00' in text.split('ИТОГО')[-1]
 
+    def test_csv_target_same_issuer_series_share_vs_issuer_share(self, db, tmp_path):
+        """025: в целевом портфеле серии одного эмитента (Гамма БО-01/БО-02)
+        имеют разные share_pct и одинаковый issuer_pct; сумма долей выпусков
+        ≈ 100%."""
+        _seed_base(db)
+        csv_path = tmp_path / 'target.csv'
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': AL1, 'qty_delta': -10},
+            {'isin': GM1, 'qty_delta': 5},
+            {'isin': GM2, 'qty_delta': 5},
+        ])
+        report = _build_scenario(db, path, csv_out=str(csv_path))
+        assert report['scenario']['valid'] is True
+
+        text = csv_path.read_text(encoding='utf-8-sig')
+        rows = list(csv.reader(text.strip().splitlines()))
+        header = rows[0]
+        share_idx = header.index('Доля выпуска, %')
+        issuer_idx = header.index('Доля эмитента, %')
+        by_isin = {row[0]: row for row in rows[1:-1]}
+        # после сделок: Бета 5000, Гамма БО-01 4500, Гамма БО-02 4000 (итого 13500)
+        assert by_isin[GM1][share_idx] == '33.33'
+        assert by_isin[GM2][share_idx] == '29.63'
+        assert by_isin[GM1][issuer_idx] == '62.96'
+        assert by_isin[GM2][issuer_idx] == '62.96'
+        total_share = sum(float(row[share_idx]) for row in rows[1:-1])
+        assert total_share == pytest.approx(100.0, abs=0.02)
+
 
 # ---------------------------------------------------------------------------
 # Анти-P-A: сценарий одной командой без env/psql (subprocess)
