@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+# v2 (007): добавлены ytm_reason и duration_reason — причины пустых ytm_pct/duration.
+SCHEMA_VERSION = 2
 PORTFOLIO_HEADERS = (
     "isin",
     "name",
@@ -31,6 +32,7 @@ PORTFOLIO_HEADERS = (
     "share_pct",
     "issuer_pct",
     "ytm_pct",
+    "ytm_reason",
     "coupon_pct",
     "coupon_frequency",
     "coupon_type",
@@ -42,6 +44,7 @@ PORTFOLIO_HEADERS = (
     "list_level",
     "duration",
     "modified_duration",
+    "duration_reason",
     "liquidity_loss_pct",
 )
 
@@ -135,6 +138,8 @@ class SyncChatgptPortfolioUseCase(UseCase):
             share_pct = round(value / total_value * 100.0, 4)
             issuer_pct = round(issuer_values[issuer] / total_value * 100.0, 4)
             coupon_type = "FLOAT" if row.get("floating_coupon_flag") else "FIX"
+            duration_macaulay = _float(row.get("duration_macaulay"))
+            duration_modified = _float(row.get("duration_modified"))
 
             values = {
                 "isin": row.get("isin"),
@@ -147,6 +152,9 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 "share_pct": share_pct,
                 "issuer_pct": issuer_pct,
                 "ytm_pct": _float(row.get("ytm_percent")),
+                # Причина пустого ytm_pct: готовый ключ enrichment'а (None,
+                # если YTM рассчитана); экспортер не пересчитывает её сам.
+                "ytm_reason": row.get("ytm_reason"),
                 "coupon_pct": _float(row.get("coupon_rate_percent")),
                 "coupon_frequency": row.get("coupon_quantity_per_year"),
                 "coupon_type": coupon_type,
@@ -156,8 +164,15 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 "credit_rating": row.get("credit_rating"),
                 "risk_level": row.get("risk_level"),
                 "list_level": row.get("list_level"),
-                "duration": _float(row.get("duration_macaulay")),
-                "modified_duration": _float(row.get("duration_modified")),
+                "duration": duration_macaulay,
+                "modified_duration": duration_modified,
+                # Дюрация рассчитана — причина не нужна; иначе каноническая
+                # причина из БД (None, если расчёт ещё не запускался).
+                "duration_reason": (
+                    None
+                    if duration_macaulay is not None or duration_modified is not None
+                    else row.get("duration_null_reason")
+                ),
                 "liquidity_loss_pct": _float(row.get("liquidity_loss_ratio")),
             }
             table_rows.append([values[column] for column in PORTFOLIO_HEADERS])

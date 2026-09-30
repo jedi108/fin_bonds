@@ -147,6 +147,7 @@ python3 main.py check-changes
 | `export-portfolio` | Экспорт портфеля | [📖](doc/commands/export-portfolio.md) |
 | `export-bonds` | Экспорт каталога облигаций | [📖](doc/commands/export-bonds.md) |
 | `generate-plots` | Генерация графиков | [📖](doc/commands/generate-plots.md) |
+| `sync-chatgpt-portfolio` | Публикация снапшота портфеля в Google Sheet для ChatGPT ([формат листа](doc/chatgpt_portfolio_sheet_contract.md)) | — |
 
 # Portfolio Scripts
 
