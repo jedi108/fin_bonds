@@ -1017,6 +1017,105 @@ class PortfolioStorage:
                 return pos
         return None
 
+    # ------------------------------------------------------------------
+    # Canonical cash snapshot (миграция 015, задача 022 roadmap ChatGPT v3).
+    # Позиции и cash относятся к одному sync workflow: пишет таблицу только
+    # sync-portfolio при успешном ответе API; ошибки API прошлый cash не
+    # трогают. Валюты не конвертируются — RUB-агрегат фильтруется по валюте.
+    # ------------------------------------------------------------------
+
+    def upsert_cash_balances(self, balances: List[Dict[str, Any]]) -> int:
+        """Идемпотентный upsert cash-балансов (portfolio_cash_balances).
+
+        Каждый элемент: broker_name, account_id, currency, money, blocked,
+        available. updated_at = момент успешной записи (timestamp последнего
+        успешного sync). Возвращает число записанных строк.
+        """
+        if not balances:
+            return 0
+        cursor = self._cursor()
+        try:
+            for b in balances:
+                cursor.execute(
+                    """
+                    INSERT INTO portfolio_cash_balances
+                        (broker_name, account_id, currency, money, blocked, available, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (broker_name, account_id, currency) DO UPDATE SET
+                        money = EXCLUDED.money,
+                        blocked = EXCLUDED.blocked,
+                        available = EXCLUDED.available,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        b['broker_name'], b['account_id'], b['currency'],
+                        b['money'], b.get('blocked', Decimal(0)), b['available'],
+                    ),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return len(balances)
+
+    def delete_cash_accounts_not_in(self, broker_name: str, account_ids: Set[str]) -> int:
+        """Удаляет cash-строки брокера для счетов вне актуального configured set.
+
+        Вызывается sync-portfolio после успешного sync, чтобы при смене
+        TBANK_ACCOUNT_IDS исключённые счета перестали попадать в агрегат
+        («агрегация только по configured accounts»). Возвращает число удалённых.
+        """
+        if not account_ids:
+            return 0
+        cursor = self._cursor()
+        try:
+            cursor.execute(
+                """
+                DELETE FROM portfolio_cash_balances
+                WHERE broker_name = %s AND NOT (account_id = ANY(%s))
+                """,
+                (broker_name, list(account_ids)),
+            )
+            deleted = cursor.rowcount
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return deleted
+
+    def get_available_cash_rub(self) -> Dict[str, Any]:
+        """Canonical reader свободного RUB (задача 022).
+
+        Возвращает:
+        - cash_available_rub: Decimal — сумма available по всем строкам RUB
+          (только configured accounts: таблицу пишет sync по настроенным
+          счетам и удаляет выбывшие); None при unknown;
+        - cash_updated_at: datetime метка последнего успешного sync, None
+          при unknown;
+        - cash_known: False — RUB-строк нет (sync ещё не выполнялся);
+          True — снапшот есть, в том числе «реальный 0 RUB» (строка с
+          available=0 отличима от unknown).
+        """
+        cursor = self._cursor()
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS rows_cnt,
+                COALESCE(SUM(available), 0) AS available_rub,
+                MAX(updated_at) AS updated_at
+            FROM portfolio_cash_balances
+            WHERE lower(currency) = 'rub'
+            """
+        )
+        row = cursor.fetchone()
+        if not row or row['rows_cnt'] == 0:
+            return {'cash_available_rub': None, 'cash_updated_at': None, 'cash_known': False}
+        return {
+            'cash_available_rub': row['available_rub'],
+            'cash_updated_at': row['updated_at'],
+            'cash_known': True,
+        }
+
     def get_liquidity_history_for_bonds(self, isins: List[str]) -> Dict[str, List[Tuple[date, float]]]:
         """
         Возвращает историю изменений ликвидности для указанных облигаций.

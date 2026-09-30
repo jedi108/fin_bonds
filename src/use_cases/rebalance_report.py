@@ -1,7 +1,8 @@
 """
 Use case: rebalance-report — ядро Python-тулкита ребалансировки (задача 005.1).
 
-Одна команда, отдающая агенту канонический JSON (schema_version=1) с блоками
+Одна команда, отдающая агенту канонический JSON (schema_version=2: v2/022
+добавила cash канонического снапшота в блок portfolio) с блоками
 meta / portfolio / concentrations / screener / redemptions_6m / artifacts —
 без env-переменных, psql и ad-hoc SQL в командной строке (анти-P-A).
 DSN читается слоем хранения из .env, SQL живёт только в src/storage.py.
@@ -50,7 +51,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Версия контракта JSON-ответа: скилл проверяет совместимость формата.
-SCHEMA_VERSION = 1
+# 2 (задача 022): portfolio дополняется cash-полями канонического снапшота
+# (securities_value_rub, cash_available_rub, investable_total_rub,
+# cash_updated_at); total_value и арифметика долей не меняются.
+SCHEMA_VERSION = 2
 
 # Лимит концентрации эмитента, % портфеля (план ребалансировки 001/002).
 ISSUER_CONCENTRATION_LIMIT_PCT = 15.0
@@ -361,10 +365,7 @@ class RebalanceReportUseCase(UseCase):
         report: Dict[str, Any] = {
             'schema_version': SCHEMA_VERSION,
             'meta': self._build_meta(now),
-            'portfolio': {
-                'total_value': total_value,
-                'positions': positions,
-            },
+            'portfolio': self._build_portfolio_block(total_value, positions),
             'concentrations': concentrations,
             'screener': screener,
             'redemptions_6m': redemptions,
@@ -404,6 +405,40 @@ class RebalanceReportUseCase(UseCase):
     # ------------------------------------------------------------------
     # portfolio
     # ------------------------------------------------------------------
+
+    def _build_portfolio_block(
+        self, total_value: float, positions: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Блок portfolio: оценка облигаций + cash канонического снапшота (022).
+
+        - total_value / securities_value_rub — стоимость облигаций (семантика
+          total_value не меняется, доли и концентрации считаются от неё же);
+        - cash_available_rub — свободный RUB из PostgreSQL (портфель cash-
+          балансов, обновляемый sync-portfolio; broker API из отчёта не
+          вызывается);
+        - investable_total_rub = securities_value_rub + cash_available_rub;
+        - unknown cash (sync ещё не выполнялся): cash_available_rub и
+          investable_total_rub = null — NULL не трактуется как 0;
+        - cash_updated_at — метка последнего успешного cash sync (по ней
+          потребитель видит устаревший cash после API failure).
+        """
+        cash = self.db.get_available_cash_rub()
+        cash_available_rub = (
+            round(_to_float(cash['cash_available_rub']), 2) if cash['cash_known'] else None
+        )
+        investable_total_rub = (
+            round(total_value + cash_available_rub, 2)
+            if cash_available_rub is not None
+            else None
+        )
+        return {
+            'total_value': total_value,
+            'securities_value_rub': total_value,
+            'cash_available_rub': cash_available_rub,
+            'investable_total_rub': investable_total_rub,
+            'cash_updated_at': self._fmt_dt(cash['cash_updated_at']),
+            'positions': positions,
+        }
 
     def _build_portfolio(self) -> Tuple[List[Dict[str, Any]], float]:
         """Позиции портфеля по ISIN с YTM от расчётного движка + оценка портфеля."""

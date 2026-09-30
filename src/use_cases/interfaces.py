@@ -17,6 +17,15 @@ class ITbankApiClient(ABC):
         pass
 
     @abstractmethod
+    def get_money_positions(self) -> List[Dict[str, Any]]:
+        """Возвращает денежные позиции (cash) по настроенным счетам (022).
+
+        Строка: broker_name, account_id, currency, money, blocked, available.
+        Ошибка API пробрасывается наверх (не превращается в cash=0).
+        """
+        pass
+
+    @abstractmethod
     def enrich_bonds_by_tickers(self, tickers: List[str]) -> List[Dict[str, Any]]:
         """Дополняет информацию об облигациях на основании тикеров."""
         pass

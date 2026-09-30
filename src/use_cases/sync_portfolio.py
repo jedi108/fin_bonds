@@ -60,9 +60,18 @@ class SyncPortfolioUseCase(UseCase):
         logger.info(f"Запуск синхронизации портфеля (источник: {args.source})...")
 
         positions_to_save = []
+        # Задача 022: cash — часть того же canonical snapshot, обновляется тем же
+        # запуском. None = cash sync не выполнялся (источник без TBank),
+        # True/False = результат; failure не подменяет прошлый cash нулём.
+        cash_synced: bool = False
+        cash_sync_ran: bool = False
 
         if args.source in ['all', 'tbank']:
             positions_to_save.extend(self._fetch_from_tbank())
+            # Cash синхронизируется даже при пустом списке позиций
+            # (портфель «только деньги» — именно тот случай, где cash важен).
+            cash_sync_ran = True
+            cash_synced = self._sync_tbank_cash()
 
         if args.source in ['all', 'alor'] and self.alor_api_client:
             positions_to_save.extend(self._fetch_from_alor())
@@ -71,7 +80,20 @@ class SyncPortfolioUseCase(UseCase):
         if args.source == 'excel' and not args.excel_path:
             logger.error("При --source='excel' необходимо указать путь через --excel_path.")
             return
-        
+
+        # Итог по cash — явный, независимо от наличия позиций (задача 022):
+        # при failure последний успешный cash остаётся в БД, rebalance-report
+        # покажет устаревший cash_updated_at вместо подмены нулём.
+        if cash_sync_ran:
+            if cash_synced:
+                logger.info("Cash sync: RUB cash обновлён тем же запуском, что и позиции.")
+            else:
+                logger.warning(
+                    "Cash sync FAILED: RUB cash НЕ обновлён (ошибка получения). "
+                    "В БД остался последний успешный снапшот; cash_available_rub "
+                    "может быть устаревшим — проверьте updated_at в rebalance-report."
+                )
+
         # Если путь указан, и источник 'all' или 'excel', добавляем позиции из файла.
         if args.excel_path and args.source in ['all', 'excel']:
             positions_to_save.extend(self._fetch_from_excel(args.excel_path))
@@ -181,6 +203,47 @@ class SyncPortfolioUseCase(UseCase):
         except Exception as e:
             logger.error(f"Не удалось получить портфель из TBank API: {e}", exc_info=True)
             return []
+
+    def _sync_tbank_cash(self) -> bool:
+        """Синхронизирует денежные позиции (cash) TBank в БД (задача 022).
+
+        Поток: TBank API (OperationsService GetPositions) -> PostgreSQL ->
+        rebalance-report. Broker API из отчёта не вызывается.
+
+        Правила:
+        - запись только при успешном ответе: API error -> False, строки в БД
+          не трогаются (последний успешный cash остаётся, API failure != 0 RUB);
+        - пустой ответ тоже не затирает прошлый снапшот (подозрителен);
+        - после успешной записи удаляются cash-строки счетов, которых больше
+          нет в configured set (агрегация только по configured accounts).
+        """
+        logger.info("Шаг: синхронизация RUB cash из TBank API (GetPositions)...")
+        try:
+            balances = self.tbank_api_client.get_money_positions()
+        except Exception as e:
+            logger.error(f"Не удалось получить cash из TBank API: {e}", exc_info=True)
+            return False
+        if not balances:
+            logger.warning(
+                "TBank не вернул денежных позиций (пустой money/blocked) — "
+                "cash в БД не изменён, прошлый снапшот не затёрт."
+            )
+            return False
+        try:
+            written = self.db.upsert_cash_balances(balances)
+            self.db.delete_cash_accounts_not_in(
+                'TBank', {b['account_id'] for b in balances}
+            )
+        except Exception as e:
+            logger.error(f"Не удалось сохранить cash в PostgreSQL: {e}", exc_info=True)
+            return False
+        rub_rows = [b for b in balances if str(b['currency']).lower() == 'rub']
+        rub_total = sum((b['available'] for b in rub_rows), Decimal(0))
+        logger.info(
+            f"Cash сохранён в PostgreSQL: строк {written} "
+            f"(RUB {len(rub_rows)}, суммарно available RUB = {rub_total})."
+        )
+        return True
 
     def _fetch_from_alor(self) -> List[DataModelPortfolioPosition]:
         """Получает позиции из Alor API."""

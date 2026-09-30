@@ -1,7 +1,7 @@
 from src.use_cases.interfaces import ITbankApiClient
 import logging
 import pprint
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence
 from decimal import Decimal
 from functools import lru_cache
 
@@ -100,6 +100,73 @@ class TbankApiClient(ITbankApiClient):
                         account_id=account.id,
                     ))
         return positions
+
+    def get_money_positions(self) -> List[Dict[str, Any]]:
+        """Получает денежные позиции (cash) по настроенным счетам (задача 022).
+
+        Источник — OperationsService GetPositions (client.operations.get_positions),
+        а не GetPortfolio.total_amount_currencies: money/blocked по каждой валюте
+        приходят раздельно, blocked учитывается в available явно.
+
+        Правила (022):
+        - обходятся только настроенные account_ids (пустой список — все счета
+          токена, как в get_portfolio_positions); ни один не найден — ValueError
+          (fail-fast, как для позиций);
+        - валюты НЕ конвертируются — каждая строка несёт свою валюту;
+          в cash_available_rub войдёт только RUB (фильтр на стороне хранилища);
+        - available = money - blocked (blocked RUB не считаются доступными);
+        - ошибка API пробрасывается наверх — вызывающий sync не имеет права
+          подменять её cash=0.
+        """
+        balances: List[Dict[str, Any]] = []
+        with Client(self.token) as client:
+            accounts = client.users.get_accounts().accounts
+            if self.account_ids:
+                if not any(a.id in self.account_ids for a in accounts):
+                    raise ValueError(
+                        "Ни один из заданных счетов TBank не найден по токену "
+                        f"(cash sync). Заданные account_id: {', '.join(self.account_ids)}. "
+                        "Проверьте TBANK_ACCOUNT_IDS (python3 main.py test-tbank accounts)."
+                    )
+            for account in accounts:
+                if self.account_ids and account.id not in self.account_ids:
+                    continue
+                logger.info(f"Загрузка денежных позиций для счета: {account.name} ({account.id})")
+                positions_response = client.operations.get_positions(account_id=account.id)
+                balances.extend(self._money_positions_to_balances(
+                    account_id=account.id,
+                    money=positions_response.money,
+                    blocked=positions_response.blocked,
+                ))
+        return balances
+
+    @staticmethod
+    def _money_positions_to_balances(
+        account_id: str,
+        money: Sequence[Any],
+        blocked: Sequence[Any],
+    ) -> List[Dict[str, Any]]:
+        """Конвертирует money/blocked ответа GetPositions в строки cash-баланса.
+
+        Чистая функция (без сети) — покрыта unit-тестами (задача 022).
+        """
+        money_by_ccy = {m.currency: m for m in money}
+        blocked_by_ccy = {m.currency: m for m in blocked}
+        currencies = sorted(set(money_by_ccy) | set(blocked_by_ccy))
+        balances: List[Dict[str, Any]] = []
+        for currency in currencies:
+            money_value = TbankApiClient._convert_money_value(money_by_ccy.get(currency))
+            blocked_value = TbankApiClient._convert_money_value(blocked_by_ccy.get(currency))
+            balances.append({
+                'broker_name': 'TBank',
+                'account_id': account_id,
+                'currency': currency,
+                'money': money_value,
+                'blocked': blocked_value,
+                # blocked (заявки/маржинальные удержания) не доступны для операций
+                'available': money_value - blocked_value,
+            })
+        return balances
 
     def get_trading_status(self, figi: str) -> Optional[Dict[str, Any]]:
         """

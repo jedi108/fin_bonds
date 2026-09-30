@@ -61,7 +61,9 @@ python3 main.py calculate-ytm [опции]
 причём в дефолтном режиме (без `-v/--verbose`) логируется лишь уровень WARNING+;
 INFO-логи возвращаются флагом `-v` (R6/P-F).
 
-Контракт согласован с `rebalance-report` (schema_version=1, проценты в `*_pct`):
+Контракт согласован с `rebalance-report` (там schema_version=2 с 022 — добавлен
+cash канонического снапшота; здесь собственная версия JSON осталась 1,
+проценты в `*_pct` в обоих):
 
 ```json
 {

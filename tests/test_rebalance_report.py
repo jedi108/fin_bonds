@@ -252,7 +252,7 @@ class TestGoldenSchema:
             'schema_version', 'meta', 'portfolio', 'concentrations',
             'screener', 'redemptions_6m', 'artifacts',
         }
-        assert self.report['schema_version'] == SCHEMA_VERSION == 1
+        assert self.report['schema_version'] == SCHEMA_VERSION == 2
 
     def test_meta_block(self):
         meta = self.report['meta']
@@ -276,8 +276,17 @@ class TestGoldenSchema:
 
     def test_portfolio_block(self):
         portfolio = self.report['portfolio']
-        assert set(portfolio.keys()) == {'total_value', 'positions'}
+        # 022: cash неизвестен (нет строк в portfolio_cash_balances) — NULL
+        assert set(portfolio.keys()) == {
+            'total_value', 'securities_value_rub', 'cash_available_rub',
+            'investable_total_rub', 'cash_updated_at', 'positions',
+        }
+        # семантика total_value не меняется — стоимость облигаций (022)
         assert portfolio['total_value'] == 15000.0
+        assert portfolio['securities_value_rub'] == portfolio['total_value']
+        assert portfolio['cash_available_rub'] is None
+        assert portfolio['investable_total_rub'] is None
+        assert portfolio['cash_updated_at'] is None
 
         positions = portfolio['positions']
         assert len(positions) == 2
@@ -428,7 +437,7 @@ class TestGoldenSchema:
         use_case = RebalanceReportUseCase(db=db)
         use_case.execute(_make_args())
         data = json.loads(capsys.readouterr().out)
-        assert data['schema_version'] == 1
+        assert data['schema_version'] == 2
         assert set(data.keys()) == {
             'schema_version', 'meta', 'portfolio', 'concentrations',
             'screener', 'redemptions_6m', 'artifacts',
@@ -850,10 +859,13 @@ def test_cli_single_command_on_test_db(db, tmp_path):
     )
     assert res.returncode == 0, f"Stderr: {res.stderr}"
     data = json.loads(res.stdout)  # stdout — чистый JSON (логи в stderr)
-    assert data['schema_version'] == 1
-    # пустая тестовая БД: гейт честно кричит, JSON всё равно валиден
+    assert data['schema_version'] == 2
+    # пустая тестовая БД: гейт честно кричит, JSON всё равно валиден;
+    # cash unknown — NULL, а не 0 (022)
     assert data['meta']['gate_status'] == 'EMPTY_PORTFOLIO'
     assert data['portfolio']['positions'] == []
+    assert data['portfolio']['cash_available_rub'] is None
+    assert data['portfolio']['investable_total_rub'] is None
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from src.migrations import apply_migrations
 from src.storage import PortfolioStorage
 
-# Пользовательские таблицы схемы (миграции 001-005) для очистки между тестами
+# Пользовательские таблицы схемы (миграции 001-005, 015) для очистки между тестами
 _TABLES = (
     'bonds_catalog',
     'companies',
@@ -25,6 +25,7 @@ _TABLES = (
     'portfolio_positions',
     'liquidity_history',
     'monitoring_checks',
+    'portfolio_cash_balances',
 )
 
 
