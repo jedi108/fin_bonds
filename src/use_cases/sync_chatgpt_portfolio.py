@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# v2 (007): добавлены ytm_reason и duration_reason — причины пустых ytm_pct/duration.
+# v2 (007, 008): ytm_reason/duration_reason — причины пустых ytm_pct/duration;
+# valuation_source/valuation_warning — происхождение canonical valuation (008).
 SCHEMA_VERSION = 2
 PORTFOLIO_HEADERS = (
     "isin",
@@ -29,6 +30,8 @@ PORTFOLIO_HEADERS = (
     "quantity",
     "price_rub",
     "value_rub",
+    "valuation_source",
+    "valuation_warning",
     "share_pct",
     "issuer_pct",
     "ytm_pct",
@@ -47,6 +50,16 @@ PORTFOLIO_HEADERS = (
     "duration_reason",
     "liquidity_loss_pct",
 )
+
+# 008: предупреждение только для веток, где value_rub не равен quantity*price_rub
+# или оценка отсутствует. Тексты зафиксированы в doc/chatgpt_portfolio_sheet_contract.md.
+VALUATION_WARNINGS = {
+    "nominal_fallback": (
+        "value_rub = quantity * nominal; "
+        "price_rub may be empty/0 and differ from value_rub/quantity"
+    ),
+    "zero": "no valuation available; value_rub = 0",
+}
 
 
 def _float(value: Any) -> Optional[float]:
@@ -149,6 +162,10 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 "quantity": _float(row.get("quantity")),
                 "price_rub": _float(row.get("price")),
                 "value_rub": value,
+                # Ветка canonical valuation из view (008) — не восстанавливается
+                # из округлённых значений; warning для неоднозначных веток.
+                "valuation_source": row.get("valuation_source"),
+                "valuation_warning": VALUATION_WARNINGS.get(row.get("valuation_source")),
                 "share_pct": share_pct,
                 "issuer_pct": issuer_pct,
                 "ytm_pct": _float(row.get("ytm_percent")),

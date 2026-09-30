@@ -43,6 +43,8 @@
 | `quantity` | шт | Количество бумаг в позиции |
 | `price_rub` | рубли за бумагу | Цена позиции (средневзвешенная по сделкам или рыночная) |
 | `value_rub` | рубли | Оценка позиции |
+| `valuation_source` | строка | Какая ветка canonical valuation дала `value_rub` (см. ниже) |
+| `valuation_warning` | строка или пусто | Предупреждение для неоднозначных веток оценки; пусто для остальных (см. ниже) |
 | `share_pct` | % (доля × 100) | Доля позиции в портфеле |
 | `issuer_pct` | % (доля × 100) | Доля эмитента в портфеле |
 | `ytm_pct` | % годовых | Доходность к погашению; пусто, если не рассчитана — см. `ytm_reason` |
@@ -93,8 +95,43 @@
   расчёт дюрации для бумаги ещё не запускался (в БД `duration_updated_at`
   IS NULL и причина не сохранена).
 
+## Происхождение оценки (valuation_source / valuation_warning)
+
+`valuation_source` переносится из БД (view `v_portfolio_positions_valuation`)
+тем же CASE, который вычисляет `position_value_rub` — это не восстановление
+постфактум из чисел. Каноническая цепочка оценки позиции и соответствующие
+значения:
+
+| `valuation_source` | Ветка оценки | `price_rub` / `value_rub` |
+|---|---|---|
+| `broker_value` | `current_value` от брокера | обычный случай: `price_rub` согласован с `value_rub / quantity` |
+| `broker_price` | `quantity × current_price` | обычный случай |
+| `market_price` | `quantity × market_price` каталога | обычный случай |
+| `nominal_fallback` | `quantity × nominal` (только непогашенная бумага) | `price_rub` может быть пустым или 0 и **не обязан** равняться `value_rub / quantity` — см. `valuation_warning` |
+| `zero` | оценки нет | `value_rub = 0` |
+
+Правила для потребителя:
+
+- `valuation_warning` непустая **только** для `nominal_fallback` и `zero`;
+  для остальных веток ячейка пустая. Тексты зафиксированы, машиночитаемы:
+  - `nominal_fallback` →
+    `value_rub = quantity * nominal; price_rub may be empty/0 and differ from value_rub/quantity`
+  - `zero` → `no valuation available; value_rub = 0`
+- `valuation_warning` не дублирует другие колонки — читай его как флаг
+  «`price_rub` не выводится из `value_rub` обычным делением».
+- Одна строка `PORTFOLIO` агрегирует позиции одного ISIN на нескольких
+  счетах/у брокеров: `value_rub`/`quantity` — суммы, а `valuation_source` —
+  источник позиции с наибольшим `position_value_rub` внутри ISIN.
+- `price_rub` — цена на бумагу: средневзвешенная по счетам `current_price`
+  (SUM(quantity × current_price) / SUM(quantity)), при отсутствии котировок —
+  `market_price` каталога. Округлённый брокерский `current_value` может давать
+  расхождения копеек с `value_rub / quantity` — они не являются ошибкой.
+
 ## История версий
 
 - **1** — первичный формат (позиции + CONTROL-гейт).
-- **2** — добавлены `ytm_reason` (после `ytm_pct`) и `duration_reason`
-  (после `modified_duration`): причины осознанных NULL рядом со значениями.
+- **2** — один релиз, две порции изменений:
+  - добавлены `ytm_reason` (после `ytm_pct`) и `duration_reason`
+    (после `modified_duration`): причины осознанных NULL рядом со значениями;
+  - добавлены `valuation_source` (после `value_rub`) и `valuation_warning`
+    (после `valuation_source`): происхождение canonical valuation.

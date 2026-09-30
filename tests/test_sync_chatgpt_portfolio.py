@@ -8,6 +8,7 @@ from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.use_cases.sync_chatgpt_portfolio import (
     PORTFOLIO_HEADERS,
     SCHEMA_VERSION,
+    VALUATION_WARNINGS,
     SyncChatgptPortfolioUseCase,
 )
 
@@ -282,6 +283,59 @@ def test_duration_reason_empty_when_duration_calculated():
 
     assert cell(rows[0], "duration") == 1.5
     assert cell(rows[0], "duration_reason") is None
+
+
+def test_valuation_columns_follow_value_column():
+    """valuation_source идёт сразу после value_rub, warning — сразу после него."""
+    assert (
+        PORTFOLIO_HEADERS.index("valuation_source")
+        == PORTFOLIO_HEADERS.index("value_rub") + 1
+    )
+    assert (
+        PORTFOLIO_HEADERS.index("valuation_warning")
+        == PORTFOLIO_HEADERS.index("valuation_source") + 1
+    )
+    assert SCHEMA_VERSION == 2
+
+
+def test_valuation_warning_by_source():
+    """Warning только для неоднозначных веток; текст берётся из словаря контракта."""
+    cases = {
+        "broker_value": None,
+        "broker_price": None,
+        "market_price": None,
+        "nominal_fallback": VALUATION_WARNINGS["nominal_fallback"],
+        "zero": VALUATION_WARNINGS["zero"],
+    }
+    for source, expected_warning in cases.items():
+        _, rows = build_payload(make_rows(valuation_source=source))
+        assert cell(rows[0], "valuation_source") == source
+        assert cell(rows[0], "valuation_warning") == expected_warning, source
+
+
+def test_nominal_fallback_warning_explains_price_mismatch():
+    """Кейс 008: нулевой price при ненулевом value — warning объясняет расхождение."""
+    _, rows = build_payload(
+        make_rows(valuation_source="nominal_fallback", price=0, value_rub=5000)
+    )
+
+    warning = cell(rows[0], "valuation_warning")
+    assert warning == (
+        "value_rub = quantity * nominal; "
+        "price_rub may be empty/0 and differ from value_rub/quantity"
+    )
+    # Арифметика оценки не меняется: value и доли считаются как раньше.
+    assert cell(rows[0], "value_rub") == 5000
+    assert cell(rows[0], "share_pct") == 100.0
+
+
+def test_missing_valuation_source_exports_empty_provenance():
+    """Строка без valuation_source (старые данные) не ломает экспорт."""
+    control, rows = build_payload(make_rows())
+
+    assert cell(rows[0], "valuation_source") is None
+    assert cell(rows[0], "valuation_warning") is None
+    assert control["portfolio_value_rub"] == 10000
 
 
 def test_stale_data_blocks_export_before_sheet_write():

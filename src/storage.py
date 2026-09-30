@@ -2594,6 +2594,9 @@ class PortfolioStorage:
         Одна строка на ISIN. Переиспользует те же поля, что rebalance-report,
         и добавляет последний кредитный рейтинг, дюрацию и агрегированную
         потерю ликвидности. Финансовые расчёты остаются в fin_bonds.
+        valuation_source (008) — источник оценки позиции с наибольшим
+        position_value_rub внутри ISIN: несколько счетов/брокеров могут
+        оценивать один выпуск разными ветками canonical valuation.
         """
         cursor = self._cursor()
         cursor.execute(f"""
@@ -2612,6 +2615,11 @@ class PortfolioStorage:
                     SUM(v.quantity) AS quantity,
                     SUM(v.position_value_rub) AS value_rub,
                     SUM(v.current_price * v.quantity) AS price_x_qty,
+                    -- Источник оценки наибольшей позиции ISIN (008): не
+                    -- восстанавливаем его постфактум из округлённых значений.
+                    (array_agg(v.valuation_source
+                               ORDER BY v.position_value_rub DESC NULLS LAST))[1]
+                        AS valuation_source,
                     CASE
                         WHEN SUM(CASE WHEN v.liquidity_loss_ratio IS NOT NULL
                                       THEN v.position_value_rub ELSE 0 END) > 0
@@ -2657,6 +2665,7 @@ class PortfolioStorage:
                 co.entity_type,
                 a.quantity,
                 a.value_rub,
+                a.valuation_source,
                 a.liquidity_loss_ratio,
                 COALESCE(
                     CASE WHEN a.quantity > 0 AND a.price_x_qty IS NOT NULL
