@@ -116,6 +116,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         max_maturity=None,
         max_risk=1,
         min_credit_rating=None,
+        max_position_value=None,
         max_listlevel=2,
         max_ytm=35.0,
         screener_limit=10,
@@ -163,6 +164,7 @@ class TestParser:
         assert args.max_maturity is None
         assert args.max_risk == 1
         assert args.min_credit_rating is None
+        assert args.max_position_value is None
         assert args.max_listlevel == 2
         assert args.max_ytm == 35.0
         assert args.screener_limit == 10
@@ -206,6 +208,11 @@ class TestParser:
             use_case._validate_args(_make_args(freq_max=0))
         with pytest.raises(ValueError):
             use_case._validate_args(_make_args(redemptions_months=0))
+        # 024: лимит стоимости выпуска — строго положительное число
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(max_position_value=0))
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(max_position_value=-100))
         # взаимоисключающие фильтры частоты в Namespace (мимо argparse)
         with pytest.raises(ValueError):
             use_case._validate_args(_make_args(freq_max=4, freq_in=[2, 4]))

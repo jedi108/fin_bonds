@@ -51,6 +51,10 @@ _LATEST_FLOATER_RATE_JOIN = """
 # latest_ratings из get_chatgpt_portfolio_rows (DISTINCT ON по дате);
 # строки с NULL-кодом пропускаются — адаптер credit_rating пишет только
 # коды с числовым баллом по шкале rating_scale.
+# 024: тот же join переиспользуют get_rebalance_portfolio_rows и
+# get_scenario_universe_rows — финальный валидатор ограничений проверяет
+# --min-credit-rating по всему целевому портфелю (positions_after), включая
+# уже держимые бумаги; второй расчёт рейтинга не создаётся.
 _LATEST_RATING_JOIN = """
             LEFT JOIN (
                 SELECT DISTINCT ON (isin)
@@ -2711,6 +2715,11 @@ class PortfolioStorage:
                 co.id AS company_id,
                 co.name AS issuer,
                 co.entity_type,
+                -- 024: последний рейтинг позиции (был null — join был только
+                -- у buy-кандидатов); нужен валидатору --min-credit-rating
+                -- по целевому портфелю сценария. Тот же паттерн DISTINCT ON.
+                lr.credit_rating,
+                lr.rating_score,
                 a.quantity,
                 a.value_rub,
                 COALESCE(
@@ -2721,6 +2730,7 @@ class PortfolioStorage:
             FROM ({_AGGREGATED_PORTFOLIO_SUBQUERY}) a
             LEFT JOIN bonds_catalog bc ON bc.isin = a.isin
             LEFT JOIN companies co ON co.id = bc.company_id
+            {_LATEST_RATING_JOIN}
             {_LATEST_FLOATER_RATE_JOIN}
             ORDER BY a.value_rub DESC NULLS LAST, a.isin
         """)
@@ -2855,10 +2865,14 @@ class PortfolioStorage:
                 co.id AS company_id,
                 co.name AS issuer,
                 co.entity_type,
+                -- 024: рейтинг кандидата на покупку для валидатора ограничений
+                lr.credit_rating,
+                lr.rating_score,
                 0 AS quantity,
                 0 AS value_rub
             FROM bonds_catalog bc
             LEFT JOIN companies co ON co.id = bc.company_id
+            {_LATEST_RATING_JOIN}
             {_LATEST_FLOATER_RATE_JOIN}
             WHERE bc.isin = ANY(%s)
         """, (list(isins),))

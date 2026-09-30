@@ -32,6 +32,18 @@ CalculateYtmUseCase._enrich_bond_with_ytm через import (не subprocess и 
 ₽/год, лимиты эмитента 15% по каждой ноге и по сумме всех ног (анти-P6:
 агент не суммирует доли вручную), частотный микс «до/после», явные ошибки
 сценария (unknown ISIN, отрицательный остаток) вместо падения.
+
+024 — budget и финальный валидатор формальных ограничений:
+- budget: cash канонического снапшота (022) + продажи/покупки ног дают
+  cash_after_estimate; unknown cash остаётся null (не 0); оценка —
+  qty * eff_price, это НЕ settlement с НКД и комиссиями (потому estimate);
+- structural validity (scenario.valid: UNKNOWN_ISIN / NEGATIVE_QTY_AFTER /
+  NO_COMPANY_LINK) отделена от investment feasibility (scenario.feasible):
+  нарушение формального ограничения не удаляет summary/positions_after;
+- constraint_checks проверяет ВЕСЬ целевой портфель по canonical args
+  (freq_min/freq_max/freq_in, exclude_sovereign, min_credit_rating,
+  max_position_value, лимит эмитента 15% — переиспользуется
+  scenario.issuer_limits), а не только покупки.
 """
 import argparse
 import calendar
@@ -105,6 +117,20 @@ SCENARIO_ERROR_NO_COMPANY_LINK = 'NO_COMPANY_LINK'
 SCENARIO_LIMIT_STATUS_PASS = 'PASS'
 SCENARIO_LIMIT_STATUS_VIOLATION = 'LIMIT_VIOLATION (>15%)'
 
+# 024: violation types финального валидатора формальных ограничений
+# (scenario.constraint_checks). Это НЕ structural errors (scenario.errors):
+# нарушение не делает сценарий «неготовым», оно делает его неосуществимым.
+CONSTRAINT_POSITION_VALUE_LIMIT = 'POSITION_VALUE_LIMIT'
+CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN = 'COUPON_FREQUENCY_BELOW_MIN'
+CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX = 'COUPON_FREQUENCY_ABOVE_MAX'
+CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST = 'COUPON_FREQUENCY_NOT_IN_LIST'
+CONSTRAINT_COUPON_FREQUENCY_MISSING = 'COUPON_FREQUENCY_MISSING'
+CONSTRAINT_SOVEREIGN_NOT_ALLOWED = 'SOVEREIGN_NOT_ALLOWED'
+CONSTRAINT_CREDIT_RATING_BELOW_MIN = 'CREDIT_RATING_BELOW_MIN'
+CONSTRAINT_CREDIT_RATING_MISSING = 'CREDIT_RATING_MISSING'
+CONSTRAINT_ISSUER_LIMIT = 'ISSUER_LIMIT'
+CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE = 'INSUFFICIENT_CASH_ESTIMATE'
+
 # Ключи строк блока scenario.
 SCENARIO_TRADE_KEYS = (
     'isin', 'name', 'ticker', 'issuer', 'qty_delta', 'action',
@@ -117,6 +143,11 @@ SCENARIO_LEG_KEYS = (
 )
 SCENARIO_SUMMARY_KEYS = (
     'portfolio_before', 'portfolio_after',
+    # 024: budget — securities/cash до и после; денежные поля «после» —
+    # оценки (qty * eff_price, без НКД и комиссий settlement'а).
+    'securities_before', 'securities_after',
+    'cash_before', 'sales_value', 'purchases_value', 'cash_after_estimate',
+    'investable_total_before', 'investable_total_after',
     'coupon_month_before', 'coupon_month_after',
     'coupon_year_before', 'coupon_year_after',
     'delta_month', 'delta_year',
@@ -272,6 +303,13 @@ class RebalanceReportUseCase(UseCase):
                  'risk_level рейтингом не подменяется.'
         )
         parser.add_argument(
+            '--max-position-value', type=float, default=None,
+            help='Формальное ограничение (024): максимальная стоимость одного '
+                 'выпуска в целевом портфеле, ₽ (напр. 150000). Проверяется '
+                 'каждая позиция positions_after, включая уже держимые без '
+                 'сделок; нарушение — constraint_checks POSITION_VALUE_LIMIT.'
+        )
+        parser.add_argument(
             '--max-listlevel', type=int, choices=[1, 2, 3], default=2,
             help='Максимальный уровень листинга MOEX кандидатов. Default: 2.'
         )
@@ -369,6 +407,8 @@ class RebalanceReportUseCase(UseCase):
                 )
         if args.redemptions_months < 1:
             raise ValueError("--redemptions-months должен быть >= 1")
+        if args.max_position_value is not None and args.max_position_value <= 0:
+            raise ValueError("--max-position-value должен быть > 0")
         if args.screener_limit < 1:
             raise ValueError("--screener-limit должен быть >= 1")
         if args.max_ytm <= 0:
@@ -995,11 +1035,14 @@ class RebalanceReportUseCase(UseCase):
     def _build_scenario(self, args: argparse.Namespace) -> Dict[str, Any]:
         """Блок scenario: trades -> целевой портфель без ручной арифметики (анти-P6).
 
-        Валидный сценарий: summary («сейчас → после» по стоимости и купонному
-        потоку ₽/мес и ₽/год), частотный микс до/после, лимиты эмитента 15% по
-        каждой ноге (кумулятивно) и по сумме всех ног, целевой портфель
-        positions_after. При ошибках (блок 0 A2) все блоки «после» = null:
-        числа невалидного сценария нельзя интерпретировать.
+        Валидный сценарий: summary («сейчас → после» по стоимости, бюджету
+        (024) и купонному потоку ₽/мес и ₽/год), частотный микс до/после,
+        лимиты эмитента 15% по каждой ноге (кумулятивно) и по сумме всех ног,
+        целевой портфель positions_after, budget_check и финальная проверка
+        формальных ограничений constraint_checks + feasible (024). При
+        структурных ошибках (блок 0 A2) все блоки «после» = null: числа
+        невалидного сценария нельзя интерпретировать; feasible = null —
+        осуществимость не определена (это не investment-отказ).
         """
         today = date.today()
         trades = self._load_scenario_trades(args.scenario)
@@ -1154,9 +1197,51 @@ class RebalanceReportUseCase(UseCase):
         )
         delta_month = round(coupon_month_after - coupon_month_before, 2)
 
+        # 024: budget — canonical cash из 022 (PortfolioStorage
+        # .get_available_cash_rub; broker API из отчёта запрещён, unknown
+        # cash не превращается в 0). Все денежные поля «после» — оценки:
+        # qty * eff_price не учитывает НКД и комиссии расчётов, поэтому
+        # cash_after — именно estimate, а не точный settlement.
+        cash = self.db.get_available_cash_rub()
+        cash_known = bool(cash['cash_known'])
+        cash_before = (
+            round(_to_float(cash['cash_available_rub']), 2) if cash_known else None
+        )
+        sales_value = round(float(abs(sum(
+            leg['value_delta'] for leg in trades_echo
+            if leg['action'] == 'sell' and leg['value_delta'] is not None
+        ))), 2)
+        purchases_value = round(float(sum(
+            leg['value_delta'] for leg in trades_echo
+            if leg['action'] == 'buy' and leg['value_delta'] is not None
+        )), 2)
+        cash_after_estimate = (
+            round(cash_before + sales_value - purchases_value, 2)
+            if cash_known else None
+        )
+        investable_total_before = (
+            round(total_before + cash_before, 2) if cash_known else None
+        )
+        investable_total_after = (
+            round(total_after + cash_after_estimate, 2) if cash_known else None
+        )
+        budget_check = {
+            'known': cash_known,
+            # unknown cash: passed=null — неизвестность не маскируется под PASS.
+            'passed': (cash_after_estimate >= 0) if cash_known else None,
+        }
+
         summary = {
             'portfolio_before': total_before,
             'portfolio_after': total_after,
+            'securities_before': total_before,
+            'securities_after': total_after,
+            'cash_before': cash_before,
+            'sales_value': sales_value,
+            'purchases_value': purchases_value,
+            'cash_after_estimate': cash_after_estimate,
+            'investable_total_before': investable_total_before,
+            'investable_total_after': investable_total_after,
             'coupon_month_before': coupon_month_before,
             'coupon_month_after': coupon_month_after,
             'coupon_year_before': round(coupon_month_before * 12, 2),
@@ -1175,6 +1260,27 @@ class RebalanceReportUseCase(UseCase):
             [(s['freq'], s['value_after']) for s in target_states],
             total_after, 'freq',
         )
+
+        # 024: финальный валидатор формальных ограничений — весь целевой
+        # портфель (positions_after), а не только покупки. Structural
+        # validity (valid) отделена от investment feasibility (feasible):
+        # нарушение ограничения НЕ удаляет summary/positions_after.
+        violations = (
+            self._constraint_violations(
+                args, target_states, after_all, budget_check, cash_after_estimate,
+            )
+            if valid else None
+        )
+        if not valid:
+            # Целевого портфеля нет — осуществимость не определена (не false).
+            feasible = None
+        elif violations:
+            feasible = False
+        elif not cash_known:
+            # Единственная неизвестность — budget из-за unknown cash.
+            feasible = None
+        else:
+            feasible = True
 
         # Целевый портфель в канонической форме строк ядра (+ coupon_month):
         # YTM — от того же расчётного движка, имена/эмитенты — из каталога.
@@ -1201,10 +1307,16 @@ class RebalanceReportUseCase(UseCase):
         return {
             'file': args.scenario,
             'valid': valid,
+            # 024: feasible=true только если сценарий структурно валиден И все
+            # известные формальные проверки пройдены; unknown cash -> null.
+            'feasible': feasible,
             'errors': errors,
             'trades': trades_echo,
-            # Блоки «после» валидны только при пустом блоке ошибок (как в A2).
+            # Блоки «после» валидны только при пустом блоке ошибок (как в A2);
+            # constraint_checks=null — проверки не выполнялись (не «нет нарушений»).
             'summary': summary if valid else None,
+            'budget_check': budget_check if valid else None,
+            'constraint_checks': violations if valid else None,
             'freq_mix_before': freq_mix_before if valid else None,
             'freq_mix_after': freq_mix_after if valid else None,
             'issuer_limits': {
@@ -1218,6 +1330,142 @@ class RebalanceReportUseCase(UseCase):
             } if valid else None,
             'positions_after': positions_after if valid else [],
         }
+
+    def _constraint_violations(
+        self,
+        args: argparse.Namespace,
+        target_states: List[Dict[str, Any]],
+        after_all: List[Dict[str, Any]],
+        budget_check: Dict[str, Any],
+        cash_after_estimate: Optional[float],
+    ) -> List[Dict[str, Any]]:
+        """Финальный валидатор формальных ограничений (024).
+
+        Проверяет ВЕСЬ целевой портфель (positions_after) по canonical args:
+        freq_min/freq_max/freq_in, exclude_sovereign, min_credit_rating,
+        max_position_value и лимит концентрации эмитента 15% (переиспользуется
+        уже посчитанный scenario.issuer_limits.after_all — второго расчёта
+        концентрации нет). Бюджет входит проверкой INSUFFICIENT_CASH_ESTIMATE
+        только при known cash: unknown не превращается в violation.
+
+        Каждая violation машиночитаема: type + isin (где применимо) + actual
+        и limit (где применимо) + человекочитаемый message.
+        """
+        violations: List[Dict[str, Any]] = []
+
+        def add(vtype: str, isin: Optional[str], actual: Any,
+                limit: Any, message: str) -> None:
+            violations.append({
+                'type': vtype,
+                'isin': isin,
+                'actual': actual,
+                'limit': limit,
+                'message': message,
+            })
+
+        freq_constrained = (
+            args.freq_min is not None or args.freq_max is not None
+            or args.freq_in is not None
+        )
+        # Порог рейтинга один раз переводится в балл существующей шкалой
+        # (валидация кода — в _validate_args; второго сравнения рейтингов нет).
+        min_rating_score = (
+            rating_code_to_score(args.min_credit_rating, self.rating_scale)
+            if args.min_credit_rating is not None else None
+        )
+
+        for state in target_states:
+            isin = state['row']['isin']
+
+            if (args.max_position_value is not None
+                    and state['value_after'] > args.max_position_value):
+                add(
+                    CONSTRAINT_POSITION_VALUE_LIMIT, isin,
+                    state['value_after'], args.max_position_value,
+                    f"{isin}: стоимость позиции после сделок "
+                    f"{state['value_after']:.2f} ₽ превышает лимит "
+                    f"{args.max_position_value:.2f} ₽",
+                )
+
+            freq = state['freq']
+            if freq_constrained:
+                if freq is None:
+                    add(
+                        CONSTRAINT_COUPON_FREQUENCY_MISSING, isin,
+                        None, None,
+                        f"{isin}: частота купонов неизвестна (NULL) — "
+                        "формальный фильтр частоты не подтверждён",
+                    )
+                elif args.freq_min is not None and freq < args.freq_min:
+                    add(
+                        CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN, isin,
+                        freq, args.freq_min,
+                        f"{isin}: частота {freq}/год ниже минимальной "
+                        f"{args.freq_min}/год",
+                    )
+                elif args.freq_max is not None and freq > args.freq_max:
+                    add(
+                        CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX, isin,
+                        freq, args.freq_max,
+                        f"{isin}: частота {freq}/год выше максимальной "
+                        f"{args.freq_max}/год",
+                    )
+                elif args.freq_in is not None and freq not in args.freq_in:
+                    add(
+                        CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST, isin,
+                        freq, args.freq_in,
+                        f"{isin}: частота {freq}/год вне списка "
+                        f"{args.freq_in}",
+                    )
+
+            if args.exclude_sovereign and _is_sovereign_rule(state['row']):
+                add(
+                    CONSTRAINT_SOVEREIGN_NOT_ALLOWED, isin,
+                    None, None,
+                    f"{isin}: суверенный эмитент ({state['issuer']}) "
+                    "исключён флагом --exclude-sovereign",
+                )
+
+            if min_rating_score is not None:
+                score = _to_int(state['row'].get('rating_score'))
+                code = state['row'].get('credit_rating') or None
+                if score is None:
+                    add(
+                        CONSTRAINT_CREDIT_RATING_MISSING, isin,
+                        None, args.min_credit_rating,
+                        f"{isin}: нет рейтинга в rating_history — порог "
+                        f"{args.min_credit_rating} не подтверждён",
+                    )
+                elif score < min_rating_score:
+                    add(
+                        CONSTRAINT_CREDIT_RATING_BELOW_MIN, isin,
+                        code, args.min_credit_rating,
+                        f"{isin}: рейтинг {code} ниже порога "
+                        f"{args.min_credit_rating}",
+                    )
+
+        # Лимит эмитента 15% — из уже посчитанного scenario.issuer_limits
+        # (024, п.7: второй расчёт концентрации не создаётся).
+        for item in after_all:
+            if item['limit_status'] != SCENARIO_LIMIT_STATUS_PASS:
+                add(
+                    CONSTRAINT_ISSUER_LIMIT, None,
+                    item['pct'], ISSUER_CONCENTRATION_LIMIT_PCT,
+                    f"Эмитент {item['issuer']}: доля {item['pct']}% в целевом "
+                    f"портфеле превышает лимит "
+                    f"{ISSUER_CONCENTRATION_LIMIT_PCT}%",
+                )
+
+        # Бюджет: violation только при known cash (unknown = null, не 0).
+        if budget_check['known'] and budget_check['passed'] is False:
+            add(
+                CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE, None,
+                cash_after_estimate, 0.0,
+                f"Оценка cash после сделок {cash_after_estimate:.2f} ₽ < 0: "
+                "покупки не покрываются cash_before + sales_value",
+            )
+
+        return violations
 
     # ------------------------------------------------------------------
     # artifacts (CSV)

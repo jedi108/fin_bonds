@@ -7,6 +7,11 @@
 (анти-P6), частотный микс «до/после», CSV целевого портфеля после сделок,
 явные ошибки сценария (unknown ISIN, отрицательный остаток, NO_COMPANY_LINK).
 
+024: budget сценария (cash_before/sales/purchases/cash_after_estimate,
+unknown cash не превращается в 0) и финальный валидатор формальных
+ограничений (constraint_checks по всему positions_after + feasible,
+отделённая от structural valid).
+
 Все данные — синтетические фикстуры на тестовой БД (POSTGRES_DSN_TEST);
 реальные составы портфеля и ISIN не используются (AGENTS.md).
 """
@@ -22,6 +27,14 @@ import pytest
 
 from src.use_cases.rebalance_report import (
     BOND_ROW_KEYS,
+    CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN,
+    CONSTRAINT_COUPON_FREQUENCY_MISSING,
+    CONSTRAINT_CREDIT_RATING_BELOW_MIN,
+    CONSTRAINT_CREDIT_RATING_MISSING,
+    CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE,
+    CONSTRAINT_ISSUER_LIMIT,
+    CONSTRAINT_POSITION_VALUE_LIMIT,
+    CONSTRAINT_SOVEREIGN_NOT_ALLOWED,
     SCENARIO_ERROR_NEGATIVE_QTY_AFTER,
     SCENARIO_ERROR_NO_COMPANY_LINK,
     SCENARIO_ERROR_UNKNOWN_ISIN,
@@ -33,6 +46,7 @@ from src.use_cases.rebalance_report import (
 )
 from test_rebalance_report import (
     _NOW,
+    _RATING_SCALE,
     _insert_bond,
     _insert_company,
     _insert_position,
@@ -91,6 +105,13 @@ def _write_scenario_file(tmp_path, trades=None, raw=None) -> str:
 
 def _build_scenario(db, scenario_path: str, **overrides) -> dict:
     use_case = RebalanceReportUseCase(db=db)
+    report = use_case.build_report(_make_args(scenario=scenario_path, **overrides))
+    return report
+
+
+def _build_scenario_scaled(db, scenario_path: str, **overrides) -> dict:
+    """Как _build_scenario, но со шкалой рейтингов — для --min-credit-rating."""
+    use_case = RebalanceReportUseCase(db=db, rating_scale=_RATING_SCALE)
     report = use_case.build_report(_make_args(scenario=scenario_path, **overrides))
     return report
 
@@ -661,3 +682,362 @@ def test_cli_scenario_broken_file_fails_with_clear_error(db, tmp_path):
     )
     assert res.returncode == 1
     assert 'валидный JSON' in res.stderr
+
+
+# ---------------------------------------------------------------------------
+# 024: budget сценария — canonical cash (022) до/после сделок
+# ---------------------------------------------------------------------------
+
+def _insert_cash(db, available: float, account: str = 'acc-1') -> None:
+    """Строка cash канонического снапшота (как пишет sync-portfolio)."""
+    with db.conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO portfolio_cash_balances "
+            "(broker_name, account_id, currency, money, blocked, available, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            ('TBank', account, 'rub', available, 0, available, _NOW),
+        )
+    db.conn.commit()
+
+
+def _seed_diversified(db):
+    """7 эмитентов по 50000 ₽ (14.29% — без нарушений лимита 15%) + кандидат
+    на покупку Рельс БО-01 (freq=2, 100 ₽) — база без ложных violations."""
+    delta_co = _insert_company(db, 'Дельта Лизинг')
+    _insert_bond(db, isin='RU000A0LGDL1', ticker='LGDL1', name='Дельта 001P-01',
+                 company_id=delta_co, coupon_quantity_per_year=4,
+                 coupon_rate_percent=Decimal('15.0'),
+                 ytm=Decimal('13'), ytm_updated_at=_NOW,
+                 market_price=Decimal('100.0'))
+    _insert_position(db, 'RU000A0LGDL1', quantity=500, price=100)
+    for i, filler in enumerate(('Епсилон Пром', 'Жету Транс', 'Зета Холдинг',
+                                'Иета Финанс', 'Каппа Строй',
+                                'Лямбда Медия'), start=1):
+        co_id = _insert_company(db, filler)
+        isin = f'RU000A0FILL{i}'
+        _insert_bond(db, isin=isin, ticker=f'FILL{i}', name=f'{filler} БО-01',
+                     company_id=co_id, coupon_quantity_per_year=4,
+                     coupon_rate_percent=Decimal('14.0'),
+                     ytm=Decimal('13.2'), ytm_updated_at=_NOW,
+                     market_price=Decimal('100.0'))
+        _insert_position(db, isin, quantity=500, price=100)
+    rail_co = _insert_company(db, 'Единый Рельс')
+    _insert_bond(db, isin='RU000A0RALE1', ticker='RALE1', name='Рельс БО-01',
+                 company_id=rail_co, coupon_quantity_per_year=2,
+                 coupon_rate_percent=Decimal('16.0'),
+                 ytm=Decimal('14'), ytm_updated_at=_NOW,
+                 market_price=Decimal('100.0'))
+    db.conn.commit()
+
+
+def _by_type(violations, vtype):
+    return [v for v in violations if v['type'] == vtype]
+
+
+class TestScenarioBudget:
+    """024: securities/cash до-после; unknown cash остаётся null (не 0)."""
+
+    def test_purchase_financed_by_existing_cash(self, db, tmp_path):
+        _seed_diversified(db)
+        _insert_cash(db, 10000)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0RALE1', 'qty_delta': 69},   # 6900 ₽
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        assert scenario['valid'] is True
+        summary = scenario['summary']
+        assert summary['securities_before'] == 350000.0
+        assert summary['securities_after'] == 356900.0
+        assert summary['cash_before'] == 10000.0
+        assert summary['sales_value'] == 0.0
+        assert summary['purchases_value'] == 6900.0
+        assert summary['cash_after_estimate'] == 3100.0
+        assert summary['investable_total_before'] == 360000.0
+        assert summary['investable_total_after'] == 360000.0
+        assert scenario['budget_check'] == {'known': True, 'passed': True}
+        # всё сошлось: ни одного нарушения, feasible=true
+        assert scenario['constraint_checks'] == []
+        assert scenario['feasible'] is True
+
+    def test_sale_increases_cash_estimate(self, db, tmp_path):
+        _seed_diversified(db)
+        _insert_cash(db, 500)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0FILL1', 'qty_delta': -100},   # 10000 ₽
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        summary = scenario['summary']
+        assert summary['sales_value'] == 10000.0
+        assert summary['purchases_value'] == 0.0
+        assert summary['cash_after_estimate'] == 10500.0
+        assert scenario['feasible'] is True
+
+    def test_swap_sales_fund_purchases(self, db, tmp_path):
+        """Продажа финансирует покупку: cash_after = cash + sales - purchases."""
+        _seed_diversified(db)
+        _insert_cash(db, 1000)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0FILL1', 'qty_delta': -100},   # +10000
+            {'isin': 'RU000A0RALE1', 'qty_delta': 69},     # -6900
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        summary = scenario['summary']
+        assert summary['sales_value'] == 10000.0
+        assert summary['purchases_value'] == 6900.0
+        assert summary['cash_after_estimate'] == 4100.0
+        assert scenario['budget_check']['passed'] is True
+        assert scenario['feasible'] is True
+
+    def test_negative_cash_estimate_is_insufficient(self, db, tmp_path):
+        """cash_after < 0 -> INSUFFICIENT_CASH_ESTIMATE; valid остаётся true,
+        summary/positions_after при constraint violation не удаляются."""
+        _seed_diversified(db)
+        _insert_cash(db, 1000)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0RALE1', 'qty_delta': 200},   # 20000 ₽
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        # investment violation НЕ делает сценарий структурно невалидным
+        assert scenario['valid'] is True
+        assert scenario['errors'] == []
+        assert scenario['budget_check'] == {'known': True, 'passed': False}
+        assert scenario['summary']['cash_after_estimate'] == -19000.0
+        insufficient = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE
+        )
+        assert len(insufficient) == 1
+        assert insufficient[0]['isin'] is None
+        assert insufficient[0]['actual'] == -19000.0
+        assert insufficient[0]['limit'] == 0.0
+        assert insufficient[0]['message']
+        # блоки «после» доступны при нарушении
+        assert scenario['summary'] is not None
+        assert scenario['positions_after']
+        assert scenario['feasible'] is False
+
+    def test_unknown_cash_stays_null_not_zero(self, db, tmp_path):
+        """Нет cash-снапшота: unknown не превращается в 0 и не даёт violation."""
+        _seed_diversified(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0RALE1', 'qty_delta': 69},
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        assert scenario['valid'] is True
+        summary = scenario['summary']
+        # продажи/покупки от cash не зависят и считаются
+        assert summary['sales_value'] == 0.0
+        assert summary['purchases_value'] == 6900.0
+        # cash-поля — null, не 0
+        assert summary['cash_before'] is None
+        assert summary['cash_after_estimate'] is None
+        assert summary['investable_total_before'] is None
+        assert summary['investable_total_after'] is None
+        assert scenario['budget_check'] == {'known': False, 'passed': None}
+        assert _by_type(
+            scenario['constraint_checks'], CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE
+        ) == []
+        # единственная неизвестность — budget: feasible=null (не false)
+        assert scenario['feasible'] is None
+
+    def test_structural_invalid_scenario_feasible_null(self, db, tmp_path):
+        """Структурные ошибки: осуществимость не определена (не false),
+        блоки проверок null — они не выполнялись."""
+        _seed_diversified(db)
+        _insert_cash(db, 1000)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0NOEXIST', 'qty_delta': 5},
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        assert scenario['valid'] is False
+        assert scenario['feasible'] is None
+        assert scenario['budget_check'] is None
+        assert scenario['constraint_checks'] is None
+        assert scenario['summary'] is None
+
+
+# ---------------------------------------------------------------------------
+# 024: финальный валидатор формальных ограничений (весь positions_after)
+# ---------------------------------------------------------------------------
+
+class TestScenarioConstraints:
+    """024: constraint_checks проверяет весь целевой портфель по args,
+    а не только покупки; structural valid отделён от feasible."""
+
+    def test_existing_position_over_limit_caught_without_trade(self, db, tmp_path):
+        """Держимая позиция дороже лимита ловится даже без сделки по ней."""
+        _seed_base(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': BT2, 'qty_delta': -5},   # сделки по Альфе нет
+        ])
+        scenario = _build_scenario(db, path, max_position_value=5000)['scenario']
+        assert scenario['valid'] is True
+        limits = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_POSITION_VALUE_LIMIT
+        )
+        assert [v['isin'] for v in limits] == [AL1]
+        assert limits[0]['actual'] == 10000.0
+        assert limits[0]['limit'] == 5000.0
+        assert scenario['feasible'] is False
+        assert scenario['summary'] is not None
+        assert scenario['positions_after']
+
+    def test_new_position_over_limit_caught(self, db, tmp_path):
+        """Новая позиция сверх лимита ловится; существующие под лимитом — нет."""
+        _seed_diversified(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0RALE1', 'qty_delta': 1200},   # 120000 ₽
+        ])
+        scenario = _build_scenario(db, path, max_position_value=100000)['scenario']
+        assert scenario['valid'] is True
+        limits = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_POSITION_VALUE_LIMIT
+        )
+        assert [v['isin'] for v in limits] == ['RU000A0RALE1']
+        assert limits[0]['actual'] == 120000.0
+        assert limits[0]['limit'] == 100000.0
+        # позиции по 50000 ₽ не флагаются
+        assert all(
+            v['type'] != CONSTRAINT_POSITION_VALUE_LIMIT
+            for v in scenario['constraint_checks']
+            if v['isin'] == 'RU000A0LGDL1'
+        )
+        assert scenario['feasible'] is False
+
+    def test_freq_below_min_caught(self, db, tmp_path):
+        """freq=2 ловится диапазоном 4..12 в целевом портфеле."""
+        _seed_diversified(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': 'RU000A0RALE1', 'qty_delta': 69},   # freq=2
+        ])
+        scenario = _build_scenario(db, path, freq_min=4, freq_max=12)['scenario']
+        assert scenario['valid'] is True
+        below = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN
+        )
+        assert [v['isin'] for v in below] == ['RU000A0RALE1']
+        assert below[0]['actual'] == 2
+        assert below[0]['limit'] == 4
+        assert scenario['feasible'] is False
+
+    def test_freq_missing_caught(self, db, tmp_path):
+        """Позиция с NULL-частотой ловится как COUPON_FREQUENCY_MISSING."""
+        _seed_base(db)
+        freq_co = _insert_company(db, 'Частота Холдинг')
+        _insert_bond(db, isin='RU000A0NOFRQ', ticker='NOFRQ', name='Без частоты',
+                     company_id=freq_co, coupon_quantity_per_year=None,
+                     coupon_rate_percent=Decimal('10.0'),
+                     ytm=Decimal('10'), ytm_updated_at=_NOW,
+                     market_price=Decimal('900.0'))
+        _insert_position(db, 'RU000A0NOFRQ', quantity=10, price=900)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': AL1, 'qty_delta': -4},
+        ])
+        scenario = _build_scenario(db, path, freq_min=4, freq_max=12)['scenario']
+        assert scenario['valid'] is True
+        missing = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_COUPON_FREQUENCY_MISSING
+        )
+        assert [v['isin'] for v in missing] == ['RU000A0NOFRQ']
+        assert missing[0]['actual'] is None
+        assert scenario['feasible'] is False
+
+    def test_sovereign_caught_in_target_portfolio(self, db, tmp_path):
+        """Суверенный в positions_after ловится флагом --exclude-sovereign."""
+        _seed_base(db)
+        minfin = _insert_company(db, 'Минфин России', 'sovereign')
+        _insert_bond(db, isin='RU000A0OFZSC1', ticker='ОФЗ 26251',
+                     name='ОФЗ 26251', company_id=minfin,
+                     coupon_quantity_per_year=4,
+                     coupon_rate_percent=Decimal('10.0'),
+                     ytm=Decimal('10'), ytm_updated_at=_NOW,
+                     market_price=Decimal('900.0'))
+        _insert_position(db, 'RU000A0OFZSC1', quantity=10, price=900)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': BT2, 'qty_delta': -5},   # ОФЗ не трогаем
+        ])
+        scenario = _build_scenario(db, path, exclude_sovereign=True)['scenario']
+        assert scenario['valid'] is True
+        sovereign = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_SOVEREIGN_NOT_ALLOWED
+        )
+        assert [v['isin'] for v in sovereign] == ['RU000A0OFZSC1']
+        assert scenario['feasible'] is False
+
+    def test_rating_below_min_caught(self, db, tmp_path):
+        """A- ловится порогом AA-; Бета продана в ноль — не проверяется."""
+        _seed_base(db)
+        db.add_rating(AL1, date.today(), 'A-', 7)
+        db.conn.commit()
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': BT2, 'qty_delta': -10},   # в ноль
+        ])
+        scenario = _build_scenario_scaled(
+            db, path, min_credit_rating='AA-'
+        )['scenario']
+        assert scenario['valid'] is True
+        below = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_CREDIT_RATING_BELOW_MIN
+        )
+        assert [v['isin'] for v in below] == [AL1]
+        assert below[0]['actual'] == 'A-'
+        assert below[0]['limit'] == 'AA-'
+        assert _by_type(
+            scenario['constraint_checks'], CONSTRAINT_CREDIT_RATING_MISSING
+        ) == []
+        assert scenario['feasible'] is False
+
+    def test_rating_missing_caught(self, db, tmp_path):
+        """Нет строки в rating_history -> CREDIT_RATING_MISSING (strict)."""
+        _seed_base(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': AL1, 'qty_delta': -4},   # Альфа остаётся 6 шт
+        ])
+        scenario = _build_scenario_scaled(
+            db, path, min_credit_rating='AA-'
+        )['scenario']
+        assert scenario['valid'] is True
+        missing = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_CREDIT_RATING_MISSING
+        )
+        assert {v['isin'] for v in missing} == {AL1, BT2}
+        for v in missing:
+            assert v['actual'] is None
+            assert v['limit'] == 'AA-'
+        assert scenario['feasible'] is False
+
+    def test_issuer_limit_reuses_existing_calculations(self, db, tmp_path):
+        """ISSUER_LIMIT берётся из scenario.issuer_limits (второго расчёта нет)."""
+        _seed_base(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': AL1, 'qty_delta': -4},
+            {'isin': GM1, 'qty_delta': 5},
+            {'isin': GM2, 'qty_delta': 3},
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        gamma = [i for i in scenario['issuer_limits']['after_all']
+                 if i['issuer'] == 'Гамма Холдинг'][0]
+        assert gamma['limit_status'] == 'LIMIT_VIOLATION (>15%)'
+        issuer_violations = _by_type(
+            scenario['constraint_checks'], CONSTRAINT_ISSUER_LIMIT
+        )
+        # все три эмитента фикстуры выше 15% — три нарушения
+        assert len(issuer_violations) == 3
+        assert all(v['isin'] is None for v in issuer_violations)
+        gamma_v = [v for v in issuer_violations if 'Гамма' in v['message']][0]
+        assert gamma_v['actual'] == gamma['pct'] == 38.55
+        assert gamma_v['limit'] == 15.0
+        assert scenario['feasible'] is False
+
+    def test_no_constraints_set_means_no_violations_of_those_types(self, db, tmp_path):
+        """Без args ограничения не проверяются: нет ложных freq/rating/limit."""
+        _seed_base(db)
+        path = _write_scenario_file(tmp_path, trades=[
+            {'isin': AL1, 'qty_delta': -4},
+            {'isin': GM1, 'qty_delta': 5},
+            {'isin': GM2, 'qty_delta': 3},
+        ])
+        scenario = _build_scenario(db, path)['scenario']
+        types = {v['type'] for v in scenario['constraint_checks']}
+        # только ISSUER_LIMIT (фикстура концентрирована), без freq/rating/budget
+        assert types == {CONSTRAINT_ISSUER_LIMIT}
+        assert scenario['feasible'] is False
