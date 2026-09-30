@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -362,30 +363,78 @@ def test_stale_data_blocks_export_before_sheet_write():
 
 
 class FakeWorksheet:
-    def __init__(self):
+    """Лист с семантикой, близкой к реальной Google Sheets: ячейки хранятся,
+    пока лист не очищен; update пишет блок в сетку с указанного диапазона и НЕ
+    затирает хвост листа, если новый блок короче предыдущего. Именно поэтому
+    shrink-тест ловит пропажу clear() из протокола публикации."""
+
+    def __init__(self, name="sheet", events=None):
+        self.name = name
+        self.events = events if events is not None else []
         self.updates = []
         self.clears = 0
-        self.values = []
+        self.grid = []
+
+    @staticmethod
+    def _range_start(range_name):
+        first_cell = range_name.split(":")[0]
+        match = re.fullmatch(r"([A-Z]+)(\d+)", first_cell)
+        letters, row = match.group(1), int(match.group(2))
+        col = 0
+        for ch in letters:
+            col = col * 26 + (ord(ch) - ord("A") + 1)
+        return row - 1, col - 1
 
     def update(self, **kwargs):
+        self.events.append(f"{self.name}.update")
         self.updates.append(kwargs)
-        values = kwargs["values"]
-        if kwargs["range_name"] == "A1":
-            self.values = values
+        top, left = self._range_start(kwargs["range_name"])
+        for row_offset, row_values in enumerate(kwargs["values"]):
+            row_index = top + row_offset
+            while len(self.grid) <= row_index:
+                self.grid.append([])
+            target = self.grid[row_index]
+            while len(target) < left + len(row_values):
+                target.append("")
+            for col_offset, value in enumerate(row_values):
+                target[left + col_offset] = value
 
     def clear(self):
+        self.events.append(f"{self.name}.clear")
         self.clears += 1
-        self.values = []
+        self.grid = []
 
     def get_all_values(self):
-        return self.values
+        self.events.append(f"{self.name}.get_all_values")
+        return [list(row) for row in self.grid]
+
+    def as_dicts(self):
+        """CONTROL-лист как dict key/value — так его читает потребитель."""
+        return {row[0]: row[1] for row in self.grid if row}
+
+
+class FailingUpdateWorksheet(FakeWorksheet):
+    """Лист, у которого падает запись блока данных с A1 (шаг после WRITING)."""
+
+    def update(self, **kwargs):
+        if kwargs["range_name"] == "A1":
+            raise RuntimeError("sheet update failed")
+        super().update(**kwargs)
+
+
+class ShortReadWorksheet(FakeWorksheet):
+    """Лист, чья проверка чтения возвращает на одну строку меньше записанной."""
+
+    def get_all_values(self):
+        return super().get_all_values()[:-1]
 
 
 class FakeSpreadsheet:
     def __init__(self):
+        self.events = []
         self.sheets = {
-            "CONTROL": FakeWorksheet(),
-            "PORTFOLIO": FakeWorksheet(),
+            "CONTROL": FakeWorksheet("CONTROL", self.events),
+            "PORTFOLIO": FakeWorksheet("PORTFOLIO", self.events),
         }
 
     def worksheet(self, title):
@@ -400,13 +449,17 @@ class FakeClient:
         return self.spreadsheet
 
 
-def test_publisher_marks_writing_then_ready():
-    spreadsheet = FakeSpreadsheet()
-    publisher = GoogleSheetsPortfolioPublisher(
+def make_publisher(spreadsheet):
+    return GoogleSheetsPortfolioPublisher(
         "sheet-id",
         "",
         client=FakeClient(spreadsheet),
     )
+
+
+def test_publisher_marks_writing_then_ready():
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
 
     publisher.publish(
         control={"snapshot_id": "snap-1", "positions_count": 1},
@@ -419,6 +472,133 @@ def test_publisher_marks_writing_then_ready():
     final_values = control.updates[-1]["values"]
     assert ["sync_status", "READY"] in final_values
     assert ["snapshot_id", "snap-1"] in final_values
+
+
+def test_publisher_shrink_removes_tail_of_previous_snapshot():
+    """Повторная публикация меньшего снапшота не оставляет хвост предыдущего."""
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
+    big_rows = [[f"RU000{i}"] for i in range(5)]
+    small_rows = [["RU000A"], ["RU000B"]]
+
+    publisher.publish(
+        control={"snapshot_id": "snap-1", "positions_count": 5},
+        headers=["isin"],
+        rows=big_rows,
+    )
+    publisher.publish(
+        control={"snapshot_id": "snap-2", "positions_count": 2},
+        headers=["isin"],
+        rows=small_rows,
+    )
+
+    portfolio = spreadsheet.sheets["PORTFOLIO"].get_all_values()
+    assert len(portfolio) == 1 + len(small_rows)  # заголовок + данные
+    isins = [row[0] for row in portfolio[1:]]
+    assert isins == ["RU000A", "RU000B"]
+    stale_tail = {row[0] for row in big_rows} - {row[0] for row in small_rows}
+    assert not stale_tail.intersection(isins)
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "READY"
+    assert control["snapshot_id"] == "snap-2"
+
+
+def test_publisher_failure_after_writing_leaves_control_not_ready():
+    """Исключение на записи PORTFOLIO (после WRITING) прокидывается, READY нет."""
+    spreadsheet = FakeSpreadsheet()
+    spreadsheet.sheets["PORTFOLIO"] = FailingUpdateWorksheet(
+        "PORTFOLIO", spreadsheet.events
+    )
+    publisher = make_publisher(spreadsheet)
+
+    with pytest.raises(RuntimeError, match="sheet update failed"):
+        publisher.publish(
+            control={"snapshot_id": "snap-1", "positions_count": 1},
+            headers=["isin"],
+            rows=[["RU000A"]],
+        )
+
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "WRITING"
+    assert "READY" not in control.values()
+
+
+def test_publisher_verify_failure_does_not_publish_ready():
+    """READY выставляется только после успешного row-count verify: расхождение
+    числа прочитанных строк с записанным роняет publish без READY."""
+    spreadsheet = FakeSpreadsheet()
+    spreadsheet.sheets["PORTFOLIO"] = ShortReadWorksheet(
+        "PORTFOLIO", spreadsheet.events
+    )
+    publisher = make_publisher(spreadsheet)
+
+    with pytest.raises(RuntimeError, match="verification failed"):
+        publisher.publish(
+            control={"snapshot_id": "snap-1", "positions_count": 2},
+            headers=["isin"],
+            rows=[["RU000A"], ["RU000B"]],
+        )
+
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "WRITING"
+    assert "READY" not in control.values()
+
+
+def test_publisher_marks_writing_before_touching_portfolio():
+    """Порядок протокола: WRITING-маркер пишется в CONTROL до любых изменений
+    PORTFOLIO; READY — последняя операция, после verify."""
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
+
+    publisher.publish(
+        control={"snapshot_id": "snap-1", "positions_count": 1},
+        headers=["isin"],
+        rows=[["RU000A"]],
+    )
+
+    events = spreadsheet.events
+    control = spreadsheet.sheets["CONTROL"]
+    assert control.updates[0]["values"][1] == ["sync_status", "WRITING"]
+    assert events[0] == "CONTROL.update"  # WRITING раньше всего остального
+    first_portfolio_change = min(
+        events.index("PORTFOLIO.clear"), events.index("PORTFOLIO.update")
+    )
+    assert first_portfolio_change > events.index("CONTROL.update")
+    # verify PORTFOLIO происходит до финального READY-обновления CONTROL...
+    assert events.index("PORTFOLIO.get_all_values") < len(events) - 1
+    # ...а финальная операция публикации — запись READY в CONTROL.
+    assert events[-1] == "CONTROL.update"
+    assert control.as_dicts()["sync_status"] == "READY"
+
+
+def test_build_payload_positions_count_matches_table_rows():
+    """positions_count равен фактическому числу строк данных таблицы."""
+    db_rows = [make_rows(isin=f"RU000{i}", name=f"Bond {i}")[0] for i in range(5)]
+
+    control, table_rows = build_payload(db_rows)
+
+    assert control["positions_count"] == len(table_rows) == 5
+
+
+def test_published_control_satisfies_consumer_contract():
+    """Контракт потребителя: после успешной публикации CONTROL содержит
+    sync_status=READY и тот же snapshot_id, positions_count совпадает с числом
+    строк данных PORTFOLIO — такой снапшот можно читать."""
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
+    control_in = {"snapshot_id": "20260930T100000Z", "positions_count": 2}
+
+    publisher.publish(
+        control=control_in,
+        headers=["isin"],
+        rows=[["RU000A"], ["RU000B"]],
+    )
+
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    portfolio = spreadsheet.sheets["PORTFOLIO"].get_all_values()
+    assert control["sync_status"] == "READY"
+    assert control["snapshot_id"] == control_in["snapshot_id"]
+    assert int(control["positions_count"]) == len(portfolio) - 1 == 2
 
 
 def test_chatgpt_rows_return_null_reasons_from_db(db):
