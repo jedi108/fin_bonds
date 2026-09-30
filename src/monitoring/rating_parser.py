@@ -40,35 +40,40 @@ RATING_SCALE = {
 
 def get_rating_from_moex(isin: str, client: MoexApiClient) -> Optional[Dict[str, str]]:
     """
-    Получает кредитный рейтинг с Московской биржи.
-    Возвращает самый последний по дате присвоения рейтинг.
+    Получает кредитный рейтинг с MOEX ISS через эндпоинт /iss/cci/rating
+    (002.9, Р10): emitent_id по ISIN → карточка рейтингов выпуска.
+
+    Старый источник /iss/securities/<secid>/credit_ratings.json не существует
+    (MOEX отвечал карточкой бумаги без блока ratings — провайдер возвращал
+    None для любой облигации). Ответ /cci содержит все три агентства
+    (АКРА/Эксперт РА/НКР) и имя агентства — используется для сообщения
+    пользователю, в БД не пишется (колонки agency в схеме нет).
     """
-    # Сначала нужен SECID
-    sec_info = client._get_secid_and_board(isin)
-    if not sec_info or not sec_info.get('secid'):
-        logger.warning(f"MOEX: Не удалось получить SECID для {isin}")
-        return None
-    
-    secid = sec_info['secid']
-    ratings = client.get_security_rating(secid)
-
-    if not ratings:
+    records = client.get_security_rating_cci(isin)
+    if not records:
+        logger.warning(f"MOEX cci: рейтинги для {isin} не получены")
         return None
 
-    # Рейтингов может быть несколько от разных агентств.
-    # Логика: берем самый свежий по 'rating_date'
-    # MOEX отдает даты в формате 'YYYY-MM-DD HH:MM:SS'
-    latest_rating = max(ratings, key=lambda r: r['rating_date'])
-    
-    rating_value = latest_rating.get('rating_value_code') # 'AAA.ru'
-    
-    if rating_value:
-        # Для совместимости с остальной системой, вернем словарь
-        desc = client.get_security_description(isin)
-        name = desc.get('NAME', '') if desc else ''
-        return {"rating": rating_value, "name": name, "ticker": secid}
-        
-    return None
+    # В эмитентском справочнике есть исторические записи 'Отозван' —
+    # их исключаем и берём свежую по rating_date (даты в формате 'YYYY-MM-DD',
+    # строки сравниваются лексикографически корректно).
+    active = [r for r in records if r.get('rating_level_name_short_ru') != 'Отозван']
+    if not active:
+        logger.info(f"MOEX cci: все рейтинги {isin} отозваны")
+        return None
+
+    latest = max(active, key=lambda r: str(r.get('rating_date') or ''))
+    rating_value = latest.get('rating_level_name_short_ru')
+    if not rating_value:
+        logger.warning(f"MOEX cci: у свежей записи {isin} пустой rating_level_name_short_ru")
+        return None
+
+    return {
+        "rating": rating_value,
+        "agency": latest.get('agency_name_short_ru') or '',
+        "name": isin,
+        "ticker": isin,
+    }
 
 
 def get_rating_from_smartlab(isin: str, **kwargs) -> Optional[Dict[str, str]]:

@@ -16,7 +16,7 @@ from collections import defaultdict
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond
+from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond, RatingTarget
 from src.migrations import discover_migrations, get_applied_versions
 from src.services.cashflow import calculate_bond_cashflow_metrics
 from src.utils import round_coupon_rate
@@ -1181,6 +1181,59 @@ class PortfolioStorage:
         except psycopg2.Error as e:
             logger.error(f"Ошибка при получении данных для {isin}: {e}")
             return None
+
+    def get_bond_for_rating_refresh(self, isin: str) -> Optional[RatingTarget]:
+        """Лёгкий таргет для точечного обновления рейтинга по каталогу (002.9, Р2).
+
+        В отличие от get_bond_data_for_monitoring ищет только в bonds_catalog,
+        без JOIN с portfolio_positions: рейтинг нужен и бумагам вне портфеля
+        (адаптеру credit_rating из bond_data достаточно .isin).
+        """
+        cursor = self._cursor()
+        cursor.execute("SELECT isin FROM bonds_catalog WHERE isin = %s", (isin,))
+        row = cursor.fetchone()
+        if not row:
+            logger.warning(f"Облигация {isin} не найдена в каталоге")
+            return None
+        return RatingTarget(isin=row['isin'])
+
+    def get_isins_for_rating_refresh(self, scope: str, limit: Optional[int] = None) -> List[RatingTarget]:
+        """Выбор таргетов для скоупов обновления рейтингов (002.9, Р3).
+
+        scope='missing' — живые бумаги каталога (maturity_date >= CURRENT_DATE),
+        у которых последняя проверка credit_rating в monitoring_checks = 'N/A'
+        или отсутствует; scope='catalog' — все живые бумаги каталога.
+        Порядок детерминированный (ORDER BY isin), лимит — опциональный.
+        """
+        if scope not in ('missing', 'catalog'):
+            raise ValueError(f"Неизвестный скоуп обновления рейтингов: {scope}")
+
+        query = """
+            SELECT bc.isin
+            FROM bonds_catalog bc
+            LEFT JOIN LATERAL (
+                SELECT mc.metric_value
+                FROM monitoring_checks mc
+                WHERE mc.isin = bc.isin AND mc.metric_name = 'credit_rating'
+                ORDER BY mc.check_date DESC
+                LIMIT 1
+            ) last_check ON TRUE
+            WHERE bc.maturity_date >= CURRENT_DATE
+        """
+        params: Tuple = ()
+        if scope == 'missing':
+            query += " AND (last_check.metric_value IS NULL OR last_check.metric_value = 'N/A')"
+        query += " ORDER BY bc.isin"
+        if limit is not None:
+            query += " LIMIT %s"
+            params = (limit,)
+
+        cursor = self._cursor()
+        cursor.execute(query, params)
+        targets = [RatingTarget(isin=row['isin']) for row in cursor.fetchall()]
+        logger.info(f"get_isins_for_rating_refresh: скоуп '{scope}', найдено {len(targets)} бумаг"
+                    + (f" (limit {limit})" if limit is not None else ""))
+        return targets
 
     def _row_to_portfolio_bond(self, row: Mapping[str, Any]) -> Optional['PortfolioBond']:
         """

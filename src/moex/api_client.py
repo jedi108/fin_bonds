@@ -459,17 +459,50 @@ class MoexApiClient(IMoexApiClient):
         except ValueError:
             return None
 
-    def get_security_rating(self, secid: str) -> Optional[Dict[str, Any]]:
+    def get_emitent_id(self, isin: str) -> Optional[str]:
+        """Возвращает ID эмитента по ISIN (002.9, Р10).
+
+        Основной путь — поиск ISS (поле emitent_id); фолбэк — EMITTER_ID из
+        description (у части бумаг поиск не заполняет emitent_id).
         """
-        Получает кредитный рейтинг для указанного secid.
-        """
-        endpoint = f"/securities/{secid}/credit_ratings.json"
-        full_url = f"{self.base_url}{endpoint}"
         params = {
+            'q': isin,
             'iss.meta': 'off',
+            'iss.only': 'securities',
+            'securities.columns': 'secid,isin,emitent_id',
         }
-        data = self._make_request(full_url, params)
-        return self._format_iss_response(data.get('ratings', {})) if data else None
+        data = self._make_request(f"{self.base_url}/securities.json", params)
+        if data:
+            for security in self._format_iss_response(data.get('securities', {})):
+                if security.get('isin') == isin and security.get('emitent_id'):
+                    return str(security['emitent_id'])
+
+        description = self.get_security_description(isin)
+        if description and description.get('EMITTER_ID'):
+            return str(description['EMITTER_ID'])
+        return None
+
+    def get_security_rating_cci(self, isin: str) -> Optional[List[Dict[str, Any]]]:
+        """Кредитные рейтинги выпуска с эндпоинта /iss/cci/rating (002.9, Р10).
+
+        Классический /iss/securities/<secid>/credit_ratings.json не существует:
+        MOEX на любой неизвестный подпуть отдаёт карточку бумаги без блока
+        ratings, из-за чего старый провайдер возвращал None для любой бумаги.
+        Рабочий источник — недокументированный, но стабильный эндпоинт, которым
+        пользуется сайт moex.com (уровень эмитента ecbd_<emitent_id>, уровень
+        выпуска — securities/isin_<ISIN>). Возвращает ВСЕ записи, включая
+        исторические со значением 'Отозван' — фильтрация на стороне вызывающего.
+        """
+        emitent_id = self.get_emitent_id(isin)
+        if not emitent_id:
+            logger.warning(f"get_security_rating_cci: emitent_id для {isin} не найден")
+            return None
+
+        endpoint = f"/cci/rating/companies/ecbd_{emitent_id}/securities/isin_{isin}.json"
+        data = self._make_request(f"{self.base_url}{endpoint}", {'iss.meta': 'off'})
+        if not data:
+            return None
+        return self._format_iss_response(data.get('cci_rating_securities', {}))
 
 # --- Старая функция больше не нужна, так как мы переходим на массовую загрузку ---
 # def get_bond_data_from_moex(isin: str) -> Optional[Dict[str, Any]]:

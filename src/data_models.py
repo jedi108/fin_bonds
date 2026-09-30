@@ -109,6 +109,14 @@ class Bond:
         """Преобразует объект в словарь."""
         return asdict(self)
 
+@dataclass
+class RatingTarget:
+    """
+    Лёгкий DTO для точечной проверки рейтинга (002.9): адаптеру credit_rating
+    из bond_data нужен только .isin — полный PortfolioBond не требуется.
+    """
+    isin: str
+
 @dataclass(frozen=True)
 class CalculatedCoupon:
     """
