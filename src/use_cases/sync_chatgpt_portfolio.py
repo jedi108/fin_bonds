@@ -1,9 +1,10 @@
 """Экспорт данных для ChatGPT в Google Sheets.
 
 P0: текущий портфель (лист PORTFOLIO). 019: candidate projection —
-транспортные строки будущего листа CANDIDATES строятся только из
-канонического отчёта rebalance-report (build_report + default_args,
-второго скринера нет); публикация листа — задача 020.
+транспортные строки CANDIDATES строятся только из канонического отчёта
+rebalance-report (build_report + default_args, второго скринера нет).
+020: schema v3 — публикуются SCHEMA (самодокументация контракта) и
+CANDIDATES, CONTROL расширен кандидатными ключами и consumer_rule.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.storage import PortfolioStorage
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 # v2 (007, 008): ytm_reason/duration_reason — причины пустых ytm_pct/duration;
 # valuation_source/valuation_warning — происхождение canonical valuation (008).
-SCHEMA_VERSION = 2
+# v3 (020): SCHEMA (самодокументация) + CANDIDATES (кандидаты buy-выборки).
+SCHEMA_VERSION = 3
 PORTFOLIO_HEADERS = (
     "isin",
     "name",
@@ -56,6 +58,38 @@ PORTFOLIO_HEADERS = (
     "modified_duration",
     "duration_reason",
     "liquidity_loss_pct",
+)
+
+# 020: versioned definition колонок PORTFOLIO для самодокументируемого листа
+# SCHEMA — живёт в коде рядом с headers; тест ловит header, отсутствующий в
+# SCHEMA (runtime source-of-truth — сам лист SCHEMA в Google Sheet).
+PORTFOLIO_SCHEMA = (
+    ("isin", "string", "Bond issue identifier; one row per ISIN (positions across accounts/brokers aggregated)"),
+    ("name", "string", "Bond name"),
+    ("ticker", "string", "Ticker"),
+    ("issuer", "string", "Issuer company from the reference book; fallback to bond name"),
+    ("quantity", "count", "Number of papers in the position"),
+    ("price_rub", "RUB", "Price per paper: volume-weighted trade price or market price"),
+    ("value_rub", "RUB", "Position valuation"),
+    ("valuation_source", "string", "Which canonical valuation branch produced value_rub: broker_value / broker_price / market_price / nominal_fallback / zero"),
+    ("valuation_warning", "string or empty", "Fixed warning only for ambiguous valuation branches (nominal_fallback, zero); empty otherwise. Read it as a flag that price_rub does not follow from value_rub by ordinary division"),
+    ("share_pct", "percent", "Position share of the portfolio (share x 100)"),
+    ("issuer_pct", "percent", "Issuer share of the portfolio"),
+    ("ytm_pct", "percent_per_year or empty", "Yield to maturity; an empty value is a deliberate NULL — see ytm_reason"),
+    ("ytm_reason", "string or empty", "Reason for empty ytm_pct (perpetual, floating_coupon, amortization_schedule_missing, coupon_frequency_missing, maturity_missing_or_past, market_price_missing_or_nonpositive, nominal_missing_or_nonpositive, coupon_rate_missing_or_negative, solver_no_convergence; not_applicable = YTM calc never ran). Empty when ytm_pct is present"),
+    ("coupon_pct", "percent_per_year", "Coupon rate"),
+    ("coupon_frequency", "count", "Coupons per year"),
+    ("coupon_type", "FIX or FLOAT", "Coupon type"),
+    ("maturity_date", "ISO date", "Maturity date"),
+    ("offer_date", "ISO date or empty", "Offer (put/call) date"),
+    ("amortization_flag", "boolean", "TRUE when nominal amortization exists"),
+    ("credit_rating", "string or empty", "Latest credit rating"),
+    ("risk_level", "count or empty", "Risk level (Tinkoff)"),
+    ("list_level", "count or empty", "MOEX listing level"),
+    ("duration", "years or empty", "Macaulay duration; an empty value is a deliberate NULL — see duration_reason"),
+    ("modified_duration", "years or empty", "Modified duration"),
+    ("duration_reason", "string or empty", "Reason for empty duration/modified_duration; empty when calculated"),
+    ("liquidity_loss_pct", "percent", "Estimated loss when exiting the position at market, weighted by position (legacy name; the DB column is liquidity_loss_ratio but stores percent)"),
 )
 
 # 008: предупреждение только для веток, где value_rub не равен quantity*price_rub
@@ -107,6 +141,71 @@ CANDIDATE_HEADERS = (
     "issuer_pct_current",
     "held_badge",
 )
+
+# 020: versioned definition колонок CANDIDATES для листа SCHEMA.
+CANDIDATE_SCHEMA = (
+    ("candidate_type", "FIX or FLOAT", "Candidate group; FIX and FLOAT share one sheet and are ranked separately"),
+    ("rank", "count", "Rank within candidate_type starting from 1; order preserves the canonical screener ranking"),
+    ("isin", "string", "Bond issue identifier"),
+    ("name", "string", "Bond name"),
+    ("ticker", "string", "Ticker"),
+    ("issuer", "string", "Issuer company"),
+    ("price_rub", "RUB", "Fresh market price required by the canonical screener buy selection (no nominal fallback)"),
+    ("ytm_pct", "percent_per_year or empty", "Yield to maturity; an empty value is a deliberate NULL — see ytm_reason"),
+    ("ytm_reason", "string or empty", "Reason for empty ytm_pct (e.g. floating_coupon); empty when ytm_pct is present"),
+    ("coupon_pct", "percent_per_year or empty", "Coupon rate"),
+    ("coupon_frequency", "count", "Coupons per year"),
+    ("maturity_date", "ISO date", "Maturity date"),
+    ("offer_date", "ISO date or empty", "Offer (put/call) date"),
+    ("amortization_flag", "boolean", "TRUE when nominal amortization exists"),
+    ("risk_level", "count", "Risk level (Tinkoff)"),
+    ("list_level", "count", "MOEX listing level"),
+    ("ku", "boolean", "TRUE when the bond is available only to qualified investors"),
+    ("issuer_pct_current", "percent", "Current issuer share in the portfolio BEFORE the hypothetical purchase (the candidate itself is not counted in it)"),
+    ("held_badge", "string or empty", "Non-empty when the candidate is already held in the portfolio (include_held export context); format: held (N%)"),
+)
+
+# 020: самодокументация контракта. SCHEMA описывает все поля CONTROL,
+# PORTFOLIO и CANDIDATES и записывается в таблицу при каждом sync; runtime
+# source-of-truth для ChatGPT — сам лист SCHEMA, doc/ — только зеркало.
+SCHEMA_HEADERS = ("sheet", "field", "type_or_unit", "description")
+
+CONTROL_SCHEMA = (
+    ("sync_status", "string", "WRITING while data sheets are being written; READY only after PORTFOLIO and CANDIDATES are written and both row counts verified (commit-marker)"),
+    ("schema_version", "count", "Version of the sheet contract (3 = SCHEMA + CANDIDATES added)"),
+    ("snapshot_id", "string", "UTC snapshot id (YYYYMMDDThhmmssZ) identifying one sync run"),
+    ("generated_at", "ISO datetime", "UTC time when the snapshot was generated"),
+    ("gate_status", "string", "Freshness gate result (OK/WARN/BLOCKED); exports with not-fresh data are not published"),
+    ("is_fresh", "boolean", "Always TRUE: exports that fail the freshness gate are not published"),
+    ("positions_count", "count", "Number of data rows in PORTFOLIO; verify before use"),
+    ("portfolio_value_rub", "RUB", "Total portfolio valuation"),
+    ("portfolio_updated_at", "ISO datetime", "When portfolio positions were last updated in the source DB"),
+    ("market_updated_at", "ISO datetime", "When market prices were last updated in the source DB. Limitation: this is a DB write timestamp — the source trade timestamp is not stored, so freshness means recently written to DB, not recently traded"),
+    ("warnings", "JSON or empty", "JSON list of freshness gate warnings; empty when none"),
+    ("candidates_count", "count", "Number of data rows in CANDIDATES; verify before use"),
+    ("candidate_meta", "JSON", "CANDIDATES metadata copied from the canonical screener report (filters, candidates_total, fixed_matched, floater_matched, excluded) without recalculation"),
+    ("contract_sheet", "string", "Name of the sheet that documents all fields: SCHEMA"),
+    ("consumer_rule", "string", "Short machine contract for the consumer"),
+)
+
+CONSUMER_RULE = (
+    "Read CONTROL first. Use data only when sync_status=READY.\n"
+    "Read SCHEMA before interpreting PORTFOLIO or CANDIDATES.\n"
+    "Verify positions_count and candidates_count."
+)
+
+
+def build_schema_rows() -> List[List[Any]]:
+    """Строки листа SCHEMA (020) из versioned definitions рядом с headers."""
+    rows: List[List[Any]] = []
+    for sheet, definitions in (
+        ("CONTROL", CONTROL_SCHEMA),
+        ("PORTFOLIO", PORTFOLIO_SCHEMA),
+        ("CANDIDATES", CANDIDATE_SCHEMA),
+    ):
+        for field, type_or_unit, description in definitions:
+            rows.append([sheet, field, type_or_unit, description])
+    return rows
 
 
 def candidate_report_args() -> argparse.Namespace:
@@ -176,7 +275,8 @@ def build_candidates_payload(
 
 
 class SyncChatgptPortfolioUseCase(UseCase):
-    """Выгружает текущий портфель в настроенную Google Sheet для ChatGPT."""
+    """Выгружает снапшот для ChatGPT (CONTROL + SCHEMA + PORTFOLIO + CANDIDATES)
+    в настроенную Google Sheet."""
 
     def __init__(
         self,
@@ -184,10 +284,17 @@ class SyncChatgptPortfolioUseCase(UseCase):
         *,
         publisher: Optional[GoogleSheetsPortfolioPublisher] = None,
         ytm_engine: Optional[CalculateYtmUseCase] = None,
+        report_builder: Optional[Callable[[argparse.Namespace], Dict[str, Any]]] = None,
     ):
         self.db = db
         self.publisher = publisher
         self._ytm_engine = ytm_engine or CalculateYtmUseCase(db)
+        # 020: источник кандидатов — программный канонический отчёт
+        # rebalance-report (второго скринера нет); подменяется только в тестах.
+        self._report_builder = report_builder or self._default_report_builder
+
+    def _default_report_builder(self, args: argparse.Namespace) -> Dict[str, Any]:
+        return RebalanceReportUseCase(db=self.db).build_report(args)
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
@@ -208,7 +315,7 @@ class SyncChatgptPortfolioUseCase(UseCase):
 
     def _build_payload(
         self, now: Optional[datetime] = None
-    ) -> Tuple[Dict[str, Any], List[List[Any]]]:
+    ) -> Tuple[Dict[str, Any], List[List[Any]], List[List[Any]]]:
         now = now or datetime.now(timezone.utc)
         freshness = self.db.get_db_freshness()
         criticals, warnings, gate_status, is_fresh = classify_freshness(freshness, now)
@@ -293,6 +400,12 @@ class SyncChatgptPortfolioUseCase(UseCase):
             }
             table_rows.append([values[column] for column in PORTFOLIO_HEADERS])
 
+        # 020: кандидаты — только из канонического отчёта rebalance-report
+        # (build_report + candidate_report_args, пересчётов нет); metadata
+        # переносится в CONTROL как есть.
+        report = self._report_builder(candidate_report_args())
+        candidate_meta, candidate_rows = build_candidates_payload(report)
+
         snapshot_id = now.strftime("%Y%m%dT%H%M%SZ")
         control = {
             "schema_version": SCHEMA_VERSION,
@@ -305,19 +418,29 @@ class SyncChatgptPortfolioUseCase(UseCase):
             "portfolio_updated_at": _iso(freshness.get("portfolio_max_updated_at")),
             "market_updated_at": _iso(freshness.get("market_price_max_updated_at")),
             "warnings": json.dumps(warnings, ensure_ascii=False) if warnings else "",
+            # 020: кандидатный контекст и контракт потребителя.
+            "candidates_count": len(candidate_rows),
+            "candidate_meta": json.dumps(candidate_meta, ensure_ascii=False),
+            "contract_sheet": "SCHEMA",
+            "consumer_rule": CONSUMER_RULE,
         }
-        return control, table_rows
+        return control, table_rows, candidate_rows
 
     def execute(self, args: argparse.Namespace):
-        control, rows = self._build_payload()
+        control, rows, candidate_rows = self._build_payload()
         self._get_publisher().publish(
             control=control,
             headers=PORTFOLIO_HEADERS,
             rows=rows,
+            schema_headers=SCHEMA_HEADERS,
+            schema_rows=build_schema_rows(),
+            candidate_headers=CANDIDATE_HEADERS,
+            candidate_rows=candidate_rows,
         )
         print(
             "✅ Портфель для ChatGPT обновлён\n"
             f"Snapshot: {control['snapshot_id']}\n"
             f"Позиций: {control['positions_count']}\n"
+            f"Кандидатов: {control['candidates_count']}\n"
             f"Freshness: {control['gate_status']}"
         )

@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -9,11 +10,14 @@ from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.use_cases.rebalance_report import RebalanceReportUseCase
 from src.use_cases.sync_chatgpt_portfolio import (
     CANDIDATE_HEADERS,
+    CONSUMER_RULE,
     PORTFOLIO_HEADERS,
+    SCHEMA_HEADERS,
     SCHEMA_VERSION,
     VALUATION_WARNINGS,
     SyncChatgptPortfolioUseCase,
     build_candidates_payload,
+    build_schema_rows,
     candidate_report_args,
 )
 
@@ -115,9 +119,10 @@ def test_build_payload_has_position_and_issuer_weights():
         FakeDb(sample_rows()),
         publisher=FakePublisher(),
         ytm_engine=FakeYtmEngine(),
+        report_builder=lambda _args: fake_screener_report(),
     )
 
-    control, rows = use_case._build_payload(now)
+    control, rows, _candidates = use_case._build_payload(now)
 
     assert control["snapshot_id"] == "20260930T100000Z"
     assert control["positions_count"] == 2
@@ -168,8 +173,10 @@ def build_payload(rows):
         FakeDb(rows),
         publisher=FakePublisher(),
         ytm_engine=FakeYtmEngine(),
+        report_builder=lambda _args: fake_screener_report(),
     )
-    return use_case._build_payload(now)
+    control, rows, _candidates = use_case._build_payload(now)
+    return control, rows
 
 
 def cell(row_values, column):
@@ -184,14 +191,14 @@ def test_reason_columns_follow_value_columns():
         PORTFOLIO_HEADERS.index("duration_reason")
         == PORTFOLIO_HEADERS.index("modified_duration") + 1
     )
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_build_payload_row_values_match_headers_order():
     """Каждая ячейка строки лежит на позиции своего заголовка."""
     control, rows = build_payload(make_rows())
 
-    assert control["schema_version"] == 2
+    assert control["schema_version"] == 3
     assert len(rows[0]) == len(PORTFOLIO_HEADERS)
     expected = {
         "isin": "RU000A",
@@ -300,7 +307,7 @@ def test_valuation_columns_follow_value_column():
         PORTFOLIO_HEADERS.index("valuation_warning")
         == PORTFOLIO_HEADERS.index("valuation_source") + 1
     )
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_valuation_warning_by_source():
@@ -439,6 +446,8 @@ class FakeSpreadsheet:
         self.sheets = {
             "CONTROL": FakeWorksheet("CONTROL", self.events),
             "PORTFOLIO": FakeWorksheet("PORTFOLIO", self.events),
+            "SCHEMA": FakeWorksheet("SCHEMA", self.events),
+            "CANDIDATES": FakeWorksheet("CANDIDATES", self.events),
         }
 
     def worksheet(self, title):
@@ -788,9 +797,9 @@ def test_candidate_projection_carries_screener_metadata():
 
 
 def test_p0_portfolio_payload_not_touched_by_candidate_export():
-    """019 не меняет существующий P0 PORTFOLIO payload: схема та же,
-    кандидатные колонки (candidate_type/rank) не протекают в PORTFOLIO."""
-    assert SCHEMA_VERSION == 2
+    """P0 PORTFOLIO payload не меняется кандидатным экспортом: колонки те же
+    (v3 поднимает только версию контракта), candidate_type/rank не протекают."""
+    assert SCHEMA_VERSION == 3
     assert PORTFOLIO_HEADERS[0] == "isin"
     assert "candidate_type" not in PORTFOLIO_HEADERS
     assert "rank" not in PORTFOLIO_HEADERS
@@ -889,3 +898,250 @@ def test_candidates_payload_built_from_canonical_report(db):
     assert metadata["fixed_matched"] == screener["fixed_matched"]
     assert metadata["floater_matched"] == screener["floater_matched"]
     assert metadata["excluded"] == screener["excluded"]
+
+
+# ---------------------------------------------------------------------------
+# 020: schema v3 — SCHEMA + CANDIDATES в атомарном протоколе публикации
+# ---------------------------------------------------------------------------
+
+
+def make_v3_use_case(db_rows, publisher, report_builder=None):
+    return SyncChatgptPortfolioUseCase(
+        FakeDb(db_rows),
+        publisher=publisher,
+        ytm_engine=FakeYtmEngine(),
+        report_builder=report_builder or (lambda _args: fake_screener_report()),
+    )
+
+
+def test_schema_documents_every_header_in_order():
+    """Тест ловит header, отсутствующий в SCHEMA: каждая колонка PORTFOLIO и
+    CANDIDATES имеет строку в SCHEMA того же листа и в том же порядке."""
+    rows = build_schema_rows()
+    assert all(len(row) == len(SCHEMA_HEADERS) for row in rows)
+    assert [row[1] for row in rows if row[0] == "PORTFOLIO"] == list(PORTFOLIO_HEADERS)
+    assert [row[1] for row in rows if row[0] == "CANDIDATES"] == list(CANDIDATE_HEADERS)
+
+
+def test_schema_documents_control_keys():
+    """Все ключи CONTROL (sync_status + payload) описаны в SCHEMA — без пропусков
+    и без устаревших записей."""
+    use_case = make_v3_use_case(sample_rows(), FakePublisher())
+    control, _rows, _candidates = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    documented = {row[1] for row in build_schema_rows() if row[0] == "CONTROL"}
+    assert documented == {"sync_status", *control.keys()}
+
+
+def test_schema_describes_units_and_semantics():
+    """Точечные проверки контракта SCHEMA: единицы, NULL-semantics, valuation,
+    issuer_pct_current до гипотетической покупки, limitation свежести."""
+    rows = {(row[0], row[1]): row for row in build_schema_rows()}
+    units = {row[2] for row in build_schema_rows()}
+    for unit in ("RUB", "percent", "percent_per_year", "years", "count", "ISO date"):
+        assert any(unit in u for u in units), unit
+
+    assert rows[("PORTFOLIO", "quantity")][2] == "count"
+    assert rows[("PORTFOLIO", "price_rub")][2] == "RUB"
+    assert rows[("PORTFOLIO", "share_pct")][2] == "percent"
+    assert rows[("PORTFOLIO", "ytm_pct")][2] == "percent_per_year or empty"
+    assert rows[("PORTFOLIO", "duration")][2] == "years or empty"
+    assert rows[("PORTFOLIO", "maturity_date")][2] == "ISO date"
+    # NULL semantics: пустое значение — осознанный NULL, причина рядом.
+    assert "not_applicable" in rows[("PORTFOLIO", "ytm_reason")][3]
+    assert "ytm_reason" in rows[("PORTFOLIO", "ytm_pct")][3]
+    # valuation_source / valuation_warning описаны.
+    assert "nominal_fallback" in rows[("PORTFOLIO", "valuation_source")][3]
+    assert "nominal_fallback" in rows[("PORTFOLIO", "valuation_warning")][3]
+    assert "zero" in rows[("PORTFOLIO", "valuation_warning")][3]
+    # issuer_pct_current — доля ДО гипотетической покупки.
+    assert "BEFORE" in rows[("CANDIDATES", "issuer_pct_current")][3]
+    # limitation: freshness market price по DB write timestamp.
+    assert "DB write timestamp" in rows[("CONTROL", "market_updated_at")][3]
+    assert "trade timestamp" in rows[("CONTROL", "market_updated_at")][3]
+
+
+def test_build_payload_v3_control_fields_and_candidates():
+    """schema v3: control несёт кандидатов и контракт потребителя; кандидатные
+    строки — третий элемент payload, count совпадает."""
+    use_case = make_v3_use_case(sample_rows(), FakePublisher())
+
+    control, rows, candidate_rows = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    assert control["schema_version"] == 3
+    assert control["positions_count"] == len(rows)
+    assert control["candidates_count"] == len(candidate_rows) == 3
+    assert json.loads(control["candidate_meta"]) == {
+        "filters": {"max_risk": 1, "screener_limit": 10},
+        "candidates_total": 7,
+        "fixed_matched": 3,
+        "floater_matched": 1,
+        "excluded": {"held": 1, "ku": 2},
+    }
+    assert control["contract_sheet"] == "SCHEMA"
+    assert control["consumer_rule"] == CONSUMER_RULE
+
+
+def test_execute_publishes_v3_sheets_to_publisher():
+    """execute передаёт в publisher один снапшот: PORTFOLIO + SCHEMA + CANDIDATES."""
+    publisher = FakePublisher()
+    use_case = make_v3_use_case(sample_rows(), publisher)
+
+    use_case.execute(None)
+
+    call = publisher.call
+    assert call["headers"] == PORTFOLIO_HEADERS
+    assert call["schema_headers"] == SCHEMA_HEADERS
+    assert call["schema_rows"] == build_schema_rows()
+    assert call["candidate_headers"] == CANDIDATE_HEADERS
+    assert len(call["candidate_rows"]) == call["control"]["candidates_count"] == 3
+
+
+def test_stale_data_blocks_candidate_report_before_sheet_write():
+    """Freshness-гейт срабатывает до построения кандидатного отчёта и записи."""
+    calls = []
+
+    def spy_report_builder(args):
+        calls.append(args)
+        return fake_screener_report()
+
+    freshness = {
+        "bonds_with_market_price": 100,
+        "bonds_tradeable_count": 100,
+        "bonds_tradeable_stale_or_missing": 0,
+        "portfolio_positions_rows": 2,
+        "portfolio_zero_value_positions": 0,
+        "portfolio_zero_rows_suspicious": 0,
+        "last_sync_time": datetime(2026, 9, 20, tzinfo=timezone.utc),
+    }
+    publisher = FakePublisher()
+    use_case = SyncChatgptPortfolioUseCase(
+        FakeDb(sample_rows(), freshness),
+        publisher=publisher,
+        ytm_engine=FakeYtmEngine(),
+        report_builder=spy_report_builder,
+    )
+
+    with pytest.raises(RuntimeError, match="freshness gate"):
+        use_case.execute(None)
+
+    assert not calls
+    assert publisher.call is None
+
+
+def test_publisher_writes_schema_and_candidates_between_writing_and_ready():
+    """Порядок протокола v3: WRITING → SCHEMA → PORTFOLIO → CANDIDATES →
+    verify обеих таблиц → READY последней операцией."""
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
+
+    publisher.publish(
+        control={
+            "schema_version": 3,
+            "positions_count": 2,
+            "candidates_count": 2,
+            "contract_sheet": "SCHEMA",
+        },
+        headers=["isin"],
+        rows=[["RU000A"], ["RU000B"]],
+        schema_headers=["sheet", "field"],
+        schema_rows=[["PORTFOLIO", "isin"], ["CANDIDATES", "isin"]],
+        candidate_headers=["candidate_type", "isin"],
+        candidate_rows=[["FIX", "RU000F1"], ["FLOAT", "RU000FL1"]],
+    )
+
+    events = spreadsheet.events
+    control = spreadsheet.sheets["CONTROL"]
+    assert events[0] == "CONTROL.update"  # WRITING раньше всего остального
+    assert events.index("SCHEMA.update") < events.index("PORTFOLIO.clear")
+    assert events.index("CANDIDATES.clear") > events.index("PORTFOLIO.update")
+    # обе проверки строк происходят до финального READY-обновления CONTROL
+    assert events.index("PORTFOLIO.get_all_values") < events.index(
+        "CANDIDATES.get_all_values"
+    ) < len(events) - 1
+    assert events[-1] == "CONTROL.update"
+    assert control.as_dicts()["sync_status"] == "READY"
+    assert control.as_dicts()["contract_sheet"] == "SCHEMA"
+
+    candidates = spreadsheet.sheets["CANDIDATES"].get_all_values()
+    assert candidates[0] == ["candidate_type", "isin"]
+    assert len(candidates) - 1 == 2
+    schema = spreadsheet.sheets["SCHEMA"].get_all_values()
+    assert schema[0] == ["sheet", "field"]
+    assert len(schema) - 1 == 2
+
+
+def test_publisher_candidates_shrink_removes_stale_tail():
+    """Повторная публикация меньшего набора кандидатов удаляет stale tail."""
+    spreadsheet = FakeSpreadsheet()
+    publisher = make_publisher(spreadsheet)
+
+    publisher.publish(
+        control={"candidates_count": 4},
+        headers=["isin"],
+        rows=[["RU000A"]],
+        candidate_headers=["isin"],
+        candidate_rows=[["RU000F1"], ["RU000F2"], ["RU000F3"], ["RU000F4"]],
+    )
+    publisher.publish(
+        control={"candidates_count": 2},
+        headers=["isin"],
+        rows=[["RU000A"]],
+        candidate_headers=["isin"],
+        candidate_rows=[["RU000F1"], ["RU000F2"]],
+    )
+
+    candidates = spreadsheet.sheets["CANDIDATES"].get_all_values()
+    assert [row[0] for row in candidates[1:]] == ["RU000F1", "RU000F2"]
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "READY"
+    assert int(control["candidates_count"]) == 2
+
+
+def test_publisher_candidates_verify_failure_does_not_publish_ready():
+    """READY только после обеих проверок: расхождение числа строк CANDIDATES
+    роняет publish без READY."""
+    spreadsheet = FakeSpreadsheet()
+    spreadsheet.sheets["CANDIDATES"] = ShortReadWorksheet(
+        "CANDIDATES", spreadsheet.events
+    )
+    publisher = make_publisher(spreadsheet)
+
+    with pytest.raises(RuntimeError, match="verification failed"):
+        publisher.publish(
+            control={"candidates_count": 2},
+            headers=["isin"],
+            rows=[["RU000A"]],
+            candidate_headers=["isin"],
+            candidate_rows=[["RU000F1"], ["RU000F2"]],
+        )
+
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "WRITING"
+    assert "READY" not in control.values()
+
+
+def test_publisher_candidates_failure_after_writing_leaves_control_not_ready():
+    """Ошибка записи CANDIDATES (после WRITING) прокидывается, READY нет."""
+    spreadsheet = FakeSpreadsheet()
+    spreadsheet.sheets["CANDIDATES"] = FailingUpdateWorksheet(
+        "CANDIDATES", spreadsheet.events
+    )
+    publisher = make_publisher(spreadsheet)
+
+    with pytest.raises(RuntimeError, match="sheet update failed"):
+        publisher.publish(
+            control={"candidates_count": 1},
+            headers=["isin"],
+            rows=[["RU000A"]],
+            candidate_headers=["isin"],
+            candidate_rows=[["RU000F1"]],
+        )
+
+    control = spreadsheet.sheets["CONTROL"].as_dicts()
+    assert control["sync_status"] == "WRITING"
+    assert "READY" not in control.values()

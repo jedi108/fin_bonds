@@ -1,27 +1,39 @@
-# Контракт Google Sheet для ChatGPT (PORTFOLIO + CONTROL)
+# Контракт Google Sheet для ChatGPT (CONTROL + SCHEMA + PORTFOLIO + CANDIDATES)
 
-Публичный контракт листа, в который команда `sync-chatgpt-portfolio`
+Публичный контракт таблицы, в которую команда `sync-chatgpt-portfolio`
 (`src/use_cases/sync_chatgpt_portfolio.py`) публикует снапшот текущего
-портфеля для чтения внешним агентом (ChatGPT). Документ не содержит данных
-портфеля — только формат.
+портфеля и кандидатного контекста для ревью ребалансировки внешним агентом
+(ChatGPT). Документ не содержит данных портфеля — только формат.
+
+Рабочие листы (schema_version = 3): `CONTROL`, `SCHEMA`, `PORTFOLIO`,
+`CANDIDATES`. Других листов нет.
+
+Runtime source-of-truth для потребителя — сам лист `SCHEMA` в таблице: он
+генерируется кодом из versioned definitions рядом с headers
+(`build_schema_rows()` в `src/use_cases/sync_chatgpt_portfolio.py`) и
+записывается при каждом sync. Этот документ — зеркало того же контракта.
 
 ## Protocol чтения
 
-1. Читай `CONTROL` (пары `key`/`value`).
-2. `PORTFOLIO` можно использовать **только при** `CONTROL.sync_status = READY`.
-   Значение `WRITING` означает, что запись идёт — данные частичные.
-3. Сверь число строк данных `PORTFOLIO` (без заголовка) с
-   `CONTROL.positions_count` — publisher делает ту же проверку при записи.
-4. `CONTROL.snapshot_id` (`YYYYMMDDThhmmssZ`, UTC) и `generated_at`
-   идентифицируют момент снапшота; `portfolio_updated_at` / `market_updated_at`
-   — свежесть исходных данных в БД.
+1. Читай `CONTROL` (пары `key`/`value`) первым.
+2. Данные (`PORTFOLIO`, `CANDIDATES`) можно использовать **только при**
+   `CONTROL.sync_status = READY`. Значение `WRITING` означает, что запись
+   идёт — данные частичные.
+3. Перед интерпретацией `PORTFOLIO` или `CANDIDATES` прочитай `SCHEMA`
+   (`CONTROL.contract_sheet = SCHEMA`) — он описывает все колонки и единицы.
+4. Сверь число строк данных `PORTFOLIO` (без заголовка) с
+   `CONTROL.positions_count` и число строк данных `CANDIDATES` с
+   `CONTROL.candidates_count` — publisher делает те же проверки при записи.
+5. `CONTROL.snapshot_id` (`YYYYMMDDThhmmssZ`, UTC) и `generated_at`
+   идентифицируют момент снапшота; `portfolio_updated_at` /
+   `market_updated_at` — свежесть исходных данных в БД.
 
-## CONTROL — ключи
+## CONTROL — ключи (schema_version = 3)
 
 | Ключ | Смысл |
 |---|---|
-| `sync_status` | `WRITING` до записи, `READY` после успешной записи и проверки (commit-marker) |
-| `schema_version` | Версия контракта листа (см. ниже) |
+| `sync_status` | `WRITING` до записи, `READY` после успешной записи обеих таблиц данных и проверок числа строк (commit-marker) |
+| `schema_version` | Версия контракта таблицы (см. ниже) |
 | `snapshot_id` | Идентификатор снапшота (`YYYYMMDDThhmmssZ`) |
 | `generated_at` | ISO-время генерации |
 | `gate_status` | Результат freshness-гейта (`OK`/`WARN`/`BLOCKED`); экспорт блокируется при нехороших данных |
@@ -29,10 +41,26 @@
 | `positions_count` | Число строк данных в `PORTFOLIO` |
 | `portfolio_value_rub` | Суммарная оценка портфеля, рубли |
 | `portfolio_updated_at` | Время последнего обновления позиций портфеля |
-| `market_updated_at` | Время последнего обновления рыночных цен |
+| `market_updated_at` | Время последнего обновления рыночных цен (по timestamp записи в БД — см. «Ограничение свежести») |
 | `warnings` | JSON-список предупреждений гейта или пусто |
+| `candidates_count` | Число строк данных в `CANDIDATES` |
+| `candidate_meta` | JSON metadata кандидатного набора из канонического скринера, без пересчёта: `filters`, `candidates_total`, `fixed_matched`, `floater_matched`, `excluded` |
+| `contract_sheet` | Имя листа с описанием всех полей: `SCHEMA` |
+| `consumer_rule` | Короткий машинный контракт потребителя (совпадает с «Protocol чтения» выше) |
 
-## PORTFOLIO — колонки (schema_version = 2)
+## SCHEMA — самодокументация контракта
+
+Лист с колонками `sheet` / `field` / `type_or_unit` / `description`: по строке
+на каждое поле `CONTROL`, `PORTFOLIO` и `CANDIDATES`. Единицы указаны явно:
+`RUB`, `percent`, `percent_per_year`, `years`, `count`, `ISO date`
+(а также `ISO datetime`, `boolean`, `string`, `JSON`).
+
+- Генерируется кодом и записывается при каждом sync сразу после
+  `WRITING`-маркера (в рамках версии definitions статичны, пишутся поверх).
+- Семантика пустых значений: пустая ячейка значения — осознанный NULL из
+  canonical-модели, причина лежит в соседней колонке `*_reason` (см. ниже).
+
+## PORTFOLIO — колонки (schema_version = 3)
 
 | Колонка | Единицы / формат | Смысл |
 |---|---|---|
@@ -62,6 +90,41 @@
 | `modified_duration` | годы | Модифицированная дюрация; пусто — см. `duration_reason` |
 | `duration_reason` | строка или пусто | Причина пустых `duration`/`modified_duration` |
 | `liquidity_loss_pct` | % (0–100) | Оценка потерь при выходе из позиции по рынку (взвешенная по позиции); имя унаследовано, в БД колонка называется `liquidity_loss_ratio`, но хранит проценты |
+
+## CANDIDATES — колонки (schema_version = 3)
+
+Кандидаты buy-выборки канонического скринера rebalance-report:
+`screener.fixed[]` и `screener.floater[]` идут в один набор на одном листе,
+тип различается `candidate_type`. Экспортер не делает дополнительных
+финансовых расчётов — все значения переносятся из канонического отчёта.
+Максимум строк определяется canonical screener limit
+(`candidate_meta.filters`); перед записью лист очищается полностью, поэтому
+shrink не оставляет хвостов предыдущего снапшота.
+
+| Колонка | Единицы / формат | Смысл |
+|---|---|---|
+| `candidate_type` | `FIX` / `FLOAT` | Группа кандидата (фикс или флоатер) |
+| `rank` | целое, с 1 | Ранг внутри `candidate_type`; порядок сохраняет ranking канонического скринера |
+| `isin` | строка | Идентификатор выпуска |
+| `name` | строка | Название бумаги |
+| `ticker` | строка | Тикер |
+| `issuer` | строка | Эмитент |
+| `price_rub` | рубли за бумагу | Свежая рыночная цена из buy-выборки (018: требуется реальная свежая `market_price`, fallback на nominal убран) |
+| `ytm_pct` | % годовых или пусто | Доходность к погашению; пусто — см. `ytm_reason` |
+| `ytm_reason` | строка или пусто | Причина пустого `ytm_pct` (например `floating_coupon`); пусто, если YTM рассчитана |
+| `coupon_pct` | % годовых или пусто | Ставка купона |
+| `coupon_frequency` | раз в год | Частота купонов |
+| `maturity_date` | ISO-дата | Погашение |
+| `offer_date` | ISO-дата или пусто | Оферта |
+| `amortization_flag` | TRUE/FALSE | Есть амортизация номинала |
+| `risk_level` | целое | Уровень риска (Tinkoff) |
+| `list_level` | целое | Уровень листинга MOEX |
+| `ku` | TRUE/FALSE | Бумага доступна только квалифицированным инвесторам |
+| `issuer_pct_current` | % (доля × 100) | Текущая доля эмитента в портфеле **до** гипотетической покупки (сам кандидат в ней не учтён) |
+| `held_badge` | строка или пусто | Непустой, если кандидат уже держится в портфеле (контекст `include_held=True`); формат `held (N%)` |
+
+Кандидаты — не портфель: у них нет qty/value/rating/duration/liquidity
+(покрытие вне портфеля неполное, этих полей нет в каноническом скринере).
 
 ## Семантика пустых значений и причин NULL
 
@@ -127,6 +190,13 @@
   `market_price` каталога. Округлённый брокерский `current_value` может давать
   расхождения копеек с `value_rub / quantity` — они не являются ошибкой.
 
+## Ограничение свежести рыночных цен
+
+`market_updated_at` и freshness-гейт считают свежесть рыночной цены по
+timestamp записи в БД (`market_price_updated_at`): timestamp сделки/источника
+котировки не хранится. «Свежая цена» означает «недавно записана в БД», а не
+«недавно торговалась».
+
 ## История версий
 
 - **1** — первичный формат (позиции + CONTROL-гейт).
@@ -135,3 +205,12 @@
     (после `modified_duration`): причины осознанных NULL рядом со значениями;
   - добавлены `valuation_source` (после `value_rub`) и `valuation_warning`
     (после `valuation_source`): происхождение canonical valuation.
+- **3** — кандидатный контекст и самодокументация:
+  - добавлен лист `SCHEMA` (все поля CONTROL/PORTFOLIO/CANDIDATES с единицами,
+    генерируется кодом рядом с headers);
+  - добавлен лист `CANDIDATES` (кандидаты buy-выборки канонического скринера
+    из программного API 019, FIX+FLOAT одним набором, rank с 1 внутри типа);
+  - в `CONTROL` добавлены `candidates_count`, `candidate_meta`,
+    `contract_sheet`, `consumer_rule`;
+  - атомарный протокол записи расширен на обе таблицы данных:
+    WRITING → SCHEMA → PORTFOLIO → CANDIDATES → verify обеих → READY.
