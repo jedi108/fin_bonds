@@ -2588,6 +2588,90 @@ class PortfolioStorage:
         """)
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_chatgpt_portfolio_rows(self) -> List[Dict[str, Any]]:
+        """Активный портфель для P0 Google Sheets -> ChatGPT.
+
+        Одна строка на ISIN. Переиспользует те же поля, что rebalance-report,
+        и добавляет последний кредитный рейтинг, дюрацию и агрегированную
+        потерю ликвидности. Финансовые расчёты остаются в fin_bonds.
+        """
+        cursor = self._cursor()
+        cursor.execute(f"""
+            WITH latest_ratings AS (
+                SELECT DISTINCT ON (isin)
+                       isin, rating_code
+                FROM rating_history
+                WHERE rating_code IS NOT NULL
+                ORDER BY isin, rating_date DESC, id DESC
+            ),
+            aggregated AS (
+                SELECT
+                    v.isin,
+                    MAX(v.ticker) AS pos_ticker,
+                    MAX(v.name) AS pos_name,
+                    SUM(v.quantity) AS quantity,
+                    SUM(v.position_value_rub) AS value_rub,
+                    SUM(v.current_price * v.quantity) AS price_x_qty,
+                    CASE
+                        WHEN SUM(CASE WHEN v.liquidity_loss_ratio IS NOT NULL
+                                      THEN v.position_value_rub ELSE 0 END) > 0
+                        THEN
+                            SUM(CASE WHEN v.liquidity_loss_ratio IS NOT NULL
+                                     THEN v.position_value_rub * v.liquidity_loss_ratio
+                                     ELSE 0 END)
+                            / NULLIF(SUM(CASE WHEN v.liquidity_loss_ratio IS NOT NULL
+                                              THEN v.position_value_rub ELSE 0 END), 0)
+                        ELSE NULL
+                    END AS liquidity_loss_ratio
+                FROM v_portfolio_positions_valuation v
+                WHERE v.position_status = 'active'
+                GROUP BY v.isin
+            )
+            SELECT
+                a.isin,
+                COALESCE(bc.ticker, a.pos_ticker) AS ticker,
+                COALESCE(bc.name, a.pos_name) AS name,
+                bc.nominal,
+                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric)
+                    AS coupon_rate_percent,
+                bc.coupon_quantity_per_year,
+                bc.maturity_date,
+                bc.offer_date,
+                bc.risk_level,
+                bc.list_level,
+                bc.amortization_flag,
+                bc.floating_coupon_flag,
+                bc.perpetual_flag,
+                bc.is_for_qualified_investors AS ku,
+                bc.market_price,
+                bc.ytm,
+                bc.ytm_null_reason,
+                bc.ytm_updated_at,
+                bc.duration_macaulay,
+                bc.duration_modified,
+                bc.duration_null_reason,
+                bc.duration_updated_at,
+                lr.rating_code AS credit_rating,
+                co.id AS company_id,
+                co.name AS issuer,
+                co.entity_type,
+                a.quantity,
+                a.value_rub,
+                a.liquidity_loss_ratio,
+                COALESCE(
+                    CASE WHEN a.quantity > 0 AND a.price_x_qty IS NOT NULL
+                         THEN ROUND(a.price_x_qty / a.quantity, 4) END,
+                    bc.market_price
+                ) AS price
+            FROM aggregated a
+            LEFT JOIN bonds_catalog bc ON bc.isin = a.isin
+            LEFT JOIN companies co ON co.id = bc.company_id
+            LEFT JOIN latest_ratings lr ON lr.isin = a.isin
+            ${_LATEST_FLOATER_RATE_JOIN}
+            ORDER BY a.value_rub DESC NULLS LAST, a.isin
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_scenario_universe_rows(self, isins: List[str]) -> List[Dict[str, Any]]:
         """Строки каталога для ISIN, НЕ лежащих в портфеле — покупки сценария (005.2).
 
