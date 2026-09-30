@@ -5,7 +5,7 @@
 """
 
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import io
 import sys
@@ -13,6 +13,10 @@ import pytest
 
 from src.data_models import Bond, PortfolioPosition
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
+
+# Свежая отметка цены для buy-фикстур: с 018 buy-выборка требует
+# market_price_updated_at не старше 24 часов.
+_NOW = datetime.now(timezone.utc)
 
 
 def test_calculate_ytm_buy_mode_stored(db):
@@ -30,6 +34,7 @@ def test_calculate_ytm_buy_mode_stored(db):
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     bond_flt = Bond(
         isin='RU000TESTBY2',
@@ -44,6 +49,7 @@ def test_calculate_ytm_buy_mode_stored(db):
         coupon_rate_percent=Decimal('15.0'),
         floating_coupon_flag=True,
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond_fix, bond_flt])
 
@@ -150,6 +156,7 @@ def test_calculate_ytm_min_ytm_filter_does_not_coerce_null(db):
         coupon_quantity_per_year=1,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     # 2. 20% YTM (цена 916 при купоне 10%)
     b_20 = Bond(
@@ -164,6 +171,7 @@ def test_calculate_ytm_min_ytm_filter_does_not_coerce_null(db):
         coupon_quantity_per_year=1,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('916.66'),
+        market_price_updated_at=_NOW,
     )
     # 3. Floater (intentional NULL)
     b_flt = Bond(
@@ -179,6 +187,7 @@ def test_calculate_ytm_min_ytm_filter_does_not_coerce_null(db):
         coupon_rate_percent=Decimal('15.0'),
         floating_coupon_flag=True,
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([b_10, b_20, b_flt])
 
@@ -242,6 +251,7 @@ def test_calculate_ytm_unbackfilled_row_fallback(db):
         coupon_quantity_per_year=1,
         coupon_rate_percent=Decimal('12.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond])
 
@@ -373,6 +383,7 @@ def test_calculate_ytm_max_listlevel_filters_third_tier(db):
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     b_third = Bond(
         isin='RU000TESTLL3',
@@ -387,6 +398,7 @@ def test_calculate_ytm_max_listlevel_filters_third_tier(db):
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([b_top, b_third])
     db.update_bonds_derived_metrics(['RU000TESTLL1', 'RU000TESTLL3'])
@@ -433,6 +445,7 @@ def _add_bond_with_stored_ytm(db, isin: str, ticker: str, ytm_percent: Decimal,
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond])
     with db.conn:
@@ -498,6 +511,7 @@ def test_calculate_ytm_max_ytm_filters_unbackfilled_fallback(db):
         coupon_quantity_per_year=1,
         coupon_rate_percent=Decimal('40.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond])
 
@@ -522,6 +536,7 @@ def test_calculate_ytm_buy_mode_include_held(db):
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('20.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond])
     pos = PortfolioPosition(

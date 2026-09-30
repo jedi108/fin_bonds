@@ -431,7 +431,7 @@ class RebalanceReportUseCase(UseCase):
 
         issuer = row.get('issuer') or row.get('name') or row.get('isin')
         # price: у позиций портфеля — из выборки; у кандидатов скринера —
-        # current_price движка (COALESCE(market_price, nominal)).
+        # market_price каталога (018: buy-выборка без fallback на nominal).
         price_raw = row.get('price')
         if price_raw is None:
             price_raw = row.get('current_price')
@@ -539,6 +539,8 @@ class RebalanceReportUseCase(UseCase):
         порогами риска/листинга/YTM и include_held=True; все продуктовые
         фильтры применяются здесь по этапам — каждый отсчёт честный и видимый
         в excluded. Имена/эмитенты/флаги приходят из каталога (анти-P-D).
+        Свежесть цены кандидата гарантирована buy-выборкой хранилища (018):
+        без реальной market_price не старше 24 часов строка не доходит сюда.
         """
         candidates = self.db.get_bonds_yield_table(
             mode='buy',

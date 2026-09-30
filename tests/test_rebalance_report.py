@@ -592,6 +592,83 @@ class TestScreenerFilters:
 
 
 # ---------------------------------------------------------------------------
+# 018: buy-кандидат — только реальная свежая market price
+# ---------------------------------------------------------------------------
+
+class TestBuyPriceGuard:
+    """018: canonical screener не отдаёт кандидата без реальной свежей цены.
+
+    Гвард живёт в buy-выборке хранилища (get_bonds_yield_table mode='buy'):
+    market_price IS NOT NULL AND > 0 и не старше 24 часов; nominal цену
+    кандидата больше не подменяет."""
+
+    def _seed_candidate(self, db, isin: str, **overrides):
+        corp = _insert_company(db, 'Прайс Гард Корп')
+        defaults = dict(
+            company_id=corp,
+            coupon_quantity_per_year=4,
+            coupon_rate_percent=Decimal('15.0'),
+            ytm=Decimal('15'), ytm_updated_at=_NOW,
+        )
+        defaults.update(overrides)
+        _insert_bond(db, isin=isin, ticker=isin[-5:], name=f'Прайс Гард {isin[-5:]}',
+                     **defaults)
+        db.conn.commit()
+
+    def test_fresh_positive_market_price_passes(self, db):
+        self._seed_candidate(db, 'RU000A0PRICE1', market_price=Decimal('950.0'))
+        report = _build_report(db)
+        screener = report['screener']
+        assert [r['isin'] for r in screener['fixed']] == ['RU000A0PRICE1']
+        # цена кандидата — реальная market_price, арифметика воронки сходится
+        assert screener['fixed'][0]['price'] == 950.0
+        assert screener['candidates_total'] == (
+            sum(screener['excluded'].values())
+            + screener['fixed_matched'] + screener['floater_matched']
+        )
+
+    def test_price_fresh_within_24h_window_passes(self, db):
+        self._seed_candidate(db, 'RU000A0PRICE2', market_price=Decimal('980.0'),
+                             market_price_updated_at=_NOW - timedelta(hours=2))
+        report = _build_report(db)
+        assert [r['isin'] for r in report['screener']['fixed']] == ['RU000A0PRICE2']
+
+    def test_null_market_price_excluded(self, db):
+        self._seed_candidate(db, 'RU000A0PRICEN', market_price=None)
+        report = _build_report(db)
+        assert report['screener']['candidates_total'] == 0
+        assert report['screener']['fixed'] == []
+        assert report['screener']['floater'] == []
+
+    def test_zero_and_negative_market_price_excluded(self, db):
+        self._seed_candidate(db, 'RU000A0PRICEZ', market_price=Decimal('0'))
+        self._seed_candidate(db, 'RU000A0PRICEM', market_price=Decimal('-100'))
+        report = _build_report(db)
+        assert report['screener']['candidates_total'] == 0
+        assert report['screener']['fixed'] == []
+
+    def test_stale_market_price_excluded(self, db):
+        self._seed_candidate(db, 'RU000A0PRICEO', market_price=Decimal('950.0'),
+                             market_price_updated_at=_NOW - timedelta(hours=25))
+        report = _build_report(db)
+        assert report['screener']['candidates_total'] == 0
+        assert report['screener']['fixed'] == []
+
+    def test_nominal_not_used_as_candidate_price(self, db):
+        """Бумага без market_price не попадает в buy-выборку: номинал (1000)
+        не подменяет цену ни в SQL-строке, ни в JSON скринера."""
+        self._seed_candidate(db, 'RU000A0PRICEX', market_price=None)
+        rows = db.get_bonds_yield_table(
+            mode='buy', min_maturity=None, max_maturity=None, max_risk=5,
+            limit=10, include_held=True,
+        )
+        assert all(r['isin'] != 'RU000A0PRICEX' for r in rows)
+        assert all(r['current_price'] != Decimal('1000') for r in rows)
+        report = _build_report(db)
+        assert report['screener']['fixed'] == []
+
+
+# ---------------------------------------------------------------------------
 # Концентрации и портфельные кейсы (дистресс-хвост)
 # ---------------------------------------------------------------------------
 

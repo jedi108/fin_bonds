@@ -2362,6 +2362,12 @@ class PortfolioStorage:
         (list_level > max_listlevel, NULL проходит) и аномальные доходности
         (ytm > max_ytm, % годовых — маркер ВДО/дистресса; NULL проходит).
 
+        018: buy-кандидат обязан иметь реальную свежую market_price
+        (IS NOT NULL, > 0, market_price_updated_at не старше 24 часов) —
+        nominal цену не подменяет, current_price и real_yield_percent
+        считаются от market_price. mode='portfolio' не изменился.
+        market_price_updated_at — время записи цены в БД (ограничение из 009).
+
         include_held (только mode='buy'): False — позиции портфеля исключены
         (прежнее поведение); True — докупаемые позиции остаются в выдаче
         с бейджем held (доля N%) (задача 002.2).
@@ -2413,12 +2419,10 @@ class PortfolioStorage:
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,
-                COALESCE(bc.market_price, bc.nominal) as current_price,
-                CASE
-                    WHEN COALESCE(bc.market_price, bc.nominal) IS NOT NULL AND COALESCE(bc.market_price, bc.nominal) > 0
-                    THEN (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / COALESCE(bc.market_price, bc.nominal) * 100
-                    ELSE NULL
-                END as real_yield_percent,
+                -- 018: цена кандидата — только реальная свежая market_price
+                -- (guard в WHERE ниже), nominal подменой не служит.
+                bc.market_price as current_price,
+                (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100 as real_yield_percent,
                 bc.market_price,
                 bc.ytm,
                 bc.ytm_null_reason,
@@ -2450,6 +2454,12 @@ class PortfolioStorage:
                 AND bc.perpetual_flag IS NOT TRUE{maturity_filter_sql}
                 AND bc.risk_level <= %s
                 AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL{not_held_filter}
+                -- 018: кандидат на покупку — только реальная свежая рыночная
+                -- цена (аналог условий analyze-buy-candidates); окно 24 часа —
+                -- время записи цены в БД, известное ограничение задачи 009.
+                AND bc.market_price IS NOT NULL
+                AND bc.market_price > 0
+                AND bc.market_price_updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
                 AND (bc.list_level IS NULL OR bc.list_level <= %s)
                 AND (bc.ytm IS NULL OR bc.ytm <= %s)
         """

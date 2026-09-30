@@ -3,12 +3,16 @@
 """
 
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import pytest
 
 from src.data_models import Bond
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
+
+# Свежая отметка цены для buy-фикстур: с 018 buy-выборка требует
+# market_price_updated_at не старше 24 часов.
+_NOW = datetime.now(timezone.utc)
 
 
 def test_migration_008_columns_and_dto(db):
@@ -190,6 +194,7 @@ def _add_par_bond(db, isin: str, ticker: str):
         coupon_quantity_per_year=2,
         coupon_rate_percent=Decimal('10.0'),
         market_price=Decimal('1000'),
+        market_price_updated_at=_NOW,
     )
     db.add_bonds_to_catalog([bond])
 
