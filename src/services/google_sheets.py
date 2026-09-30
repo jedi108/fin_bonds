@@ -8,6 +8,11 @@ from typing import Any, Iterable, Mapping, Sequence
 import gspread
 from google.oauth2.service_account import Credentials
 
+# Сабмодуль не импортируется сам через `google.auth.transport` — без явного
+# импорта любое обращение к google.auth.transport.requests падает с
+# AttributeError (в т.ч. в ad-hoc скриптах проверки ключа, запускаемых через stdin).
+import google.auth.transport.requests  # noqa: F401
+
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 

@@ -1,6 +1,7 @@
 import logging
 import requests
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from typing import Dict, Optional
 
@@ -14,7 +15,8 @@ class TelegramNotifier:
         Инициализирует уведомитель.
         Токен и ID чата загружаются из переменных окружения.
         """
-        load_dotenv()
+        # Явный путь: find_dotenv() падает с AssertionError при запуске через stdin.
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
         self.enabled = config.get('enabled', False)
         self.bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
         self.chat_id = os.environ.get('TELEGRAM_CHAT_ID')

@@ -1,6 +1,7 @@
 import logging
 import os
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional, Dict, Type, Any, List
 from dotenv import load_dotenv
 from functools import lru_cache
@@ -57,7 +58,9 @@ logger = logging.getLogger(__name__)
 class UseCaseFactory:
     """Управляет жизненным циклом общих зависимостей для UseCases."""
     def __init__(self):
-        load_dotenv()
+        # Явный путь: find_dotenv() у python-dotenv падает с AssertionError,
+        # если скрипт запущен через stdin/-c (у __main__ нет __file__).
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
         self.config = load_config()
         self.tinkoff_token = self._get_tinkoff_token()
         self._db_connection: Optional[PortfolioStorage] = None

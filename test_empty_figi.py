@@ -5,6 +5,7 @@
 
 import os
 import logging
+from pathlib import Path
 from dotenv import load_dotenv
 
 from src.tbank.api_client import TbankApiClient
@@ -19,7 +20,7 @@ def test_empty_figi():
     Проверяет обработку пустого FIGI в методе get_instrument_by_figi.
     """
     # Загрузка токена из переменных окружения
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parent / ".env")
     token = os.getenv('INVEST_TOKEN')
     if not token:
         logger.error("Токен API (INVEST_TOKEN) не найден в .env файле")
