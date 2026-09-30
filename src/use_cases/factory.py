@@ -50,6 +50,7 @@ from src.use_cases.update_ratings import UpdateRatingsUseCase
 from src.use_cases.update_floaters import UpdateFloatersUseCase
 from src.use_cases.calculate_duration import CalculateDurationUseCase
 from src.use_cases.rebalance_report import RebalanceReportUseCase
+from src.use_cases.sync_chatgpt_portfolio import SyncChatgptPortfolioUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,7 @@ class UseCaseFactory:
             'update-floaters': UpdateFloatersUseCase,
             'calculate-duration': CalculateDurationUseCase,
             'rebalance-report': RebalanceReportUseCase,
+            'sync-chatgpt-portfolio': SyncChatgptPortfolioUseCase,
         }
 
     def get_all_use_cases(self) -> List[Type[UseCase]]:
