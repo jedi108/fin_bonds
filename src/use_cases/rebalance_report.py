@@ -20,6 +20,11 @@ CalculateYtmUseCase._enrich_bond_with_ytm через import (не subprocess и 
   (005.4) хранится в тех же процентах — смешение источников безопасно.
 - P-C/P-G/анти-P2 (002): фильтры частоты, исключение суверенных,
   бейдж held (доля N%) для уже держимых бумаг.
+- 023: частота купонов — диапазоном --freq-min/--freq-max («от квартальных
+  до ежемесячных» = 4..12); кредитный рейтинг кандидата — настоящий
+  (latest rating_history по ISIN, normalize_rating_code/rating_code_to_score),
+  строгий порог --min-credit-rating: без рейтинга и ниже порога — мимо.
+  TBank risk_level рейтингом не подменяется (остаётся отдельным фильтром).
 
 Сценарный режим --scenario (005.2) — перенос scenario_summary.sql
 (артефакт A2 из 002.4) и simulate_swap.sql (001) в Python: trades
@@ -44,6 +49,7 @@ from src.use_cases.bond_filters import is_sovereign as _is_sovereign_rule
 from src.use_cases.bond_filters import parse_freq_list
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
 from src.use_cases.check_db import classify_freshness
+from src.utils import rating_code_to_score
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -70,11 +76,13 @@ _SCREENER_MAX_LISTLEVEL = 3
 _SCREENER_POOL_LIMIT = 10000
 
 # Ключи строки бумаги в ответе (portfolio.positions и screener.fixed/floater).
+# 023: credit_rating — настоящий рейтинг кандидата (latest rating_history),
+# risk_level остаётся отдельным полем/фильтром.
 BOND_ROW_KEYS = (
     'isin', 'name', 'ticker', 'qty', 'price', 'value',
     'ytm_pct', 'ytm_reason', 'coupon_pct', 'freq',
     'coupon_kind', 'risk_level', 'list_level', 'maturity', 'offer',
-    'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge',
+    'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge', 'credit_rating',
 )
 
 # Заголовки CSV целевого портфеля (UTF-8 BOM, русские заголовки, строка ИТОГО).
@@ -195,11 +203,16 @@ class RebalanceReportUseCase(UseCase):
     потока, лимиты эмитента по сумме ног, 005.2).
     """
 
-    def __init__(self, db: PortfolioStorage):
+    def __init__(self, db: PortfolioStorage, rating_scale: Optional[Dict[str, int]] = None):
         self.db = db
         # Единый расчётный движок YTM (требование 005.1: единицы YTM — только
         # из одного источника, расчётный движок CLI-уровня).
         self._ytm_engine = CalculateYtmUseCase(db)
+        # Шкала рейтингов из конфига (023): порог --min-credit-rating и
+        # сравнение идут через существующий rating_code_to_score — второй
+        # нормализации рейтингов нет. Пустая шкала валидна, пока порог
+        # не задан (проверяется в _validate_args).
+        self.rating_scale = rating_scale or {}
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
@@ -210,12 +223,19 @@ class RebalanceReportUseCase(UseCase):
         parser.add_argument(
             '--freq-max', type=int, default=None,
             help='Максимальная частота купонов в год (напр. 4 = не чаще '
-                 'квартальных; P-C). Взаимоисключимо с --freq-in.'
+                 'квартальных; P-C). С --freq-min задаёт диапазон; '
+                 'взаимоисключимо с --freq-in.'
+        )
+        parser.add_argument(
+            '--freq-min', type=int, default=None,
+            help='Минимальная частота купонов в год (023): «от квартальных '
+                 'до ежемесячных» = --freq-min 4 --freq-max 12. NULL/0-частота '
+                 'строгий диапазон не проходит; взаимоисключимо с --freq-in.'
         )
         parser.add_argument(
             '--freq-in', type=_parse_freq_in, default=None,
             help='Только указанные частоты купонов через запятую (напр. 2,4; P-C). '
-                 'Взаимоисключимо с --freq-max.'
+                 'Взаимоисключимо с --freq-min/--freq-max.'
         )
         parser.add_argument(
             '--exclude-sovereign', action='store_true',
@@ -242,6 +262,14 @@ class RebalanceReportUseCase(UseCase):
         parser.add_argument(
             '--max-risk', type=int, default=1,
             help='Максимальный уровень риска Т-Банка кандидатов (1-5). Default: 1.'
+        )
+        parser.add_argument(
+            '--min-credit-rating', type=str, default=None,
+            help='Минимальный кредитный рейтинг кандидата (023), напр. AA-: '
+                 'строгий порог по latest rating_history — без рейтинга или '
+                 'ниже порога кандидат исключается. Код нормализуется '
+                 'существующим rating_code_to_score (AAA(RU)/ruAAA = AAA); '
+                 'risk_level рейтингом не подменяется.'
         )
         parser.add_argument(
             '--max-listlevel', type=int, choices=[1, 2, 3], default=2,
@@ -275,8 +303,15 @@ class RebalanceReportUseCase(UseCase):
 
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'RebalanceReportUseCase':
-        """Создает use case с хранилищем из фабрики (DSN — из .env, не из CLI)."""
-        return cls(db=factory.get_db_connection())
+        """Создает use case с хранилищем из фабрики (DSN — из .env, не из CLI).
+
+        Шкала рейтингов берётся из конфига (023): порог --min-credit-rating
+        переводится в балл существующим rating_code_to_score.
+        """
+        return cls(
+            db=factory.get_db_connection(),
+            rating_scale=factory.config.get('rating_scale', {}),
+        )
 
     @classmethod
     def default_args(cls) -> argparse.Namespace:
@@ -312,8 +347,26 @@ class RebalanceReportUseCase(UseCase):
         if args.freq_max is not None and args.freq_in is not None:
             raise ValueError("--freq-max и --freq-in взаимоисключающие: "
                              "выберите один способ задания частот")
+        if args.freq_min is not None and args.freq_in is not None:
+            raise ValueError("--freq-min и --freq-in взаимоисключающие: "
+                             "выберите один способ задания частот")
         if args.freq_max is not None and args.freq_max < 1:
             raise ValueError("--freq-max должен быть целым >= 1")
+        if args.freq_min is not None and args.freq_min < 1:
+            raise ValueError("--freq-min должен быть целым >= 1")
+        if (args.freq_min is not None and args.freq_max is not None
+                and args.freq_min > args.freq_max):
+            raise ValueError("--freq-min не должен превышать --freq-max")
+        if args.min_credit_rating is not None:
+            # 023: граница Python/LLM — Python получает конкретный порог и
+            # переводит его в балл существующей шкалой; «высокий рейтинг»
+            # сюда не доходит. Неизвестный код — явная ошибка CLI.
+            threshold = rating_code_to_score(args.min_credit_rating, self.rating_scale)
+            if threshold is None:
+                raise ValueError(
+                    f"--min-credit-rating: код {args.min_credit_rating!r} не входит "
+                    "в шкалу rating_scale (config.yaml)"
+                )
         if args.redemptions_months < 1:
             raise ValueError("--redemptions-months должен быть >= 1")
         if args.screener_limit < 1:
@@ -507,6 +560,7 @@ class RebalanceReportUseCase(UseCase):
             'freq': _to_int(row.get('coupon_quantity_per_year')),
             'coupon_kind': 'float' if row.get('floating_coupon_flag') else 'fix',
             'risk_level': _to_int(row.get('risk_level')),
+            'credit_rating': row.get('credit_rating') or None,
             'list_level': _to_int(row.get('list_level')),
             'maturity': _to_iso_day(row.get('maturity_date')),
             'offer': _to_iso_day(row.get('offer_date')),
@@ -615,9 +669,16 @@ class RebalanceReportUseCase(UseCase):
 
         excluded: Dict[str, int] = {
             'held': 0, 'ku': 0, 'sovereign': 0, 'freq': 0, 'risk': 0, 'listlevel': 0,
+            'rating_missing': 0, 'rating_below_min': 0,
             'fixed_ytm_missing': 0, 'fixed_max_ytm': 0,
             'floater_coupon_missing': 0, 'floater_max_ytm': 0,
         }
+        # 023: порог рейтинга один раз переводится в балл существующей шкалой
+        # (валидация кода — в _validate_args); сравнение строгое, >= порога.
+        min_rating_score = (
+            rating_code_to_score(args.min_credit_rating, self.rating_scale)
+            if args.min_credit_rating is not None else None
+        )
         survivors: List[Dict[str, Any]] = []
         for row in candidates:
             if row.get('held_share_pct') is not None and not args.include_held:
@@ -640,6 +701,17 @@ class RebalanceReportUseCase(UseCase):
             if list_level is not None and list_level > args.max_listlevel:
                 excluded['listlevel'] += 1
                 continue
+            # 023: строгий фильтр рейтинга — отдельная ветка от risk_level:
+            # нет строки в rating_history (нет и балла) — rating_missing;
+            # балл ниже порога — rating_below_min. risk_level подменой не служит.
+            if min_rating_score is not None:
+                rating_score = _to_int(row.get('rating_score'))
+                if rating_score is None:
+                    excluded['rating_missing'] += 1
+                    continue
+                if rating_score < min_rating_score:
+                    excluded['rating_below_min'] += 1
+                    continue
             survivors.append(row)
 
         fixes, floaters = [], []
@@ -665,12 +737,14 @@ class RebalanceReportUseCase(UseCase):
 
         return {
             'filters': {
+                'freq_min': args.freq_min,
                 'freq_max': args.freq_max,
                 'freq_in': args.freq_in,
                 'exclude_sovereign': bool(args.exclude_sovereign),
                 'include_held': bool(args.include_held),
                 'include_ku': bool(args.include_ku),
                 'max_risk': args.max_risk,
+                'min_credit_rating': args.min_credit_rating,
                 'max_listlevel': args.max_listlevel,
                 'max_ytm_pct': args.max_ytm,
                 'min_maturity': args.min_maturity,
@@ -699,11 +773,13 @@ class RebalanceReportUseCase(UseCase):
     @staticmethod
     def _freq_ok(row: Dict[str, Any], args: argparse.Namespace) -> bool:
         """Фильтр частоты купонов (P-C) — общее правило тулкита
-        (bond_filters, 005.3): NULL-частота фильтру не проходит."""
+        (bond_filters, 005.3/023): NULL-частота фильтру не проходит;
+        freq_min/freq_max — диапазон, freq_in — точный список."""
         return _freq_ok_rule(
             _to_int(row.get('coupon_quantity_per_year')),
             freq_max=args.freq_max,
             freq_in=args.freq_in,
+            freq_min=args.freq_min,
         )
 
     def _finish_fixes(

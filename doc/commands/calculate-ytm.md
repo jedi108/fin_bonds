@@ -28,8 +28,9 @@ python3 main.py calculate-ytm [опции]
 | `--monthly-coupons` | flag | `false` | Только облигации с ежемесячными купонами (12 раз в год) |
 | `--fixed-coupon` | flag | `false` | Только облигации с фиксированным купоном |
 | `--floating-coupon` | flag | `false` | Только флоатеры |
-| `--coupon-freq-max` | integer | `None` | Максимальная частота купонов в год: `4` = квартальные и реже (005.3/P-C). Взаимоисключимо с `--coupon-freq-in` |
-| `--coupon-freq-in` | string | `None` | Только указанные частоты через запятую, например `2,4` (005.3/P-C). Взаимоисключимо с `--coupon-freq-max` |
+| `--coupon-freq-max` | integer | `None` | Максимальная частота купонов в год: `4` = квартальные и реже (005.3/P-C). С `--coupon-freq-min` задаёт диапазон; взаимоисключимо с `--coupon-freq-in` |
+| `--coupon-freq-min` | integer | `None` | Минимальная частота купонов в год (023): «от квартальных до ежемесячных» = `--coupon-freq-min 4 --coupon-freq-max 12`. NULL/0-частота строгий диапазон не проходит; взаимоисключимо с `--coupon-freq-in` |
+| `--coupon-freq-in` | string | `None` | Только указанные частоты через запятую, например `2,4` (005.3/P-C). Взаимоисключимо с `--coupon-freq-min/--coupon-freq-max` |
 | `--exclude-sovereign` | flag | `false` | Исключить суверенных эмитентов: ОФЗ и евро-РФ (`companies.entity_type='sovereign'`, фолбэк — имя «ОФЗ…») (005.3/P-G) |
 | `--include-held` | flag | `false` | Режим buy: показывать и бумаги, уже лежащие в портфеле (докупки), с бейджем held (доля N%) |
 
@@ -44,11 +45,14 @@ python3 main.py calculate-ytm [опции]
 Фильтрация по минимальной годовой доходности к погашению в процентах.
 При указании порога отсекаются бумаги с меньшей YTM, а также бумаги с намеренным `NULL` (порог не превращает `NULL` в 0).
 
-#### `--coupon-freq-max` / `--coupon-freq-in` (005.3/P-C)
-Фильтр частоты купонов, конвенция общая с `rebalance-report --freq-max/--freq-in`:
+#### `--coupon-freq-min` / `--coupon-freq-max` / `--coupon-freq-in` (005.3/P-C, 023)
+Фильтр частоты купонов, конвенция общая с `rebalance-report --freq-min/--freq-max/--freq-in`:
 - `--coupon-freq-max 4` — квартальные выплаты и реже (кейс «квартальные максимум»);
+- `--coupon-freq-min 4 --coupon-freq-max 12` — диапазон «от квартальных до ежемесячных»;
 - `--coupon-freq-in 2,4` — только указанные частоты.
-Бумаги с неизвестной частотой (`NULL`) при активном фильтре не проходят. Флаги взаимоисключающие.
+Бумаги с неизвестной частотой (`NULL`) при активном фильтре не проходят;
+строгий диапазон (с `--coupon-freq-min`) отсекает и нулевую частоту.
+`--coupon-freq-in` взаимоисключим с диапазоном.
 
 #### `--exclude-sovereign` (005.3/P-G)
 Исключает суверенных эмитентов: ОФЗ и евробонды РФ. Определяются по связке с `companies` (`entity_type='sovereign'`), с фолбэком на имя выпуска («ОФЗ…») на случай незаполненной связки.
@@ -71,7 +75,7 @@ cash канонического снапшота; здесь собственн�
   "meta": { "generated_at": "...", "mode": "buy" },
   "filters": { "mode": "buy", "min_ytm_pct": null, "max_risk": 3,
                "max_listlevel": 2, "max_ytm_pct": 35.0,
-               "coupon_freq_max": 4, "coupon_freq_in": null,
+               "coupon_freq_min": null, "coupon_freq_max": 4, "coupon_freq_in": null,
                "exclude_sovereign": false, "limit": 50, "...": "..." },
   "excluded": { "sovereign": 0, "freq": 3, "min_ytm": 0, "max_ytm": 1,
                 "limit_truncated": 12 },

@@ -4,7 +4,8 @@
 Покрывают:
 - `--format json`: канонический JSON (schema_version=1, согласован с
   rebalance-report), stdout — чистый JSON, логи — только в stderr (P-F);
-- `--coupon-freq-max` / `--coupon-freq-in` (P-C): квартальные максимум,
+- `--coupon-freq-min` / `--coupon-freq-max` / `--coupon-freq-in` (P-C, 023):
+  диапазон «от квартальных до ежемесячных», квартальные максимум,
   список частот, NULL-частота не проходит, --limit считается по итоговой
   выдаче (расширенный пул);
 - `--exclude-sovereign` (P-G): ОФЗ по связке companies.entity_type='sovereign',
@@ -148,6 +149,7 @@ class TestParser:
     def test_defaults_keep_text_mode_and_no_filters(self):
         args = _parse(['--mode', 'buy'])
         assert args.format == 'text'
+        assert args.coupon_freq_min is None
         assert args.coupon_freq_max is None
         assert args.coupon_freq_in is None
         assert args.exclude_sovereign is False
@@ -198,8 +200,8 @@ def test_json_contract_buy_mode(db, capsys):
     assert set(data['filters']) == {
         'mode', 'min_ytm_pct', 'max_risk', 'max_listlevel', 'max_ytm_pct',
         'min_maturity', 'max_maturity', 'no_amortization', 'monthly_coupons',
-        'fixed_coupon', 'floating_coupon', 'coupon_freq_max', 'coupon_freq_in',
-        'exclude_sovereign', 'include_held', 'limit',
+        'fixed_coupon', 'floating_coupon', 'coupon_freq_max', 'coupon_freq_min',
+        'coupon_freq_in', 'exclude_sovereign', 'include_held', 'limit',
     }
     assert data['filters']['coupon_freq_max'] is None
     assert data['excluded'] == {key: 0 for key in _EXCLUDED_KEYS}
@@ -282,6 +284,52 @@ def test_coupon_freq_null_frequency_does_not_pass(db):
     assert 'RU000A0FRQNN' not in [
         b['isin'] for b in use_case._get_bonds_for_buying(args_freq)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Диапазон частоты купонов (--coupon-freq-min/--coupon-freq-max, 023/P-C)
+# ---------------------------------------------------------------------------
+
+def test_coupon_freq_range_4_to_12(db):
+    """023: «от квартальных до ежемесячных» = 4 <= freq <= 12, не freq <= 4."""
+    _seed_three_freqs(db)
+    use_case = CalculateYtmUseCase(db=db)
+    args = _parse(['--mode', 'buy', '--coupon-freq-min', '4',
+                   '--coupon-freq-max', '12'])
+    isins = {b['isin'] for b in use_case._get_bonds_for_buying(args)}
+    assert isins == {'RU000A0FRQ04', 'RU000A0FRQ12'}
+
+
+def test_coupon_freq_min_without_max(db):
+    _seed_three_freqs(db)
+    use_case = CalculateYtmUseCase(db=db)
+    args = _parse(['--mode', 'buy', '--coupon-freq-min', '4'])
+    isins = {b['isin'] for b in use_case._get_bonds_for_buying(args)}
+    assert isins == {'RU000A0FRQ04', 'RU000A0FRQ12'}
+
+
+def test_coupon_freq_null_frequency_does_not_pass_strict_range(db):
+    """NULL/0-частота строгий диапазон не проходит."""
+    _insert_bond(db, isin='RU000A0FRQNN', ticker='FRQNN', name='Без Частоты Тест',
+                 coupon_quantity_per_year=None)
+    use_case = CalculateYtmUseCase(db=db)
+    args = _parse(['--mode', 'buy', '--coupon-freq-min', '4',
+                   '--coupon-freq-max', '12'])
+    assert 'RU000A0FRQNN' not in [
+        b['isin'] for b in use_case._get_bonds_for_buying(args)
+    ]
+
+
+def test_coupon_freq_min_conflicts_and_bounds(db):
+    use_case = CalculateYtmUseCase.__new__(CalculateYtmUseCase)
+    with pytest.raises(ValueError):
+        use_case._validate_args(_parse([
+            '--mode', 'buy', '--coupon-freq-min', '4', '--coupon-freq-in', '2,4']))
+    with pytest.raises(ValueError):
+        use_case._validate_args(_parse(['--mode', 'buy', '--coupon-freq-min', '0']))
+    with pytest.raises(ValueError):
+        use_case._validate_args(_parse([
+            '--mode', 'buy', '--coupon-freq-min', '12', '--coupon-freq-max', '4']))
 
 
 def test_old_style_namespace_without_new_flags_still_works(db):

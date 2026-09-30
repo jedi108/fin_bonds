@@ -1,10 +1,12 @@
 """
-Переиспользуемые фильтры бумаг Python-тулкита (задачи 005.1/005.3).
+Переиспользуемые фильтры бумаг Python-тулкита (задачи 005.1/005.3, 023).
 
-Одна реализация для rebalance-report (--freq-max/--freq-in/--exclude-sovereign)
-и calculate-ytm (--coupon-freq-max/--coupon-freq-in/--exclude-sovereign), чтобы
-конвенции фильтров команд совпадали:
-- P-C: частота купонов — «максимум N/год» или «только из списка»;
+Одна реализация для rebalance-report (--freq-min/--freq-max/--freq-in/
+--exclude-sovereign) и calculate-ytm (--coupon-freq-min/--coupon-freq-max/
+--coupon-freq-in/--exclude-sovereign), чтобы конвенции фильтров команд
+совпадали:
+- P-C: частота купонов — «от N/год» и/или «максимум N/год» (диапазон)
+  или «только из списка»;
 - P-G: суверенные эмитенты — ОФЗ и евро-РФ.
 
 Фильтры применяются к строкам выборки движка calculate-ytm (dict) в Python —
@@ -50,13 +52,26 @@ def freq_ok(
     freq: Optional[int],
     freq_max: Optional[int] = None,
     freq_in: Optional[List[int]] = None,
+    freq_min: Optional[int] = None,
 ) -> bool:
     """Фильтр частоты купонов (P-C): без флагов проходит всё;
-    NULL-частота фильтру не проходит (конвенция rebalance-report 005.1)."""
-    if freq_max is None and freq_in is None:
+    NULL-частота фильтру не проходит (конвенция rebalance-report 005.1).
+
+    023: freq_min/freq_max вместе задают диапазон (напр. 4..12 — «от
+    квартальных до ежемесячных»); freq_in — список точных значений,
+    взаимоисключим с диапазоном на уровне валидации CLI. Нулевая частота
+    строгий диапазон не проходит (0 < freq_min при freq_min >= 1), при
+    старом вызове «только --freq-max» прежняя семантика сохранена
+    (0 <= freq_max проходил и проходит).
+    """
+    if freq_max is None and freq_in is None and freq_min is None:
         return True
     if freq is None:
         return False
-    if freq_max is not None:
-        return freq <= freq_max
-    return freq in freq_in
+    if freq_in is not None:
+        return freq in freq_in
+    if freq_min is not None and freq < freq_min:
+        return False
+    if freq_max is not None and freq > freq_max:
+        return False
+    return True

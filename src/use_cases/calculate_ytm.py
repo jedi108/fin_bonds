@@ -6,8 +6,9 @@ Use case для расчета и отображения YTM (доходност
   согласован с rebalance-report): stdout — чистый JSON, логи — только в
   stderr (P-F); в дефолтном режиме (без --verbose) корневой уровень
   логирования поднимается до WARNING+, INFO возвращается флагом -v.
-- `--coupon-freq-max N` / `--coupon-freq-in 2,4` — фильтр частоты купонов
-  (P-C; конвенция общая с rebalance-report, см. src/use_cases/bond_filters.py).
+- `--coupon-freq-min N` / `--coupon-freq-max N` / `--coupon-freq-in 2,4` —
+  фильтр частоты купонов, min+max задают диапазон (напр. 4..12; P-C;
+  конвенция общая с rebalance-report, см. src/use_cases/bond_filters.py).
 - `--exclude-sovereign` — исключить ОФЗ и евро-РФ (P-G, entity_type=sovereign
   с фолбэком на имя «ОФЗ…»).
 - Воронка отсечений (R9): применённые фильтры и число отсечённых бумаг по
@@ -117,7 +118,15 @@ class CalculateYtmUseCase(UseCase):
             '--coupon-freq-max', type=int, default=None,
             help='Максимальная частота купонов в год: 4 = квартальные и реже '
                  '(005.3/P-C; конвенция общая с rebalance-report --freq-max). '
-                 'Взаимоисключимо с --coupon-freq-in.'
+                 'С --coupon-freq-min задаёт диапазон; взаимоисключимо с '
+                 '--coupon-freq-in.'
+        )
+        parser.add_argument(
+            '--coupon-freq-min', type=int, default=None,
+            help='Минимальная частота купонов в год (023): «от квартальных до '
+                 'ежемесячных» = --coupon-freq-min 4 --coupon-freq-max 12. '
+                 'NULL/0-частота строгий диапазон не проходит; взаимоисключимо '
+                 'с --coupon-freq-in.'
         )
         parser.add_argument(
             '--coupon-freq-in', type=_parse_coupon_freq_in, default=None,
@@ -216,11 +225,19 @@ class CalculateYtmUseCase(UseCase):
         """Валидация новых фильтров 005.3 (конвенции rebalance-report)."""
         freq_max = getattr(args, 'coupon_freq_max', None)
         freq_in = getattr(args, 'coupon_freq_in', None)
+        freq_min = getattr(args, 'coupon_freq_min', None)
         if freq_max is not None and freq_in is not None:
             raise ValueError("--coupon-freq-max и --coupon-freq-in "
                              "взаимоисключающие: выберите один способ задания частот")
+        if freq_min is not None and freq_in is not None:
+            raise ValueError("--coupon-freq-min и --coupon-freq-in "
+                             "взаимоисключающие: выберите один способ задания частот")
         if freq_max is not None and freq_max < 1:
             raise ValueError("--coupon-freq-max должен быть целым >= 1")
+        if freq_min is not None and freq_min < 1:
+            raise ValueError("--coupon-freq-min должен быть целым >= 1")
+        if freq_min is not None and freq_max is not None and freq_min > freq_max:
+            raise ValueError("--coupon-freq-min не должен превышать --coupon-freq-max")
 
     def _execute_json(self, args: argparse.Namespace):
         """Машинный режим --format json (005.3): сборка и печать канонического JSON.
@@ -269,6 +286,7 @@ class CalculateYtmUseCase(UseCase):
                 'fixed_coupon': bool(args.fixed_coupon),
                 'floating_coupon': bool(args.floating_coupon),
                 'coupon_freq_max': getattr(args, 'coupon_freq_max', None),
+                'coupon_freq_min': getattr(args, 'coupon_freq_min', None),
                 'coupon_freq_in': getattr(args, 'coupon_freq_in', None),
                 'exclude_sovereign': bool(getattr(args, 'exclude_sovereign', False)),
                 'include_held': bool(getattr(args, 'include_held', False)),
@@ -410,6 +428,7 @@ class CalculateYtmUseCase(UseCase):
         """
         filters_active = (
             getattr(args, 'coupon_freq_max', None) is not None
+            or getattr(args, 'coupon_freq_min', None) is not None
             or getattr(args, 'coupon_freq_in', None) is not None
             or bool(getattr(args, 'exclude_sovereign', False))
         )
@@ -459,14 +478,16 @@ class CalculateYtmUseCase(UseCase):
             funnel['sovereign'] = len(rows) - len(kept)
             rows = kept
 
-        # P-C: частота купонов — общее правило тулкита (NULL не проходит).
+        # P-C: частота купонов — общее правило тулкита (NULL не проходит);
+        # 023: min+max задают диапазон.
         freq_max = getattr(args, 'coupon_freq_max', None)
         freq_in = getattr(args, 'coupon_freq_in', None)
-        if freq_max is not None or freq_in is not None:
+        freq_min = getattr(args, 'coupon_freq_min', None)
+        if freq_max is not None or freq_in is not None or freq_min is not None:
             kept = [
                 row for row in rows
                 if freq_ok(_to_int(row.get('coupon_quantity_per_year')),
-                           freq_max=freq_max, freq_in=freq_in)
+                           freq_max=freq_max, freq_in=freq_in, freq_min=freq_min)
             ]
             funnel['freq'] = len(rows) - len(kept)
             rows = kept
@@ -498,10 +519,11 @@ class CalculateYtmUseCase(UseCase):
         # в JSON-блок excluded.
         excluded_total = sum(funnel.values())
         logger.info(
-            "Применённые фильтры: mode=%s, coupon-freq-max=%s, coupon-freq-in=%s, "
-            "exclude-sovereign=%s, min-ytm=%s, max-risk=%s, max-listlevel=%s, "
-            "max-ytm=%s, limit=%s",
+            "Применённые фильтры: mode=%s, coupon-freq-min=%s, coupon-freq-max=%s, "
+            "coupon-freq-in=%s, exclude-sovereign=%s, min-ytm=%s, max-risk=%s, "
+            "max-listlevel=%s, max-ytm=%s, limit=%s",
             mode,
+            freq_min,
             getattr(args, 'coupon_freq_max', None),
             getattr(args, 'coupon_freq_in', None),
             bool(getattr(args, 'exclude_sovereign', False)),

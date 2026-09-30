@@ -25,6 +25,7 @@ from decimal import Decimal
 
 import pytest
 
+from src.use_cases.bond_filters import freq_ok
 from src.use_cases.rebalance_report import (
     BOND_ROW_KEYS,
     CSV_HEADERS,
@@ -105,6 +106,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     """Аргументы команды по умолчанию (как из CLI)."""
     args = argparse.Namespace(
         format='json',
+        freq_min=None,
         freq_max=None,
         freq_in=None,
         exclude_sovereign=False,
@@ -113,6 +115,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         min_maturity=None,
         max_maturity=None,
         max_risk=1,
+        min_credit_rating=None,
         max_listlevel=2,
         max_ytm=35.0,
         screener_limit=10,
@@ -124,8 +127,16 @@ def _make_args(**overrides) -> argparse.Namespace:
     return args
 
 
+# Зеркало шкалы config.yaml (rating_scale): ключи с национальным суффиксом —
+# нормализация ключей и кодов внутри rating_code_to_score (utils, 002.6).
+_RATING_SCALE = {
+    'AAA.RU': 13, 'AA+.RU': 12, 'AA.RU': 11, 'AA-.RU': 10,
+    'A+.RU': 9, 'A.RU': 8, 'A-.RU': 7, 'BBB+.RU': 6, 'BBB.RU': 5, 'BBB-.RU': 4,
+}
+
+
 def _build_report(db, **overrides) -> dict:
-    use_case = RebalanceReportUseCase(db=db)
+    use_case = RebalanceReportUseCase(db=db, rating_scale=_RATING_SCALE)
     return use_case.build_report(_make_args(**overrides))
 
 
@@ -142,6 +153,7 @@ class TestParser:
     def test_defaults(self):
         args = self._parse([])
         assert args.format == 'json'
+        assert args.freq_min is None
         assert args.freq_max is None
         assert args.freq_in is None
         assert args.exclude_sovereign is False
@@ -150,6 +162,7 @@ class TestParser:
         assert args.min_maturity is None
         assert args.max_maturity is None
         assert args.max_risk == 1
+        assert args.min_credit_rating is None
         assert args.max_listlevel == 2
         assert args.max_ytm == 35.0
         assert args.screener_limit == 10
@@ -359,15 +372,16 @@ class TestGoldenSchema:
         }
         filters = screener['filters']
         assert set(filters.keys()) == {
-            'freq_max', 'freq_in', 'exclude_sovereign', 'include_held',
-            'include_ku', 'max_risk', 'max_listlevel', 'max_ytm_pct',
-            'min_maturity', 'max_maturity', 'screener_limit',
+            'freq_min', 'freq_max', 'freq_in', 'exclude_sovereign', 'include_held',
+            'include_ku', 'max_risk', 'min_credit_rating', 'max_listlevel',
+            'max_ytm_pct', 'min_maturity', 'max_maturity', 'screener_limit',
         }
         assert filters['max_ytm_pct'] == 35.0
 
         excluded = screener['excluded']
         assert set(excluded.keys()) == {
             'held', 'ku', 'sovereign', 'freq', 'risk', 'listlevel',
+            'rating_missing', 'rating_below_min',
             'fixed_ytm_missing', 'fixed_max_ytm',
             'floater_coupon_missing', 'floater_max_ytm',
         }
@@ -598,6 +612,204 @@ class TestScreenerFilters:
             assert row['name'] == catalog_names.get(row['isin'], row['name'])
             assert row['name']
             assert row['issuer']
+
+
+# ---------------------------------------------------------------------------
+# 023: диапазон частоты купонов --freq-min/--freq-max (P-C)
+# ---------------------------------------------------------------------------
+
+class TestFreqRange:
+    """023: «от ежемесячных до квартальных» = 4 <= freq <= 12, а не freq <= 4.
+
+    freq_in остаётся взаимоисключимым с диапазоном; старый вызов «только
+    --freq-max» сохраняет прежнюю семантику (freq <= max).
+    """
+
+    def test_freq_range_4_to_12(self, filters_env):
+        report = _build_report(filters_env, exclude_sovereign=True,
+                               freq_min=4, freq_max=12)
+        screener = report['screener']
+        assert screener['filters']['freq_min'] == 4
+        assert screener['filters']['freq_max'] == 12
+        fixed = {r['isin']: r['freq'] for r in screener['fixed']}
+        # freq 2 не проходит диапазон
+        assert 'RU000A0FIX02' not in fixed
+        # freq 4 (граница снизу) и freq 12 (граница сверху) проходят
+        assert fixed.get('RU000A0FIX04') == 4
+        assert fixed.get('RU000A0FIX12') == 12
+        # флоатер freq 12 тоже проходит (в отличие от --freq-max 4)
+        assert [r['freq'] for r in screener['floater']] == [12]
+        assert screener['excluded']['freq'] == 1  # только FIX02 (freq 2)
+        assert screener['candidates_total'] == (
+            sum(screener['excluded'].values())
+            + screener['fixed_matched'] + screener['floater_matched']
+        )
+
+    def test_freq_min_without_max(self, filters_env):
+        report = _build_report(filters_env, exclude_sovereign=True, freq_min=4)
+        screener = report['screener']
+        fixed = {r['isin'] for r in screener['fixed']}
+        assert 'RU000A0FIX02' not in fixed
+        assert {'RU000A0FIX04', 'RU000A0FIX12'} <= fixed
+        assert screener['excluded']['freq'] == 1
+
+    def test_null_frequency_does_not_pass_strict_range(self, filters_env):
+        _insert_bond(filters_env, isin='RU000A0NOFRQ', ticker='NOFRQ',
+                     name='Без частоты', coupon_quantity_per_year=None,
+                     coupon_rate_percent=Decimal('10.0'),
+                     ytm=Decimal('10'), ytm_updated_at=_NOW)
+        filters_env.conn.commit()
+        report = _build_report(filters_env, exclude_sovereign=True,
+                               freq_min=4, freq_max=12)
+        assert 'RU000A0NOFRQ' not in [
+            r['isin'] for r in report['screener']['fixed']
+        ]
+        assert report['screener']['excluded']['freq'] == 2  # FIX02 + NOFRQ
+
+    def test_old_freq_max_semantics_preserved(self, filters_env):
+        """Старый вызов «только --freq-max 4»: freq 2 проходит (freq <= 4)."""
+        report = _build_report(filters_env, exclude_sovereign=True, freq_max=4)
+        fixed = {r['isin']: r['freq'] for r in report['screener']['fixed']}
+        assert fixed.get('RU000A0FIX02') == 2
+        assert 'RU000A0FIX12' not in fixed
+        assert report['screener']['filters']['freq_min'] is None
+
+    def test_freq_in_conflicts_with_range(self):
+        use_case = RebalanceReportUseCase.__new__(RebalanceReportUseCase)
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(freq_min=4, freq_in=[2, 4]))
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(freq_max=12, freq_in=[2, 4]))
+
+    def test_freq_min_zero_and_above_max_rejected(self):
+        use_case = RebalanceReportUseCase.__new__(RebalanceReportUseCase)
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(freq_min=0))
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(freq_min=12, freq_max=4))
+
+    def test_freq_ok_range_rules(self):
+        """Юнит-правило bond_filters (023): NULL/0 — мимо строгого диапазона;
+        старая семантика «только freq_max» не изменилась."""
+        assert freq_ok(6, freq_min=4, freq_max=12)
+        assert freq_ok(4, freq_min=4, freq_max=12)
+        assert freq_ok(12, freq_min=4, freq_max=12)
+        assert not freq_ok(2, freq_min=4, freq_max=12)
+        assert not freq_ok(14, freq_min=4, freq_max=12)
+        assert not freq_ok(None, freq_min=4, freq_max=12)
+        assert not freq_ok(0, freq_min=4, freq_max=12)
+        # без фильтров и «только freq_max» — прежнее поведение
+        assert freq_ok(0, freq_max=4)
+        assert freq_ok(None, freq_max=4) is False
+        assert freq_ok(3)
+        assert freq_ok(3, freq_in=[3])
+        assert not freq_ok(0, freq_in=[3])
+
+
+# ---------------------------------------------------------------------------
+# 023: кредитный рейтинг кандидата (latest rating_history, strict filter)
+# ---------------------------------------------------------------------------
+
+def _seed_rated_candidates(db):
+    """Кандидаты с настоящими рейтингами в rating_history (023)."""
+    corp = _insert_company(db, 'Рейт Холдинг')
+
+    def candidate(isin, ticker, risk_level=1):
+        _insert_bond(db, isin=isin, ticker=ticker, name=f'Рейт {ticker}',
+                     company_id=corp, coupon_quantity_per_year=4,
+                     coupon_rate_percent=Decimal('12.0'),
+                     risk_level=risk_level,
+                     ytm=Decimal('12'), ytm_updated_at=_NOW)
+
+    candidate('RU000A0RTAAA', 'RTAAA')   # AAA (13)
+    candidate('RU000A0RTAM', 'RTAM')     # AA- (10)
+    candidate('RU000A0RTAM1', 'RTAM1')   # A- (7)
+    candidate('RU000A0RTNAT', 'RTNAT')   # национальный префикс 'RUAAA' (13)
+    candidate('RU000A0RTUNR', 'RTUNR')   # без рейтинга
+    candidate('RU000A0RTHI1', 'RTHI1', risk_level=3)  # AAA, но риск 3
+    candidate('RU000A0RTLST', 'RTLST')   # история: A- -> AA- (выигрывает latest)
+
+    today = date.today()
+    db.add_rating('RU000A0RTAAA', today, 'AAA', 13)
+    db.add_rating('RU000A0RTAM', today, 'AA-', 10)
+    db.add_rating('RU000A0RTAM1', today, 'A-', 7)
+    db.add_rating('RU000A0RTNAT', today, 'RUAAA', 13)
+    db.add_rating('RU000A0RTHI1', today, 'AAA', 13)
+    db.add_rating('RU000A0RTLST', today - timedelta(days=10), 'A-', 7)
+    db.add_rating('RU000A0RTLST', today - timedelta(days=1), 'AA-', 10)
+    db.conn.commit()
+
+
+@pytest.fixture
+def ratings_env(db):
+    _seed_rated_candidates(db)
+    return db
+
+
+class TestCreditRatingFilter:
+    def test_latest_rating_joined_to_screener_row(self, ratings_env):
+        """Canonical строка несёт настоящий рейтинг из latest rating_history."""
+        report = _build_report(ratings_env)
+        rows = {r['isin']: r for r in report['screener']['fixed']}
+        assert rows['RU000A0RTAAA']['credit_rating'] == 'AAA'
+        assert rows['RU000A0RTNAT']['credit_rating'] == 'RUAAA'
+        # latest по дате: A- (10 дней назад) вытеснен AA- (вчера)
+        assert rows['RU000A0RTLST']['credit_rating'] == 'AA-'
+        # без строки в rating_history рейтинг пуст — risk_level не подставляется
+        assert rows['RU000A0RTUNR']['credit_rating'] is None
+        assert rows['RU000A0RTUNR']['risk_level'] == 1
+        assert set(report['screener']['excluded']) >= {
+            'rating_missing', 'rating_below_min'}
+        assert report['screener']['filters']['min_credit_rating'] is None
+
+    def test_strict_filter_min_credit_rating(self, ratings_env):
+        report = _build_report(ratings_env, min_credit_rating='AA-')
+        screener = report['screener']
+        assert screener['filters']['min_credit_rating'] == 'AA-'
+        passed = {r['isin'] for r in screener['fixed']}
+        # AA- (граница), AAA и национальный RUAAA проходят при AA-
+        assert {'RU000A0RTAAA', 'RU000A0RTAM', 'RU000A0RTNAT'} <= passed
+        assert 'RU000A0RTAM1' not in passed  # A- ниже AA-
+        assert screener['excluded']['rating_below_min'] == 1
+        assert screener['excluded']['rating_missing'] == 1  # RTUNR исключён
+        assert screener['candidates_total'] == (
+            sum(screener['excluded'].values())
+            + screener['fixed_matched'] + screener['floater_matched']
+        )
+
+    def test_threshold_national_suffix_normalized(self, ratings_env):
+        """Порог 'AA-.RU' нормализуется существующим util = 'AA-'."""
+        report = _build_report(ratings_env, min_credit_rating='AA-.RU')
+        screener = report['screener']
+        assert screener['filters']['min_credit_rating'] == 'AA-.RU'
+        passed = {r['isin'] for r in screener['fixed']}
+        assert 'RU000A0RTAM' in passed
+        assert 'RU000A0RTAM1' not in passed
+        assert screener['excluded']['rating_below_min'] == 1
+
+    def test_risk_level_separate_from_rating(self, ratings_env):
+        """risk_level — отдельный фильтр: не заменяет и не дублирует rating."""
+        # RTHI1 (AAA, риск 3): без рейтингового фильтра отсечён риском,
+        # rating_missing ему не приписан
+        plain = _build_report(ratings_env)
+        assert plain['screener']['excluded']['rating_missing'] == 0
+        assert plain['screener']['excluded']['risk'] == 1
+        # тот же RTHI1 при послабленном риске проходит и рейтинговый порог AA-
+        high_risk_passes = _build_report(ratings_env, max_risk=3,
+                                         min_credit_rating='AA-')
+        assert 'RU000A0RTHI1' in [
+            r['isin'] for r in high_risk_passes['screener']['fixed']]
+
+    def test_invalid_threshold_rejected(self, ratings_env):
+        use_case = RebalanceReportUseCase(db=ratings_env, rating_scale=_RATING_SCALE)
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(min_credit_rating='ZZ+'))
+
+    def test_threshold_without_scale_rejected(self, db):
+        """Порог без настроенной шкалы — явная ошибка, а не молчаливый пропуск."""
+        use_case = RebalanceReportUseCase(db=db)
+        with pytest.raises(ValueError):
+            use_case._validate_args(_make_args(min_credit_rating='AA-'))
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,22 @@ _LATEST_FLOATER_RATE_JOIN = """
             ) mc_floater ON bc.isin = mc_floater.isin
 """
 
+# Последний кредитный рейтинг бумаги по rating_history (023): canonical
+# buy-кандидат несёт настоящий рейтинг (credit_rating + rating_score);
+# risk_level Т-Банка рейтингом не подменяется. Паттерн повторяет
+# latest_ratings из get_chatgpt_portfolio_rows (DISTINCT ON по дате);
+# строки с NULL-кодом пропускаются — адаптер credit_rating пишет только
+# коды с числовым баллом по шкале rating_scale.
+_LATEST_RATING_JOIN = """
+            LEFT JOIN (
+                SELECT DISTINCT ON (isin)
+                       isin, rating_code AS credit_rating, rating_score
+                FROM rating_history
+                WHERE rating_code IS NOT NULL
+                ORDER BY isin, rating_date DESC, id DESC
+            ) lr ON lr.isin = bc.isin
+"""
+
 # Агрегат доли бумаги в портфеле «сейчас» по ISIN — бейдж held (N%) (задача 002.2).
 # Агрегация через view v_portfolio_positions_valuation обязательна: прямой
 # LEFT JOIN portfolio_positions задвоил бы строки для ISIN на двух счетах
@@ -2477,6 +2493,12 @@ class PortfolioStorage:
         топ-фиксы 2030+). min_maturity=None — нижняя граница = CURRENT_DATE
         (уже погашенные бумаги не показываются; прежний дефолт '2025-01-01'
         был в прошлом).
+
+        023: buy-выборка несёт последний кредитный рейтинг кандидата
+        (credit_rating + rating_score из rating_history, join _LATEST_RATING_JOIN)
+        — строгий фильтр --min-credit-rating в rebalance-report идёт по
+        настоящему рейтингу, risk_level не подменяет его. mode='portfolio'
+        не изменился.
         """
         if mode not in ('buy', 'portfolio'):
             raise ValueError(f"Неизвестный режим таблицы доходностей: {mode!r}")
@@ -2543,10 +2565,17 @@ class PortfolioStorage:
                 -- существующий вывод calculate-ytm не меняет.
                 bc.is_for_qualified_investors as ku,
                 co.name as issuer,
-                co.entity_type{held_select}
+                co.entity_type,
+                -- 023: настоящий кредитный рейтинг кандидата (latest
+                -- rating_history по ISIN) — canonical полю screener-строки
+                -- credit_rating и строгому фильтру --min-credit-rating;
+                -- risk_level остаётся отдельным фильтром.
+                lr.credit_rating,
+                lr.rating_score{held_select}
             FROM bonds_catalog bc
             LEFT JOIN companies co ON co.id = bc.company_id
             {_LATEST_FLOATER_RATE_JOIN}
+            {_LATEST_RATING_JOIN}
             {held_join}
             WHERE bc.currency = 'rub'
                 AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
