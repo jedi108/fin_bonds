@@ -2667,7 +2667,7 @@ class PortfolioStorage:
             LEFT JOIN bonds_catalog bc ON bc.isin = a.isin
             LEFT JOIN companies co ON co.id = bc.company_id
             LEFT JOIN latest_ratings lr ON lr.isin = a.isin
-            ${_LATEST_FLOATER_RATE_JOIN}
+            {_LATEST_FLOATER_RATE_JOIN}
             ORDER BY a.value_rub DESC NULLS LAST, a.isin
         """)
         return [dict(row) for row in cursor.fetchall()]
