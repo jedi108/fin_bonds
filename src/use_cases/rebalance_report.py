@@ -274,6 +274,22 @@ class RebalanceReportUseCase(UseCase):
         """Создает use case с хранилищем из фабрики (DSN — из .env, не из CLI)."""
         return cls(db=factory.get_db_connection())
 
+    @classmethod
+    def default_args(cls) -> argparse.Namespace:
+        """Канонические аргументы по умолчанию для программного вызова (019).
+
+        Единственный источник значений — setup_parser: пустой argv парсится тем
+        же парсером, что и CLI, поэтому программные потребители (экспортёр
+        ChatGPT) не дублируют defaults. Канонический сценарий (019):
+
+            args = RebalanceReportUseCase.default_args()
+            args.include_held = True
+            report = RebalanceReportUseCase(db).build_report(args)
+        """
+        parser = argparse.ArgumentParser(add_help=False)
+        cls.setup_parser(parser)
+        return parser.parse_args([])
+
     # ------------------------------------------------------------------
     # Точка входа
     # ------------------------------------------------------------------
@@ -282,7 +298,7 @@ class RebalanceReportUseCase(UseCase):
         logger.info("🚀 Формирование rebalance-report (schema_version=%s)", SCHEMA_VERSION)
         self._validate_args(args)
 
-        report = self._build_report(args)
+        report = self.build_report(args)
 
         # JSON — в stdout; логи (logging) идут в stderr и ответ не портят.
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -305,7 +321,13 @@ class RebalanceReportUseCase(UseCase):
     # Сборка отчёта
     # ------------------------------------------------------------------
 
-    def _build_report(self, args: argparse.Namespace) -> Dict[str, Any]:
+    def build_report(self, args: argparse.Namespace) -> Dict[str, Any]:
+        """Собирает канонический отчёт — программный API (019).
+
+        Возвращает тот же dict, что execute() печатает как JSON: CLI и
+        программные потребители (экспортёр ChatGPT) идут через один метод,
+        второго аналитического контура не появляется.
+        """
         now = datetime.now(timezone.utc)
         positions, total_value = self._build_portfolio()
         concentrations = self._build_concentrations(positions, total_value)

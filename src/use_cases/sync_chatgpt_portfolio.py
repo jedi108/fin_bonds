@@ -1,4 +1,10 @@
-"""Экспорт текущего портфеля в Google Sheets для чтения ChatGPT (P0)."""
+"""Экспорт данных для ChatGPT в Google Sheets.
+
+P0: текущий портфель (лист PORTFOLIO). 019: candidate projection —
+транспортные строки будущего листа CANDIDATES строятся только из
+канонического отчёта rebalance-report (build_report + default_args,
+второго скринера нет); публикация листа — задача 020.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +19,7 @@ from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
 from src.use_cases.check_db import classify_freshness
+from src.use_cases.rebalance_report import RebalanceReportUseCase
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -74,6 +81,98 @@ def _iso(value: Any) -> Optional[str]:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+# 019: транспортные колонки будущего листа CANDIDATES — контракт из задачи.
+# Значения берутся только из строк канонического скринера rebalance-report
+# (screener.fixed[] / screener.floater[]), второго screener для ChatGPT нет.
+CANDIDATE_HEADERS = (
+    "candidate_type",
+    "rank",
+    "isin",
+    "name",
+    "ticker",
+    "issuer",
+    "price_rub",
+    "ytm_pct",
+    "ytm_reason",
+    "coupon_pct",
+    "coupon_frequency",
+    "maturity_date",
+    "offer_date",
+    "amortization_flag",
+    "risk_level",
+    "list_level",
+    "ku",
+    "issuer_pct_current",
+    "held_badge",
+)
+
+
+def candidate_report_args() -> argparse.Namespace:
+    """Аргументы rebalance-report для кандидатного экспорта (019).
+
+    Defaults — канонические RebalanceReportUseCase.default_args(), экспортёр
+    их не дублирует; единственное изменение — include_held=True: уже держимые
+    бумаги должны попасть в выборку с бейджем held (доля N%) для ревью.
+    """
+    args = RebalanceReportUseCase.default_args()
+    args.include_held = True
+    return args
+
+
+def build_candidates_payload(
+    report: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[List[Any]]]:
+    """CANDIDATES payload (019): (metadata, транспортные строки) из канонического отчёта.
+
+    Источник — только report['screener'] (fixed[]/floater[]): FIX и FLOAT идут
+    в один набор, rank — с 1 отдельно внутри типа, порядок сохраняет ranking
+    канонического скринера (экспортёр ничего не пересортировывает). qty/value
+    не экспортируются — у кандидата они 0 и ничего не добавляют; rating и
+    duration/liquidity не добавляются (покрытие вне портфеля неполное, их нет
+    в каноническом скринере). metadata (filters, candidates_total,
+    fixed_matched, floater_matched, excluded) переносится из отчёта без
+    пересчёта.
+    """
+    screener = report["screener"]
+    rows: List[List[Any]] = []
+    for candidate_type, source in (
+        ("FIX", screener["fixed"]),
+        ("FLOAT", screener["floater"]),
+    ):
+        for rank, row in enumerate(source, start=1):
+            values = {
+                "candidate_type": candidate_type,
+                "rank": rank,
+                "isin": row["isin"],
+                "name": row["name"],
+                "ticker": row["ticker"],
+                "issuer": row["issuer"],
+                "price_rub": row["price"],
+                "ytm_pct": row["ytm_pct"],
+                "ytm_reason": row["ytm_reason"],
+                "coupon_pct": row["coupon_pct"],
+                "coupon_frequency": row["freq"],
+                "maturity_date": row["maturity"],
+                "offer_date": row["offer"],
+                "amortization_flag": row["amort"],
+                "risk_level": row["risk_level"],
+                "list_level": row["list_level"],
+                "ku": row["ku"],
+                "issuer_pct_current": row["issuer_pct"],
+                "held_badge": row["held_badge"],
+            }
+            rows.append([values[column] for column in CANDIDATE_HEADERS])
+
+    metadata = {
+        "filters": screener["filters"],
+        "candidates_total": screener["candidates_total"],
+        "fixed_matched": screener["fixed_matched"],
+        "floater_matched": screener["floater_matched"],
+        "excluded": screener["excluded"],
+    }
+    return metadata, rows
 
 
 class SyncChatgptPortfolioUseCase(UseCase):

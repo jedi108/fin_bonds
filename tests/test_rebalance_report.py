@@ -126,7 +126,7 @@ def _make_args(**overrides) -> argparse.Namespace:
 
 def _build_report(db, **overrides) -> dict:
     use_case = RebalanceReportUseCase(db=db)
-    return use_case._build_report(_make_args(**overrides))
+    return use_case.build_report(_make_args(**overrides))
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +854,41 @@ def test_cli_single_command_on_test_db(db, tmp_path):
     # пустая тестовая БД: гейт честно кричит, JSON всё равно валиден
     assert data['meta']['gate_status'] == 'EMPTY_PORTFOLIO'
     assert data['portfolio']['positions'] == []
+
+
+# ---------------------------------------------------------------------------
+# Программный API отчёта (019)
+# ---------------------------------------------------------------------------
+
+class TestProgrammaticApi:
+    def test_default_args_match_cli_defaults(self):
+        """default_args() — те же defaults, что у CLI-парсера: единственный
+        источник значений, exporter не дублирует их."""
+        args = RebalanceReportUseCase.default_args()
+        parser = argparse.ArgumentParser()
+        RebalanceReportUseCase.setup_parser(parser)
+        assert vars(args) == vars(parser.parse_args([]))
+        # и это канонические значения контракта (см. TestParser.test_defaults)
+        assert args.include_held is False
+        assert args.screener_limit == 10
+        assert args.max_ytm == 35.0
+
+    def test_programmatic_report_equals_cli_json(self, db, capsys):
+        """build_report() возвращает тот же dict, что execute() печатает JSON:
+        CLI и программный вызов идут через один API."""
+        _seed_golden(db)
+        use_case = RebalanceReportUseCase(db=db)
+
+        use_case.execute(RebalanceReportUseCase.default_args())
+        cli_report = json.loads(capsys.readouterr().out)
+        programmatic_report = use_case.build_report(
+            RebalanceReportUseCase.default_args()
+        )
+
+        # generated_at — время конкретного вызова; остальное идентично
+        del cli_report['meta']['generated_at']
+        del programmatic_report['meta']['generated_at']
+        assert programmatic_report == cli_report
 
 
 # ---------------------------------------------------------------------------

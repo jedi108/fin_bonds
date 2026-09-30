@@ -91,7 +91,7 @@ def _write_scenario_file(tmp_path, trades=None, raw=None) -> str:
 
 def _build_scenario(db, scenario_path: str, **overrides) -> dict:
     use_case = RebalanceReportUseCase(db=db)
-    report = use_case._build_report(_make_args(scenario=scenario_path, **overrides))
+    report = use_case.build_report(_make_args(scenario=scenario_path, **overrides))
     return report
 
 
@@ -609,7 +609,7 @@ class TestScenarioCsv:
         _seed_base(db)
         csv_path = tmp_path / 'base.csv'
         use_case = RebalanceReportUseCase(db=db)
-        report = use_case._build_report(_make_args(csv_out=str(csv_path)))
+        report = use_case.build_report(_make_args(csv_out=str(csv_path)))
         assert report['artifacts']['target_portfolio_csv'] == str(csv_path)
         assert 'scenario' not in report
         text = csv_path.read_text(encoding='utf-8-sig')

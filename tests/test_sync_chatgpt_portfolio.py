@@ -1,16 +1,20 @@
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from src.data_models import Bond
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
+from src.use_cases.rebalance_report import RebalanceReportUseCase
 from src.use_cases.sync_chatgpt_portfolio import (
+    CANDIDATE_HEADERS,
     PORTFOLIO_HEADERS,
     SCHEMA_VERSION,
     VALUATION_WARNINGS,
     SyncChatgptPortfolioUseCase,
+    build_candidates_payload,
+    candidate_report_args,
 )
 
 
@@ -640,3 +644,248 @@ def test_chatgpt_rows_return_null_reasons_from_db(db):
     assert len(rows) == 1
     assert rows[0]["ytm_null_reason"] == "floating_coupon"
     assert rows[0]["duration_null_reason"] == "floating_coupon"
+
+
+# ---------------------------------------------------------------------------
+# 019: candidate projection из канонического rebalance-report
+# ---------------------------------------------------------------------------
+
+def candidate_cell(row_values, column):
+    """Ячейка кандидатной строки по имени колонки (как cell() для PORTFOLIO)."""
+    return row_values[CANDIDATE_HEADERS.index(column)]
+
+
+def screener_row(**overrides):
+    """Строка screener в каноническом контракте (BOND_ROW_KEYS) для проекции."""
+    row = {
+        "isin": "RU000A",
+        "name": "Bond A",
+        "ticker": "TEST",
+        "qty": 0.0,
+        "price": 950.0,
+        "value": 0.0,
+        "ytm_pct": 15.0,
+        "ytm_reason": None,
+        "coupon_pct": 12.0,
+        "freq": 4,
+        "coupon_kind": "fix",
+        "risk_level": 1,
+        "list_level": 2,
+        "maturity": "2030-01-01",
+        "offer": None,
+        "amort": False,
+        "ku": False,
+        "issuer": "Issuer",
+        "issuer_pct": None,
+        "held_badge": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def fake_screener_report():
+    """Канонический отчёт-фикстура: блок screener с 2 фиксами и 1 флоатером."""
+    return {
+        "screener": {
+            "filters": {"max_risk": 1, "screener_limit": 10},
+            "candidates_total": 7,
+            "excluded": {"held": 1, "ku": 2},
+            "fixed_matched": 3,
+            "floater_matched": 1,
+            "fixed": [
+                screener_row(isin="RU000F1", name="Fix 1"),
+                screener_row(isin="RU000F2", name="Fix 2", ytm_pct=14.0),
+            ],
+            "floater": [
+                screener_row(
+                    isin="RU000FL1",
+                    name="Float 1",
+                    coupon_kind="float",
+                    ytm_pct=None,
+                    ytm_reason="floating_coupon",
+                ),
+            ],
+        }
+    }
+
+
+def test_candidate_report_args_only_flips_include_held():
+    """Экспортный контекст: канонические defaults rebalance-report (без дублей
+    в exporter), единственное изменение — include_held=True."""
+    args = candidate_report_args()
+    expected = vars(RebalanceReportUseCase.default_args())
+    expected["include_held"] = True
+    assert vars(args) == expected
+    assert args.include_held is True
+
+
+def test_candidate_projection_single_set_with_per_type_rank():
+    """FIX и FLOAT идут в один набор; rank — с 1 отдельно внутри типа;
+    порядок внутри типа сохраняет ranking канонического скринера."""
+    _, rows = build_candidates_payload(fake_screener_report())
+
+    assert [candidate_cell(r, "isin") for r in rows] == ["RU000F1", "RU000F2", "RU000FL1"]
+    assert [candidate_cell(r, "candidate_type") for r in rows] == ["FIX", "FIX", "FLOAT"]
+    assert [candidate_cell(r, "rank") for r in rows] == [1, 2, 1]
+
+
+def test_candidate_projection_fields_match_source_screener():
+    """Каждое поле проекции соответствует значению source screener."""
+    source = fake_screener_report()["screener"]["fixed"][0]
+    _, rows = build_candidates_payload(fake_screener_report())
+
+    expected = {
+        "candidate_type": "FIX",
+        "rank": 1,
+        "isin": source["isin"],
+        "name": source["name"],
+        "ticker": source["ticker"],
+        "issuer": source["issuer"],
+        "price_rub": source["price"],
+        "ytm_pct": source["ytm_pct"],
+        "ytm_reason": source["ytm_reason"],
+        "coupon_pct": source["coupon_pct"],
+        "coupon_frequency": source["freq"],
+        "maturity_date": source["maturity"],
+        "offer_date": source["offer"],
+        "amortization_flag": source["amort"],
+        "risk_level": source["risk_level"],
+        "list_level": source["list_level"],
+        "ku": source["ku"],
+        "issuer_pct_current": source["issuer_pct"],
+        "held_badge": source["held_badge"],
+    }
+    assert len(expected) == len(CANDIDATE_HEADERS)
+    for column, value in expected.items():
+        assert candidate_cell(rows[0], column) == value, column
+
+
+def test_candidate_projection_carries_badge_and_issuer_pct_as_is():
+    """held_badge и issuer_pct_current переносятся как есть (контекст
+    include_held=True: держимый кандидат с бейджем и долей эмитента)."""
+    report = fake_screener_report()
+    report["screener"]["fixed"][0]["held_badge"] = "held (12.34%)"
+    report["screener"]["fixed"][0]["issuer_pct"] = 12.34
+
+    _, rows = build_candidates_payload(report)
+
+    assert candidate_cell(rows[0], "held_badge") == "held (12.34%)"
+    assert candidate_cell(rows[0], "issuer_pct_current") == 12.34
+
+
+def test_candidate_projection_carries_screener_metadata():
+    """metadata переносится из отчёта без ручного пересчёта."""
+    report = fake_screener_report()
+    metadata, _ = build_candidates_payload(report)
+
+    assert metadata == {
+        "filters": report["screener"]["filters"],
+        "candidates_total": report["screener"]["candidates_total"],
+        "fixed_matched": report["screener"]["fixed_matched"],
+        "floater_matched": report["screener"]["floater_matched"],
+        "excluded": report["screener"]["excluded"],
+    }
+
+
+def test_p0_portfolio_payload_not_touched_by_candidate_export():
+    """019 не меняет существующий P0 PORTFOLIO payload: схема та же,
+    кандидатные колонки (candidate_type/rank) не протекают в PORTFOLIO."""
+    assert SCHEMA_VERSION == 2
+    assert PORTFOLIO_HEADERS[0] == "isin"
+    assert "candidate_type" not in PORTFOLIO_HEADERS
+    assert "rank" not in PORTFOLIO_HEADERS
+
+
+def _seed_screener_candidates(db):
+    """Два фикса и один флоатер вне портфеля — живые кандидаты buy-выборки."""
+    now = datetime.now(timezone.utc)
+
+    def candidate(isin, name, **overrides):
+        defaults = dict(
+            isin=isin,
+            name=name,
+            ticker=isin[-5:],
+            currency="rub",
+            nominal=Decimal(1000),
+            maturity_date=date.today() + timedelta(days=730),
+            coupon_quantity_per_year=4,
+            coupon_rate_percent=Decimal("14.0"),
+            risk_level=1,
+            list_level=1,
+            is_trade_available=True,
+            market_price=Decimal("950.0"),
+            market_price_updated_at=now,
+            ytm=Decimal("15.5"),
+            ytm_updated_at=now,
+        )
+        defaults.update(overrides)
+        return Bond(**defaults)
+
+    db.add_bonds_to_catalog(
+        [
+            candidate("RU000A0CAND1", "Кандидат Фикс 1"),
+            candidate("RU000A0CAND2", "Кандидат Фикс 2"),
+            candidate(
+                "RU000A0CFLTR",
+                "Кандидат Флоатер",
+                floating_coupon_flag=True,
+                coupon_rate_percent=None,
+                coupon_spread=Decimal("1.5"),
+            ),
+        ]
+    )
+    with db.conn.cursor() as cursor:
+        # upsert каталога не пишет ytm; 018-гвард buy-выборки требует
+        # у фиксов и свежую цену, и свежую YTM — выставляем напрямую.
+        cursor.execute(
+            "UPDATE bonds_catalog SET ytm = 15.5, ytm_updated_at = NOW() "
+            "WHERE isin = 'RU000A0CAND1'"
+        )
+        cursor.execute(
+            "UPDATE bonds_catalog SET ytm = 14.0, ytm_updated_at = NOW() "
+            "WHERE isin = 'RU000A0CAND2'"
+        )
+        cursor.execute(
+            "INSERT INTO monitoring_checks (isin, check_date, metric_name, metric_value) "
+            "VALUES ('RU000A0CFLTR', CURRENT_DATE, 'floater_coupon_calculator', '18.0')"
+        )
+    db.conn.commit()
+
+
+def test_candidates_payload_built_from_canonical_report(db):
+    """Сквозной кейс 019: payload строится из программного канонического отчёта
+    build_report(candidate_report_args()) — ranking и поля совпадают со
+    screener отчёта, metadata переносится как есть."""
+    _seed_screener_candidates(db)
+    report = RebalanceReportUseCase(db=db).build_report(candidate_report_args())
+    metadata, rows = build_candidates_payload(report)
+
+    screener = report["screener"]
+    fixed_count = len(screener["fixed"])
+    assert fixed_count == 2
+    assert [candidate_cell(r, "isin") for r in rows] == (
+        [row["isin"] for row in screener["fixed"]]
+        + [row["isin"] for row in screener["floater"]]
+    )
+    assert [candidate_cell(r, "candidate_type") for r in rows] == ["FIX", "FIX", "FLOAT"]
+    assert [candidate_cell(r, "rank") for r in rows] == [1, 2, 1]
+
+    first_fix = screener["fixed"][0]
+    assert candidate_cell(rows[0], "price_rub") == first_fix["price"]
+    assert candidate_cell(rows[0], "ytm_pct") == first_fix["ytm_pct"]
+    assert candidate_cell(rows[0], "coupon_pct") == first_fix["coupon_pct"]
+    assert candidate_cell(rows[0], "coupon_frequency") == first_fix["freq"]
+    assert candidate_cell(rows[0], "maturity_date") == first_fix["maturity"]
+
+    floater_row = screener["floater"][0]
+    last = rows[-1]
+    assert candidate_cell(last, "candidate_type") == "FLOAT"
+    assert candidate_cell(last, "ytm_pct") == floater_row["ytm_pct"]
+    assert candidate_cell(last, "ytm_reason") == floater_row["ytm_reason"]
+    assert candidate_cell(last, "coupon_pct") == floater_row["coupon_pct"]
+
+    assert metadata["filters"] == screener["filters"]
+    assert metadata["candidates_total"] == screener["candidates_total"]
+    assert metadata["fixed_matched"] == screener["fixed_matched"]
+    assert metadata["floater_matched"] == screener["floater_matched"]
+    assert metadata["excluded"] == screener["excluded"]
