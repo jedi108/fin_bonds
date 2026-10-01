@@ -21,6 +21,13 @@ materialization canonical defaults (argparse.SUPPRESS): в sync Namespace
 в канонические args по факту присутствия атрибута, а не сравнением со
 скопированным default. include_held=True остаётся product-default
 экспорта; флагов --include-held/--exclude-held у exporter нет.
+029-T07: data flow args замкнут end-to-end — execute(args) передаёт весь
+распарсенный CLI Namespace в _build_payload(candidate_overrides=...),
+тот же Namespace идёт в candidate_report_args(overrides): canonical
+default_args() + include_held=True + только реально присутствующие
+candidate-filter attrs. Backward-compatible no-args контракт:
+vars(candidate_report_args()) == vars(default_args()) +
+include_held=True; CLI args не теряются до candidate report.
 """
 from __future__ import annotations
 
@@ -473,8 +480,9 @@ class SyncChatgptPortfolioUseCase(UseCase):
 
         # 020: кандидаты — только из канонического отчёта rebalance-report
         # (build_report + candidate_report_args, пересчётов нет); metadata
-        # переносится в CONTROL как есть. 029-T06: явные candidate-filter
-        # overrides CLI идут в канонические args (defaults не дублируются).
+        # переносится в CONTROL как есть. 029-T06/T07: явные candidate-filter
+        # overrides CLI идут в канонические args (defaults не дублируются),
+        # no-args — прежний контракт candidate_report_args().
         report = self._report_builder(candidate_report_args(candidate_overrides))
         candidate_meta, candidate_rows = build_candidates_payload(report)
 
@@ -515,7 +523,10 @@ class SyncChatgptPortfolioUseCase(UseCase):
         return control, table_rows, candidate_rows
 
     def execute(self, args: argparse.Namespace):
-        # 029-T06: candidate-filter overrides CLI попадают в кандидатный экспорт.
+        # 029-T06/T07: candidate-filter overrides CLI попадают в кандидатный
+        # экспорт: execute(args) -> _build_payload(candidate_overrides=args)
+        # -> candidate_report_args(overrides) -> canonical build_report;
+        # no-args (None / пустой CLI) даёт прежние candidate_report_args().
         control, rows, candidate_rows = self._build_payload(candidate_overrides=args)
         self._get_publisher().publish(
             control=control,

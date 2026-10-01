@@ -4,6 +4,22 @@
 
 ## 2026-10-01
 
+- feat(export): data flow args execute → candidate_report_args (029-T07) —
+  CLI args sync-chatgpt-portfolio больше не теряются до candidate report:
+  `execute(args)` передаёт весь распарсенный Namespace в
+  `_build_payload(candidate_overrides=...)`, тот же Namespace идёт в
+  `candidate_report_args(overrides)` (backward-compatible Optional-сигнатура:
+  no-args вызов сохраняет прежний контракт
+  `vars(candidate_report_args()) == vars(RebalanceReportUseCase.default_args())
+  + include_held=True`). Итоговые args = canonical default_args() +
+  include_held=True + только реально присутствующие candidate-filter attrs
+  (по факту атрибута, без materialized defaults) → canonical validation →
+  `RebalanceReportUseCase.build_report`; exporter rows сам не фильтрует,
+  CANDIDATES строится только из `report["screener"]`, READY protocol не
+  меняется. Тесты: execute-level forwarding (spy builder получает ровно
+  `candidate_report_args(overrides)`, no-args — прежние `candidate_report_args()`)
+  и сквозной прогон CLI-фильтра --min-credit-rating до canonical build_report
+  через execute (CANDIDATES + CONTROL candidate_meta).
 - feat(cli): shared screener filter arguments helper (029-T06) — 12
   candidate/screener фильтров rebalance-report (--freq-min/--freq-max/
   --freq-in/--min-credit-rating/--exclude-sovereign/--include-ku/--max-risk/

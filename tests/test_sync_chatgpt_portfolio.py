@@ -1624,3 +1624,102 @@ class TestScreenerCliArgsDriftGuard:
         use_case = RebalanceReportUseCase.__new__(RebalanceReportUseCase)
         with pytest.raises(ValueError, match="взаимоисключающие"):
             use_case._validate_args(args)
+
+
+# ---------------------------------------------------------------------------
+# 029-T07: data flow args — execute(args) -> candidate_report_args -> build_report
+# ---------------------------------------------------------------------------
+
+class FakeExportPortfolioDb(FakeReportDb):
+    """FakeReportDb + строки PORTFOLIO exporter'а: одного db хватает на весь
+    execute — и get_chatgpt_portfolio_rows, и canonical screener build_report."""
+
+    def __init__(self, screener_rows, portfolio_rows):
+        super().__init__(screener_rows)
+        self.freshness["portfolio_positions_rows"] = len(portfolio_rows)
+        self._portfolio_rows = portfolio_rows
+
+    def get_chatgpt_portfolio_rows(self):
+        return [dict(row) for row in self._portfolio_rows]
+
+
+def _spy_use_case(seen):
+    """Exporter с spy report builder: запоминает полученные args, отдаёт
+    fake-отчёт (data flow проверяем по args, не по содержимому отчёта)."""
+
+    def spy(args):
+        seen.append(args)
+        return fake_screener_report()
+
+    return SyncChatgptPortfolioUseCase(
+        FakeDb(sample_rows()),
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+        report_builder=spy,
+    )
+
+
+def test_execute_forwards_cli_args_to_candidate_report_args():
+    """029-T07 data flow: execute(args) передаёт распарсенный CLI Namespace
+    до candidate report — builder получает ровно candidate_report_args(overrides);
+    CLI args не теряются."""
+    seen = []
+    use_case = _spy_use_case(seen)
+    overrides = _sync_parse(
+        ["--max-risk", "3", "--include-ku", "--screener-limit", "5"]
+    )
+
+    use_case.execute(overrides)
+
+    assert len(seen) == 1
+    assert vars(seen[0]) == vars(candidate_report_args(overrides))
+    assert seen[0].include_held is True
+
+
+def test_execute_no_args_backward_compatible_candidate_args():
+    """No-args export не изменился: execute(None) даёт builder прежние
+    candidate_report_args() — canonical defaults + include_held=True."""
+    seen = []
+    use_case = _spy_use_case(seen)
+
+    use_case.execute(None)
+
+    assert len(seen) == 1
+    assert vars(seen[0]) == vars(candidate_report_args())
+
+
+def test_cli_filters_reach_canonical_build_report_through_execute():
+    """Candidate filters доходят до RebalanceReportUseCase.build_report через
+    полный execute-path (factory builder): --min-credit-rating AA- реально
+    фильтрует buy-выборку и публикуется в CONTROL candidate_meta; rows
+    exporter сам не фильтрует — CANDIDATES = выжившие строки report["screener"]."""
+    exporter = SyncChatgptPortfolioUseCase.create(
+        FakeFactory(
+            FakeExportPortfolioDb(
+                [
+                    screener_candidate(
+                        "RU000CANDA", rating_score=10, credit_rating="AA-"
+                    ),
+                    screener_candidate(
+                        "RU000CANDL", rating_score=8, credit_rating="A"
+                    ),
+                ],
+                sample_rows(),
+            ),
+            {"rating_scale": RATING_SCALE},
+        )
+    )
+    exporter._ytm_engine = FakeYtmEngine()
+    publisher = FakePublisher()
+    exporter.publisher = publisher
+
+    exporter.execute(_sync_parse(["--min-credit-rating", "AA-"]))
+
+    control = publisher.call["control"]
+    meta = json.loads(control["candidate_meta"])
+    assert meta["filters"]["min_credit_rating"] == "AA-"
+    assert meta["excluded"]["rating_below_min"] == 1
+    isins = {
+        candidate_cell(row, "isin") for row in publisher.call["candidate_rows"]
+    }
+    assert isins == {"RU000CANDA"}
