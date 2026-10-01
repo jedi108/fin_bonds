@@ -365,7 +365,12 @@ class CalculateYtmUseCase(UseCase):
         logger.info(f"📈 Найдено {len(bonds)} облигаций в портфеле")
         self._print_bonds_table(bonds, "Облигации в портфеле (mark-to-market YTM)")
 
-    def _enrich_bonds_with_ytm(self, bonds: List[Dict[str, Any]], args: argparse.Namespace) -> List[Dict[str, Any]]:
+    def _enrich_bonds_with_ytm(
+        self,
+        bonds: List[Dict[str, Any]],
+        args: argparse.Namespace,
+        valuation_date: Optional[date] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Обогащает строки канонической YTM:
         - Если ytm_updated_at задан: берёт сохранённый bc.ytm или bc.ytm_null_reason.
@@ -374,8 +379,17 @@ class CalculateYtmUseCase(UseCase):
           берётся как есть; движок cashflow-решателя возвращает ДОЛЮ —
           расчёт на лету переводится в проценты (100 * y).
         - Фильтрует по args.min_ytm без приведения NULL к 0.
+
+        valuation_date (030.3): дата расчёта YTM «на лету» (valuation_date
+        cashflow-решателя). None — прежнее поведение (date.today(); legacy
+        report). PlanningContext передаёт свой frozen as_of_date — скрытый
+        второй clock на plan/compare path устранён: replay не пересчитывает
+        YTM по настенным часам.
         """
         enriched = []
+        fallback_valuation_date = (
+            valuation_date if valuation_date is not None else date.today()
+        )
         for bond in bonds:
             if bond.get('ytm_updated_at') is not None:
                 if bond.get('ytm') is not None:
@@ -389,7 +403,7 @@ class CalculateYtmUseCase(UseCase):
                 # Временная совместимость до выполнения общего backfill
                 price = bond.get('market_price') or bond.get('current_price')
                 metrics = calculate_bond_cashflow_metrics(
-                    valuation_date=date.today(),
+                    valuation_date=fallback_valuation_date,
                     nominal=bond.get('nominal'),
                     maturity_date=bond.get('maturity_date'),
                     coupon_quantity_per_year=bond.get('coupon_quantity_per_year'),

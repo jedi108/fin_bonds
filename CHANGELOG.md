@@ -4,6 +4,45 @@
 
 ## 2026-10-01
 
+- feat(planning): PlanningContext — builder + fingerprint (030.3) — новый
+  `src/services/planning_context.py`: immutable срез данных один раз на
+  plan/compare-run поверх canonical engine 030.2. Согласованное чтение —
+  read-only `REPEATABLE READ` транзакция (`PortfolioStorage
+  .snapshot_transaction`; READ COMMITTED гарантией не является); единый
+  frozen `as_of` — транзакционный timestamp (`get_transaction_timestamp`:
+  CURRENT_TIMESTAMP/CURRENT_DATE зафиксированы на старте транзакции, так что
+  SQL-правила buy-path — maturity-границы и окно 24h market-price freshness —
+  считаются на том же as_of; wall-clock Python в сборке не участвует).
+  Скрытый второй clock устранён на plan/compare path: временный YTM fallback
+  (`_enrich_bonds_with_ytm` → cashflow-решатель) получает `as_of_date`
+  (новые опциональные `valuation_date`/`as_of_date` в calculate_ytm/engine —
+  без аргумента прежнее wall-clock поведение legacy report не изменено);
+  `get_db_freshness` получил опциональный `now` (окно 24h от as_of);
+  `RebalanceEngine` — `planning_price()` (та же математика
+  `_make_scenario_state`, копий нет) и `as_of_date` в `evaluate_scenario`.
+  Контекст несёт: held/universe rows (canonical raw universe ДО
+  variant-specific screening — та же широкая buy-выборка, что у legacy
+  screener, `_SCREENER_*` константы переиспользованы), cash snapshot (unknown
+  ≠ 0), effective prices {price, basis} на каждый ISIN (= eligibility,
+  зафиксированная в контексте; replay не пересчитывает её по wall-clock),
+  canonical data gate `DataGateState` (тот же `classify_freshness` — второй
+  набор thresholds не создан; feasible и data gate — разные оси), metadata
+  (generated_at/as_of/positions_updated_at/cash_updated_at/
+  context_schema_version/calculation_policy_version). `context_fingerprint` —
+  детерминированный sha256 канонической сериализации исходных calculation
+  data + as_of + версий (Decimal → decimal string, datetime → ISO/UTC,
+  коллекции строк сортированы по ISIN; generated_at, сам fingerprint,
+  intents/constraints варианта исключены). context_id/TTL/store — 030.4,
+  eligibility-гейт — 030.6, intents — 030.5 (не предугадываются). Новые
+  тесты tests/test_planning_context.py (28, без тестовой БД): frozen as_of,
+  все чтения внутри snapshot-транзакции, один as_of в SQL/Python-правилах,
+  stale DB → stale gate, feasible=true не маскирует stale gate, replay не
+  меняет eligibility, fingerprint (presentation order / market data /
+  as_of / intents), Decimal/datetime canonicalization, raw universe для
+  двух вариантов, immutability. `make test`: 482 collected / 239 passed /
+  243 skipped / 0 failed (baseline 030.2: 454/211/243/0 — legacy числа
+  сохранены, +28 новых).
+
 - refactor(rebalance): canonical calculation/validation engine извлечён из
   RebalanceReportUseCase (030.2) — новый `src/services/rebalance_engine.py::
   RebalanceEngine`, единственный расчётчик целевого портфеля (правило 030:

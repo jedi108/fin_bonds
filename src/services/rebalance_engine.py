@@ -279,17 +279,45 @@ class RebalanceEngine:
     # Каноническая YTM
     # ------------------------------------------------------------------
 
-    def enrich_with_ytm(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def enrich_with_ytm(
+        self, rows: List[Dict[str, Any]], as_of_date: Optional[date] = None
+    ) -> List[Dict[str, Any]]:
         """Каноническая YTM в процентах — только через расчётный движок calculate-ytm.
 
         Единый путь для портфеля/скринера отчёта и positions_after сценария:
         второй обвязки над CalculateYtmUseCase не существует.
+
+        as_of_date (030.3): frozen as_of PlanningContext — дата временного
+        on-the-fly YTM fallback (до backfill); None — прежнее поведение
+        (wall-clock legacy report). Второй clock на plan/compare path устранён.
         """
         # Интерфейс движка calculate-ytm читает только min_ytm; CLI-объект
         # сюда не протягивается (engine не зависит от argparse).
         return self._ytm_engine._enrich_bonds_with_ytm(
-            rows, SimpleNamespace(min_ytm=None)
+            rows, SimpleNamespace(min_ytm=None), valuation_date=as_of_date
         )
+
+    def planning_price(
+        self,
+        row: Dict[str, Any],
+        qty_before: float,
+        value_now: Optional[float],
+        as_of_date: date,
+        is_held: bool = False,
+    ) -> Dict[str, Any]:
+        """Planning-цена и её basis для одной строки (030.3).
+
+        Тот же калькулятор, что и вселенная сценария (_make_scenario_state) —
+        отдельной копии расчёта цены нет. PlanningContextBuilder фиксирует
+        этим методом эффективные цены всего среза на frozen as_of_date
+        (matured-guard тоже считается относительно as_of, не wall-clock).
+        Возвращает canonical контракт planning_prices 030.2: {price, basis}.
+        """
+        state = self._make_scenario_state(
+            row, qty_before=qty_before, value_now=value_now,
+            today=as_of_date, is_held=is_held,
+        )
+        return {'price': state['eff_price'], 'basis': state['planning_price_basis']}
 
     # ------------------------------------------------------------------
     # Сценарий: trades -> целевой портфель (005.2), валидация (024)
@@ -354,6 +382,7 @@ class RebalanceEngine:
         self,
         trades: List[Dict[str, Any]],
         constraints: Optional[ScenarioConstraints] = None,
+        as_of_date: Optional[date] = None,
     ) -> Dict[str, Any]:
         """Полный расчёт сценария одним вызовом (Python API 030.2).
 
@@ -361,6 +390,11 @@ class RebalanceEngine:
         (чтение/структурная валидация scenario.json — забота вызывающего,
         у rebalance-report это _load_scenario_trades); constraints —
         формальные ограничения целевого портфеля (024).
+
+        as_of_date (030.3): frozen as_of PlanningContext для всех
+        date-sensitive правил расчёта (matured-guard, купонные границы);
+        None — прежнее поведение (wall-clock, legacy report). На plan/compare
+        path независимых date.today() у движка нет.
 
         Возвращает dict со всеми блоками расчёта: valid / feasible / errors /
         trades (эхо) / summary / budget_check / constraint_checks /
@@ -376,7 +410,7 @@ class RebalanceEngine:
         """
         if constraints is None:
             constraints = ScenarioConstraints()
-        today = date.today()
+        today = as_of_date if as_of_date is not None else date.today()
 
         held_rows = self.db.get_rebalance_portfolio_rows()
         held_by_isin = {row['isin']: row for row in held_rows}

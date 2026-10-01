@@ -8,6 +8,7 @@
 (fail-fast, см. _check_schema_versions).
 """
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -249,6 +250,46 @@ class PortfolioStorage:
     def _cursor(self) -> psycopg2.extensions.cursor:
         """Курсор со строками-словарями (аналог прежнего Row-фабричного доступа)."""
         return self.conn.cursor(cursor_factory=RealDictCursor)
+
+    @contextmanager
+    def snapshot_transaction(self):
+        """Read-only REPEATABLE READ транзакция согласованного среза (030.3).
+
+        Гарантия: все чтения внутри блока видят один snapshot БД (REPEATABLE
+        READ), а CURRENT_DATE/CURRENT_TIMESTAMP внутри транзакции зафиксированы
+        на её старте (transaction_timestamp) — это и есть единый `as_of`
+        PlanningContext. Дефолтный READ COMMITTED такой гарантии не даёт:
+        каждый statement видит свою версию данных. READ ONLY — страховка от
+        случайных записей. По выходе сессия возвращается к дефолтному
+        READ COMMITTED (read-write) — поведение остального кода не меняется.
+        """
+        self.conn.rollback()  # закрыть возможную неявную транзакцию
+        self.conn.set_session(
+            isolation_level=psycopg2.extensions.ISOLATION_LEVEL_REPEATABLE_READ,
+            readonly=True,
+        )
+        try:
+            yield self
+        finally:
+            self.conn.rollback()  # read-only: коммитить нечего
+            self.conn.set_session(
+                isolation_level=psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED,
+                readonly=False,
+            )
+
+    def get_transaction_timestamp(self) -> Dict[str, Any]:
+        """Транзакционные время и дата одним SELECT (030.3).
+
+        CURRENT_TIMESTAMP (= now()/transaction_timestamp()) в PostgreSQL
+        зафиксирован на старте транзакции — внутри snapshot_transaction он
+        одинаков для всех statement'ов, как и CURRENT_DATE. Отдаём оба
+        значения: PlanningContext.as_of берёт именно их, а не wall-clock
+        Python'а.
+        """
+        cursor = self._cursor()
+        cursor.execute('SELECT CURRENT_TIMESTAMP AS ts, CURRENT_DATE AS day')
+        row = cursor.fetchone()
+        return {'ts': row['ts'], 'day': row['day']}
 
     def close(self):
         if self.conn:
@@ -1598,7 +1639,9 @@ class PortfolioStorage:
         """, (hours_threshold,))
         return [row['isin'] for row in cursor.fetchall()]
 
-    def get_db_freshness(self, stale_threshold_hours: int = 24) -> Dict[str, Any]:
+    def get_db_freshness(
+        self, stale_threshold_hours: int = 24, now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
         """
         Возвращает метки свежести данных из каталога, позиций и проверок мониторинга.
 
@@ -1616,8 +1659,14 @@ class PortfolioStorage:
         - max_market_price_time: время последнего обновления цены
 
         Выполняется одним параметризованным SELECT-запросом.
+
+        now (030.3): точка отсчёта окна свежести (cutoff = now - threshold).
+        None — прежнее поведение (wall-clock); PlanningContext передаёт frozen
+        as_of, чтобы границы «24 часа» считались на срезе, а не по настенным
+        часам момента вызова.
         """
-        stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_threshold_hours)
+        cutoff_now = now if now is not None else datetime.now(timezone.utc)
+        stale_cutoff = cutoff_now - timedelta(hours=stale_threshold_hours)
         cursor = self._cursor()
         cursor.execute("""
             SELECT
