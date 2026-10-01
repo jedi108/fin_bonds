@@ -4,6 +4,23 @@
 
 ## 2026-10-01
 
+- test(planning): regression consolidation проекта 030 (030.14) — полный
+  консолидационный прогон всех тестов волн 1–7 без изменений кода: базовый
+  режим (без POSTGRES_DSN_TEST) 737 collected / 493 passed / 244 skipped /
+  0 failed; полный режим (тестовая БД fin_bonds_test, миграции 001–015)
+  737 passed / 0 skipped / 0 failed. Отдельно зелёные наборы (полный режим):
+  legacy — test_rebalance_report 64, test_rebalance_scenario 56,
+  test_report_export_equivalence 2, test_rebalance_engine 11 (133 passed);
+  новые 030 — test_planning_context 28, test_context_store 51,
+  test_planning_intents 46, test_buy_eligibility 43, test_planning_fitter 34,
+  test_analysis_snapshot 25, test_rebalance_plan 30, test_rebalance_compare 26
+  (283 passed). Чек-лист 030.14 (unit/domain, price consistency 951.30 vs
+  1103.06/970.80, BUY eligibility, duplicate-leg, integration, controlled
+  fallback core-часть, backward compat) сверен с существующими тестами —
+  пробелов и дефектов не найдено, правки кода не потребовались. Legacy
+  контракты на месте: SCHEMA_VERSION=2, сценарная агрегация дублей
+  (test_duplicate_isin_trades_aggregated), buying-matured-zeroed
+  (test_buying_matured_bond_is_zeroed_and_excluded).
 - feat(planning): rebalance-compare — A/B сравнение альтернатив на одном
   PlanningContext (030.9) — новая команда `rebalance-compare`
   (`src/use_cases/rebalance_compare.py::RebalanceCompareUseCase`, строка в
