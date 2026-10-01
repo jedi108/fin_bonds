@@ -1044,6 +1044,45 @@ class PortfolioStorage:
     # трогают. Валюты не конвертируются — RUB-агрегат фильтруется по валюте.
     # ------------------------------------------------------------------
 
+    # Тела cash-операций без управления транзакцией: транзакцию открывает
+    # и завершает публичный метод (029-T03 — атомарная публикация snapshot
+    # переиспользует те же SQL-тела в одной транзакции).
+    @staticmethod
+    def _upsert_cash_balances_rows(cursor, balances: List[Dict[str, Any]]) -> int:
+        for b in balances:
+            cursor.execute(
+                """
+                INSERT INTO portfolio_cash_balances
+                    (broker_name, account_id, currency, money, blocked, available, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (broker_name, account_id, currency) DO UPDATE SET
+                    money = EXCLUDED.money,
+                    blocked = EXCLUDED.blocked,
+                    available = EXCLUDED.available,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    b['broker_name'], b['account_id'], b['currency'],
+                    b['money'], b.get('blocked', Decimal(0)), b['available'],
+                ),
+            )
+        return len(balances)
+
+    @staticmethod
+    def _delete_cash_accounts_not_in_rows(
+        cursor, broker_name: str, account_ids: Set[str]
+    ) -> int:
+        if not account_ids:
+            return 0
+        cursor.execute(
+            """
+            DELETE FROM portfolio_cash_balances
+            WHERE broker_name = %s AND NOT (account_id = ANY(%s))
+            """,
+            (broker_name, list(account_ids)),
+        )
+        return cursor.rowcount
+
     def upsert_cash_balances(self, balances: List[Dict[str, Any]]) -> int:
         """Идемпотентный upsert cash-балансов (portfolio_cash_balances).
 
@@ -1055,28 +1094,12 @@ class PortfolioStorage:
             return 0
         cursor = self._cursor()
         try:
-            for b in balances:
-                cursor.execute(
-                    """
-                    INSERT INTO portfolio_cash_balances
-                        (broker_name, account_id, currency, money, blocked, available, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, now())
-                    ON CONFLICT (broker_name, account_id, currency) DO UPDATE SET
-                        money = EXCLUDED.money,
-                        blocked = EXCLUDED.blocked,
-                        available = EXCLUDED.available,
-                        updated_at = EXCLUDED.updated_at
-                    """,
-                    (
-                        b['broker_name'], b['account_id'], b['currency'],
-                        b['money'], b.get('blocked', Decimal(0)), b['available'],
-                    ),
-                )
+            written = self._upsert_cash_balances_rows(cursor, balances)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
-        return len(balances)
+        return written
 
     def delete_cash_accounts_not_in(self, broker_name: str, account_ids: Set[str]) -> int:
         """Удаляет cash-строки брокера для счетов вне актуального configured set.
@@ -1089,19 +1112,50 @@ class PortfolioStorage:
             return 0
         cursor = self._cursor()
         try:
-            cursor.execute(
-                """
-                DELETE FROM portfolio_cash_balances
-                WHERE broker_name = %s AND NOT (account_id = ANY(%s))
-                """,
-                (broker_name, list(account_ids)),
+            deleted = self._delete_cash_accounts_not_in_rows(
+                cursor, broker_name, account_ids
             )
-            deleted = cursor.rowcount
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
         return deleted
+
+    def replace_cash_balances_snapshot(
+        self,
+        broker_name: str,
+        balances: List[Dict[str, Any]],
+        selected_account_ids: Set[str],
+    ) -> int:
+        """Атомарная публикация cash snapshot (029-T03): upsert + prune одной транзакцией.
+
+        Upsert актуальных balances и удаление cash-строк брокера для счетов
+        вне selected_account_ids выполняются в ОДНОЙ DB transaction (BEGIN ->
+        upsert всех balances -> prune rows вне selected_account_ids -> COMMIT).
+        При любой ошибке ROLLBACK: БД остаётся на прошлом успешном snapshot,
+        cash_updated_at частично не продвигается (промежуточного commit между
+        upsert и prune нет). PostgreSQL now() стабилен внутри транзакции —
+        после успешной публикации все строки snapshot получают один
+        transaction timestamp.
+
+        Пустой balances — no-op (снимок без строк не публикуется, семантика
+        upsert_cash_balances), пустой selected_account_ids — prune-часть не
+        выполняется (семантика delete_cash_accounts_not_in). Возвращает число
+        записанных (upsert) строк.
+        """
+        if not balances:
+            return 0
+        cursor = self._cursor()
+        try:
+            written = self._upsert_cash_balances_rows(cursor, balances)
+            self._delete_cash_accounts_not_in_rows(
+                cursor, broker_name, selected_account_ids
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return written
 
     def get_available_cash_rub(self) -> Dict[str, Any]:
         """Canonical reader свободного RUB (задача 022).

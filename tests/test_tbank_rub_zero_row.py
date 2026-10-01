@@ -301,6 +301,14 @@ class _FakeStorage:
         self.calls.append(('delete_cash_not_in', broker, set(account_ids)))
         self.cash = {k: v for k, v in self.cash.items() if k[0] in set(account_ids)}
 
+    def replace_cash_balances_snapshot(self, broker, balances, selected_account_ids):
+        # 029-T03: sync публикует cash атомарным методом (upsert + prune).
+        self.calls.append(
+            ('replace_cash_snapshot', broker, set(selected_account_ids)))
+        self.upsert_cash_balances(balances)
+        self.delete_cash_accounts_not_in(broker, set(selected_account_ids))
+        return len(balances)
+
     def mark_closed_positions(self, keep_keys=None, brokers=None):
         return []
 
@@ -376,7 +384,8 @@ class TestCaseDSyncInMemory:
 
         cash_writes = [
             call for call in storage.calls
-            if call[0] in ('upsert_cash', 'delete_cash_not_in')
+            if call[0] in ('upsert_cash', 'delete_cash_not_in',
+                           'replace_cash_snapshot')
         ]
         assert cash_writes == [], (
             f"failed snapshot не должен публиковать cash, было: {cash_writes}"
@@ -446,4 +455,8 @@ class TestCaseDDatabase:
         assert rows['acc-1'][1] > _T1
         assert rows['acc-2'][1] > _T1, (
             "synthetic zero row B получает updated_at того же (нового) sync"
+        )
+        # 029-T03: publish атомарен — обе RUB rows с одним transaction timestamp
+        assert rows['acc-1'][1] == rows['acc-2'][1], (
+            "все RUB rows успешного snapshot обязаны иметь один timestamp транзакции"
         )

@@ -337,6 +337,7 @@ class TestSyncPreflightFailFast:
             'add_portfolio_positions',
             'upsert_cash_balances',
             'delete_cash_accounts_not_in',
+            'replace_cash_balances_snapshot',
         ):
             monkeypatch.setattr(
                 db, method,
@@ -411,6 +412,14 @@ class _FakeStorage:
     def delete_cash_accounts_not_in(self, broker, account_ids):
         self.calls.append(('delete_cash_not_in', broker, set(account_ids)))
         self.cash = {k: v for k, v in self.cash.items() if k[0] in set(account_ids)}
+
+    def replace_cash_balances_snapshot(self, broker, balances, selected_account_ids):
+        # 029-T03: sync публикует cash атомарным методом (upsert + prune).
+        self.calls.append(
+            ('replace_cash_snapshot', broker, set(selected_account_ids)))
+        self.upsert_cash_balances(balances)
+        self.delete_cash_accounts_not_in(broker, set(selected_account_ids))
+        return len(balances)
 
     def mark_closed_positions(self, keep_keys=None, brokers=None):
         return []

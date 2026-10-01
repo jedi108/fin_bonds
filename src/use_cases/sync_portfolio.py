@@ -212,8 +212,13 @@ class SyncPortfolioUseCase(UseCase):
         - запись только при успешном ответе: API error -> False, строки в БД
           не трогаются (последний успешный cash остаётся, API failure != 0 RUB);
         - пустой ответ тоже не затирает прошлый снапшот (подозрителен);
-        - после успешной записи удаляются cash-строки счетов, которых больше
-          нет в configured set (агрегация только по configured accounts).
+        - публикация атомарна (029-T03): upsert актуальных строк и prune
+          счетов вне configured set — одна DB transaction
+          (replace_cash_balances_snapshot), при ошибке ROLLBACK оставляет
+          прошлый успешный snapshot, cash_updated_at частично не продвигается;
+        - после synthetic zero RUB rows (029-T02) + атомарной публикации
+          продвижение агрегированного cash_updated_at — proof нового полного
+          TBank RUB snapshot (current-cash guard задачи T14).
         """
         logger.info("Шаг: синхронизация RUB cash из TBank API (GetPositions)...")
         try:
@@ -232,9 +237,8 @@ class SyncPortfolioUseCase(UseCase):
             )
             return False
         try:
-            written = self.db.upsert_cash_balances(balances)
-            self.db.delete_cash_accounts_not_in(
-                'TBank', {b['account_id'] for b in balances}
+            written = self.db.replace_cash_balances_snapshot(
+                'TBank', balances, {b['account_id'] for b in balances}
             )
         except Exception as e:
             logger.error(f"Не удалось сохранить cash в PostgreSQL: {e}", exc_info=True)

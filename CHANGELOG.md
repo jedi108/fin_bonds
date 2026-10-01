@@ -4,6 +4,24 @@
 
 ## 2026-10-01
 
+- feat(storage): atomic cash snapshot publish (029-T03) — upsert актуальных
+  cash-строк и prune счетов вне configured/selected set выполняются в ОДНОЙ
+  DB transaction: новый `PortfolioStorage.replace_cash_balances_snapshot()`
+  (BEGIN -> upsert всех balances -> prune rows вне selected_account_ids ->
+  COMMIT, при любой ошибке ROLLBACK). Прежняя пара `upsert_cash_balances` +
+  `delete_cash_accounts_not_in` коммитилась раздельно: падение prune после
+  успешного upsert оставляло в БД часть нового snapshot с продвинутым
+  `cash_updated_at`, хотя sync возвращал failure (mixed snapshot, ошибочно
+  принимаемый skill за свежий). SQL-тела обоих операций вынесены в общие
+  helper'ы — публичная семантика отдельных методов не изменилась;
+  `_sync_tbank_cash()` публикует cash только атомарным методом. PostgreSQL
+  `now()` стабилен внутри транзакции: все строки успешного snapshot получают
+  один transaction timestamp; вместе с synthetic zero RUB row (029-T02)
+  продвижение агрегированного `cash_updated_at` становится proof полного
+  TBank RUB snapshot (current-cash guard задачи T14). Тесты:
+  tests/test_cash_atomic_publish.py (unit fake-connection + DB-регрессии
+  rollback/один timestamp), tests/test_tbank_rub_zero_row.py (Case D поверх
+  атомарного publish), tests/test_tbank_account_preflight.py.
 - feat(report): canonical validation внутри программного build_report
   (029-T05) — programmatic consumers (экспортёр ChatGPT) больше не обходят
   `_validate_args`: validation выполняется в начале `build_report()`, а
