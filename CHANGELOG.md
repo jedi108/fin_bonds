@@ -4,6 +4,22 @@
 
 ## 2026-10-01
 
+- test(export): equivalence-тесты rebalance-report vs sync-chatgpt-portfolio
+  на одном snapshot (029-T09) — tests/test_report_export_equivalence.py
+  прогоняет оба вызова с каноническим filter set задачи 029 (--freq-min 4
+  --freq-max 12 --min-credit-rating AA- --exclude-sovereign --screener-limit 30;
+  у report ещё --include-held, у sync include_held=true — product-default
+  exporter) по одной тестовой БД без data refresh: CANDIDATES совпадают с
+  `report["screener"]` по набору ISIN и порядку/rank отдельно FIX и FLOAT,
+  `candidate_meta.filters` == `report["screener"]["filters"]`, каждый столбец
+  CANDIDATES равен полю canonical screener-строки и count 1:1 — exporter не
+  делает post-filter transformations. Тест изолирован от DB-time границ:
+  ytm + ytm_updated_at сеются явно (fallback с valuation_date=date.today()
+  не участвует), цены заведомо свежие с запасом до 24h cutoff, maturity
+  заведомо в будущем (CURRENT_DATE bound не участвует). Отдельный
+  regression-тест фиксирует caveat: `ytm_updated_at IS NULL` считает YTM
+  на лету с date.today() — «same DB rows» без same valuation date не
+  гарантирует идентичный ranking.
 - feat(export): один canonical cash read + candidate metadata + stdout
   контракт (029-T08) — cash-поля CONTROL (`cash_available_rub` /
   `cash_updated_at`) копируются из `report["portfolio"]` того же
