@@ -343,7 +343,7 @@ def test_zombie_rows_are_warning_not_critical(db, capsys):
             VALUES
               ('RU000A10AA02', 'TBank', 't1', 35, 0, 0, %s),
               ('RU000A108VZ0', 'TBank', 't1', 5, 0, 0, %s),
-              ('RU000A108VZ0', 'Alor', 'a1', 2, 0, 0, %s)
+              ('RU000A108VZ0', 'Fake', 'a1', 2, 0, 0, %s)
             """,
             (now, now, now),
         )

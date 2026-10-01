@@ -153,7 +153,6 @@ python3 main.py generate-plots
 Требуемые переменные окружения:
 - `TBANK_TOKEN` - токен для TBank API
 - `MOEX_TOKEN` - токен для MOEX API (опционально)
-- `ALOR_TOKEN` - токен для Alor API (опционально)
 
 ## Поддержка
 

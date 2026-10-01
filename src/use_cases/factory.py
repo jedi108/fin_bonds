@@ -37,7 +37,6 @@ from src.use_cases.seed_data import SeedDataUseCase
 from src.use_cases.set_spread import SetSpreadUseCase
 from src.use_cases.sync_offers_to_calendar import SyncOffersToCalendarUseCase
 from src.use_cases.sync_portfolio import SyncPortfolioUseCase
-from src.use_cases.test_alor_api import TestAlorApiUseCase
 from src.use_cases.test_cbr_api import TestCbrApiUseCase
 from src.use_cases.test_moex_api import TestMoexApiUseCase
 from src.use_cases.test_moex_update_logic import TestMoexUpdateLogicUseCase
@@ -67,7 +66,6 @@ class UseCaseFactory:
         self._moex_api_client: Optional[MoexApiClient] = None
         self._cbr_api_client: Optional[CbrApiClient] = None
         self._tbank_api_client = None
-        self._alor_api_client = None
         self._notifier: Optional[TelegramNotifier] = None
         self._adapter_factory = None
         self._all_use_cases = None
@@ -144,57 +142,6 @@ class UseCaseFactory:
             )
         return self._tbank_api_client
 
-    def _get_alor_tokens(self) -> Dict[str, str]:
-        """Получает токены Alor из переменных окружения."""
-        token = os.getenv('ALOR_TOKEN', '')
-        refresh_token = os.getenv('ALOR_REFRESH_TOKEN', '')
-        client_id = os.getenv('ALOR_CLIENT_ID', '')
-        client_secret = os.getenv('ALOR_CLIENT_SECRET', '')
-        login = os.getenv('ALOR_LOGIN', '')
-        
-        # Проверяем минимально необходимые токены для тестирования
-        if not refresh_token:
-            logger.warning("ALOR_REFRESH_TOKEN не настроен - минимально необходимый токен")
-            return {}
-        
-        # Для базового тестирования достаточно refresh_token
-        tokens = {
-            'token': token or 'test_token',  # Используем тестовый токен если основной не настроен
-            'refresh_token': refresh_token,
-            'client_id': client_id or 'test_client_id',
-            'client_secret': client_secret or 'test_client_secret',
-            'login': login
-        }
-        
-        if not all([token, client_id, client_secret]):
-            logger.info("Частично настроены токены Alor - режим тестирования")
-            
-        return tokens
-    
-    def get_alor_api_client(self) -> Optional['AlorApiClient']:
-        """Создает и возвращает клиент Alor API."""
-        if self._alor_api_client is None:
-            from src.alor.api_client import AlorApiClient
-            tokens = self._get_alor_tokens()
-            if tokens:
-                try:
-                    # Колбэк номинала вместо доступа API-клиента к БД
-                    storage = self.get_db_connection()
-
-                    def get_nominal(isin: str) -> Optional[Decimal]:
-                        bond = storage.get_bond_by_isin(isin)
-                        return bond.nominal if bond else None
-
-                    self._alor_api_client = AlorApiClient(get_nominal=get_nominal, **tokens)
-                    logger.info("Alor API клиент успешно создан")
-                except Exception as e:
-                    logger.error(f"Ошибка создания Alor API клиента: {e}")
-                    return None
-            else:
-                logger.warning("Alor API клиент не создан - отсутствуют токены")
-                return None
-        return self._alor_api_client
-
     def get_adapter_factory(self) -> AdapterFactory:
         if self._adapter_factory is None:
             self._adapter_factory = AdapterFactory(self)
@@ -244,7 +191,6 @@ class UseCaseFactory:
             'test-smartlab': TestSmartlabUseCase,
             'test-tbank': TestTbankApiUseCase,
             'test-moex-update-logic': TestMoexUpdateLogicUseCase,
-            'test-alor': TestAlorApiUseCase,
             'analyze-liquidity': AnalyzeLiquidityUseCase,
             'sync-offers-to-calendar': SyncOffersToCalendarUseCase,
             'export-monitoring': ExportMonitoringResultsUseCase,

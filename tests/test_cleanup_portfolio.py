@@ -133,11 +133,11 @@ class TestStorageZombieMethods:
     def test_mark_closed_positions_zero_quantity_and_absent(self, db):
         insert_position(db, 'RU000A0ZERO01', 'TBank', 't1', '0', '0')       # нулевое qty
         insert_position(db, 'RU000A0GONE01', 'TBank', 't1', '5', '500')     # нет у брокера
-        insert_position(db, 'RU000A0GONE02', 'Alor', 'a1', '3', '300')      # другой брокер
+        insert_position(db, 'RU000A0GONE02', 'Fake', 'a1', '3', '300')      # другой брокер
         insert_position(db, 'RU000A0KEEP01', 'TBank', 't1', '5', '500')     # у брокера есть
 
         keep = {
-            ('RU000A0GONE02', 'Alor', 'a1'),
+            ('RU000A0GONE02', 'Fake', 'a1'),
             ('RU000A0KEEP01', 'TBank', 't1'),
         }
         closed = db.mark_closed_positions(keep_keys=keep, brokers=['TBank'])
@@ -169,7 +169,7 @@ class TestStorageZombieMethods:
         add_catalog_row(db, 'RU000A0OK001', date(2030, 1, 1))
         insert_position(db, 'RU000A0ZMB01', 'TBank', 't1', '35', '0')
         insert_position(db, 'RU000A0ZMB02', 'TBank', 't1', '5', '0')
-        insert_position(db, 'RU000A0ZMB02', 'Alor', 'a1', '2', '0')
+        insert_position(db, 'RU000A0ZMB02', 'Fake', 'a1', '2', '0')
         insert_position(db, 'RU000A0OK001', 'TBank', 't1', '1', '1000')
         insert_position(db, 'RU000A0ZMB03', 'TBank', 't1', '0', '0')  # вне каталога, qty 0
 
@@ -258,7 +258,7 @@ class TestFreshnessSuspiciousField:
         add_catalog_row(db, 'RU000A0FRS01', date(2025, 1, 1))   # погашена
         add_catalog_row(db, 'RU000A0FRS02', date(2030, 1, 1))   # живая
         insert_position(db, 'RU000A0FRS01', 'TBank', 't1', '35', '0')
-        insert_position(db, 'RU000A0FRS02', 'Alor', 'a1', '2', '0')
+        insert_position(db, 'RU000A0FRS02', 'Fake', 'a1', '2', '0')
         with db.conn.cursor() as cursor:
             cursor.execute(
                 "UPDATE portfolio_positions SET updated_at = %s", (now,)

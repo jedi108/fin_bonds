@@ -28,7 +28,6 @@ class SyncPortfolioUseCase(UseCase):
         super().__init__(factory)
         self.db = factory.get_db_connection()
         self.tbank_api_client = factory.get_tbank_api_client()
-        self.alor_api_client = factory.get_alor_api_client()  # Новый клиент
         # self.moex_api_client = factory.get_moex_api_client() # Добавим позже
 
     @staticmethod
@@ -37,8 +36,8 @@ class SyncPortfolioUseCase(UseCase):
             '--source',
             type=str,
             default='all',
-            choices=['all', 'tbank', 'alor', 'excel'],
-            help="Источник данных для синхронизации: 'tbank', 'alor', 'excel' или 'all' (по умолчанию)."
+            choices=['all', 'tbank', 'excel'],
+            help="Источник данных для синхронизации: 'tbank', 'excel' или 'all' (по умолчанию)."
         )
         parser.add_argument(
             '--excel_path',
@@ -72,9 +71,6 @@ class SyncPortfolioUseCase(UseCase):
             # (портфель «только деньги» — именно тот случай, где cash важен).
             cash_sync_ran = True
             cash_synced = self._sync_tbank_cash()
-
-        if args.source in ['all', 'alor'] and self.alor_api_client:
-            positions_to_save.extend(self._fetch_from_alor())
 
         # Если источник 'excel' - путь обязателен.
         if args.source == 'excel' and not args.excel_path:
@@ -126,8 +122,6 @@ class SyncPortfolioUseCase(UseCase):
                 # Очищаем только позиции соответствующего брокера
                 if args.source == 'tbank':
                     broker = 'TBank'
-                elif args.source == 'alor':
-                    broker = 'Alor'
                 else:
                     broker = None
                 if broker:
@@ -154,10 +148,10 @@ class SyncPortfolioUseCase(UseCase):
         # status='closed'. Позиции с ненулевым количеством и нулевой оценкой на
         # живых бумагах (кейс ГлобалФ: цена 0 от брокера) НЕ трогаем — это не
         # ошибка синка, их учитывает гейт свежести (WARN_ZOMBIE_ROWS).
-        _source_brokers = {'tbank': ['TBank'], 'alor': ['Alor']}
+        _source_brokers = {'tbank': ['TBank']}
         # Проверка «отсутствует у брокера» осмысленна только в upsert-режиме по
         # источникам, полноценно покрывающим свои счета (API); для 'all' ответ
-        # покрывает всех брокеров, для excel состав файла полноты не гарантирует.
+        # покрывает TBank (Excel, если подключён, полноты файла не гарантирует).
         absence_known = args.upsert and args.source != 'excel'
         closed = self.db.mark_closed_positions(
             keep_keys={(p.isin, p.broker_name, p.account_id or '') for p in positions_to_save} if absence_known else None,
@@ -244,17 +238,6 @@ class SyncPortfolioUseCase(UseCase):
             f"(RUB {len(rub_rows)}, суммарно available RUB = {rub_total})."
         )
         return True
-
-    def _fetch_from_alor(self) -> List[DataModelPortfolioPosition]:
-        """Получает позиции из Alor API."""
-        logger.info("Шаг 2: Получение позиций из Alor API...")
-        try:
-            positions = self.alor_api_client.get_portfolio_positions()
-            logger.info(f"Получено {len(positions)} позиций из Alor.")
-            return positions
-        except Exception as e:
-            logger.error(f"Не удалось получить портфель из Alor API: {e}", exc_info=True)
-            return []
 
     def _fetch_from_excel(self, excel_path: str) -> List[DataModelPortfolioPosition]:
         """Загружает, обогащает и обрабатывает позиции из Excel файла."""

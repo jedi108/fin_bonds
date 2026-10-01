@@ -1,7 +1,7 @@
 # Команда: `sync-portfolio`
 
 ## Описание
-Команда для синхронизации портфеля облигаций из различных источников: TBank API, Alor API или Excel-файлов. Загружает текущие позиции в портфеле и сохраняет их в локальную базу данных.
+Команда для синхронизации портфеля облигаций из различных источников: TBank API или Excel-файлов. Загружает текущие позиции в портфеле и сохраняет их в локальную базу данных.
 
 ## Синтаксис
 ```bash
@@ -24,7 +24,6 @@ python3 main.py sync-portfolio [опции]
 
 **Доступные значения:**
 - `tbank` - TBank API (по умолчанию)
-- `alor` - Alor API
 - `excel` - Excel файл
 - `all` - Все доступные источники
 
@@ -32,9 +31,6 @@ python3 main.py sync-portfolio [опции]
 ```bash
 # Синхронизация из TBank
 python3 main.py sync-portfolio --source tbank
-
-# Синхронизация из Alor
-python3 main.py sync-portfolio --source alor
 
 # Синхронизация из Excel файла
 python3 main.py sync-portfolio --source excel --excel-path data/portfolio.xlsx
@@ -69,17 +65,7 @@ python3 main.py sync-portfolio --source tbank
 - Обновляет таблицу `portfolio_positions`
 - Выводит статистику синхронизации
 
-### 2. Синхронизация из Alor API
-```bash
-python3 main.py sync-portfolio --source alor
-```
-**Что происходит:**
-- Подключается к Alor API
-- Получает позиции из Alor
-- Синхронизирует с локальной БД
-- Показывает различия между источниками
-
-### 3. Синхронизация из Excel файла
+### 2. Синхронизация из Excel файла
 ```bash
 python3 main.py sync-portfolio --source excel --excel-path data/portfolio.xlsx
 ```
@@ -89,13 +75,12 @@ python3 main.py sync-portfolio --source excel --excel-path data/portfolio.xlsx
 - Обновляет локальную БД
 - Валидирует данные
 
-### 4. Синхронизация из всех источников
+### 3. Синхронизация из всех источников
 ```bash
 python3 main.py sync-portfolio --source all
 ```
 **Что происходит:**
 - Синхронизирует из TBank
-- Синхронизирует из Alor (если доступен)
 - Сравнивает данные между источниками
 - Показывает различия
 
@@ -119,11 +104,6 @@ python3 main.py sync-portfolio --source all
 - Цены в абсолютных значениях (рубли)
 - Количество в штуках
 - Доходность в процентах
-
-#### Alor API
-- Цены в абсолютных значениях (рубли)
-- Количество в штуках
-- Дополнительные метаданные
 
 #### Excel файл
 - Поддерживает различные форматы
@@ -156,11 +136,9 @@ python3 main.py sync-portfolio --source all
 
 ### API лимиты
 - TBank API: ~1000 запросов в минуту
-- Alor API: ~100 запросов в минуту
 
 ### Время выполнения
 - TBank: ~30 секунд
-- Alor: ~1-2 минуты
 - Excel: ~10 секунд
 
 ### Обработка ошибок
@@ -201,11 +179,9 @@ python3 main.py sync-portfolio --source all
 ```bash
 # Проверить токены
 echo $INVEST_TOKEN
-echo $ALOR_TOKEN
 
 # Проверить доступность API
 python3 main.py test-tbank
-python3 main.py test-alor
 ```
 
 ### Проблема: Пустой портфель

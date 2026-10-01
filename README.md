@@ -84,7 +84,7 @@ psql "$POSTGRES_DSN" -c 'SELECT version, name, applied_at FROM schema_migrations
 
 ```bash
 python3 main.py migrate-db      # 1. создать схему
-python3 main.py sync-portfolio  # 2. загрузить состав портфеля (TBank/Excel/Alor)
+python3 main.py sync-portfolio  # 2. загрузить состав портфеля (TBank/Excel)
 python3 main.py update-bonds    # 3. собрать каталог облигаций
 ```
 
@@ -842,53 +842,6 @@ Update job finished at Wed Jan 15 09:05:23 MSK 2025
 
 **Проблема:** Ошибки с активацией venv
 **Решение:** Проверьте путь к `venv/bin/activate` в скрипте
-
----
-
-### 2. Поддержка брокера Alor (интеграция с вашим портфелем)
-
-Система поддерживает автоматическую загрузку портфеля с брокера Alor наряду с TBank. Все позиции сохраняются в общую таблицу `portfolio_positions`.
-
-**Архитектура ликвидности:** Ликвидность является биржевым свойством ISIN, а не свойством брокера. Стакан заявок одинаков для всех брокеров на MOEX, поэтому анализ ликвидности, выполненный для одного брокера, применим ко всем брокерам для данного ISIN.
-
-#### Настройка переменных окружения для Alor
-
-В файле `.env` должны быть указаны:
-
-```
-# Для Alor API (боевой контур)
-ALOR_TOKEN="<ваш access token>"
-ALOR_REFRESH_TOKEN="<ваш refresh token>"
-ALOR_CLIENT_ID="<ваш client id>"
-ALOR_CLIENT_SECRET="<ваш client secret>"
-ALOR_LOGIN="<ваш торговый логин, например D88199>"
-```
-
-> **Внимание!** Не публикуйте эти токены в открытых репозиториях. Refresh token и client secret — это ваши ключи доступа к брокеру.
-
-#### Синхронизация портфеля Alor
-
-Для загрузки портфеля Alor используйте команду:
-
-```bash
-python3 main.py sync-portfolio --source alor
-```
-
-Для одновременной загрузки портфелей TBank и Alor (и объединения их в одну БД):
-
-```bash
-python3 main.py sync-portfolio --source all
-```
-
-Все позиции будут сохранены в одну таблицу, с указанием брокера в поле `broker_name`.
-
-#### Проверка работы Alor API
-
-Для теста соединения и получения портфеля Alor выполните:
-
-```bash
-python3 main.py test-alor --test-type portfolio
-```
 
 ---
 

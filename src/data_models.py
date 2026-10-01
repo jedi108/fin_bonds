@@ -49,7 +49,7 @@ class Bond:
     
     # Рыночные данные (новые поля)
     market_price: Optional[Decimal] = None
-    market_price_source: Optional[str] = None  # 'tbank', 'moex', 'alor'
+    market_price_source: Optional[str] = None  # 'tbank', 'moex'
     market_price_updated_at: Optional[datetime] = None
 
     # Привязка к компании-эмитенту (справочник companies); заполняется

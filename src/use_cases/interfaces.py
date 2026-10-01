@@ -61,21 +61,3 @@ class ICbrApiClient(ABC):
     def get_latest_ruonia_rate(self) -> Decimal:
         pass
 
-
-class IAlorApiClient(ABC):
-    """Абстракция клиента Alor API."""
-
-    @abstractmethod
-    def get_portfolio_positions(self) -> List[PortfolioPosition]:
-        """Возвращает позиции портфеля пользователя."""
-        pass
-
-    @abstractmethod
-    def enrich_bonds_by_tickers(self, tickers: List[str]) -> List[Dict[str, Any]]:
-        """Дополняет информацию об облигациях на основании тикеров."""
-        pass
-
-    @abstractmethod
-    def get_bonds(self) -> List[Bond]:
-        """Возвращает список облигаций из Alor."""
-        pass

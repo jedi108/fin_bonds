@@ -138,9 +138,6 @@ class _FakeFactory:
     def get_tbank_api_client(self):
         return self._tbank
 
-    def get_alor_api_client(self):
-        return None
-
 
 def _make_sync_args():
     return SimpleNamespace(source='tbank', excel_path=None, upsert=False)

@@ -262,11 +262,6 @@ class ExportPortfolioUseCase:
         # ликвидности применимы ко всем брокерам для данного ISIN.
         for pos in positions:
             if pos.isin:
-                # Для Alor не устанавливаем liquidity_loss_ratio, так как стакан не анализируется
-                if pos.broker_name == "Alor":
-                    pos.liquidity_loss_ratio = None
-                    continue
-                    
                 loss_data = self.storage.get_last_monitoring_check(pos.isin, 'liquidity_analyzer')
                 if loss_data and loss_data[1]: # loss_data[1] содержит metric_value (коэффициент потерь)
                     try:
