@@ -4,6 +4,27 @@
 
 ## 2026-10-01
 
+- docs(preflight): зафиксированы фактические якоря post-029 для project 030
+  (030.1) — код не менялся (подзадача read-only): baseline `make test` зелёный
+  (443 collected / 211 passed / 232 skipped / 0 failed); подтверждены CLI
+  (argparse в `main.py` + `UseCaseFactory.get_use_case_map`), canonical
+  `RebalanceReportUseCase` (`SCHEMA_VERSION=2`, scenario-контракт: valid /
+  feasible / errors / summary / budget_check / issuer_limits / constraint_checks
+  / positions_after), `ISSUER_CONCENTRATION_LIMIT_PCT = 15.0`, freshness gate
+  `classify_freshness` → `meta.data_freshness.{gate_status,is_fresh,criticals,
+  warnings}`, NUMERIC-миграции (005), отсутствие canonical
+  `lot_size`/`quantity_step` в `bonds_catalog`, structural gates buy-path
+  (`get_bonds_yield_table(mode='buy')`: RUB, is_trade_available true-or-null,
+  не perpetual, maturity >= CURRENT_DATE, свежая market_price > 0 в окне 24h,
+  coupon COALESCE, широкие risk/listlevel/ytm), permissive
+  `get_scenario_universe_rows`, valuation view `v_portfolio_positions_valuation`
+  (valuation_source: broker_value/broker_price/market_price/nominal_fallback/zero),
+  eff_price (matured=0 / held=value_rub/qty / buy=market_price→nominal fallback),
+  единственный источник defaults 12 screener-фильтров `_SCREENER_FILTER_SPECS`
+  (029-T06), скрытый второй clock `calculate_bond_cashflow_metrics(
+  valuation_date=date.today())` и `CURRENT_DATE`/`CURRENT_TIMESTAMP` в buy SQL.
+  Детали — в файле задачи 030.1 (workspace); расхождений имён/путей с ожиданиями
+  030 нет.
 - test(export): equivalence-тесты rebalance-report vs sync-chatgpt-portfolio
   на одном snapshot (029-T09) — tests/test_report_export_equivalence.py
   прогоняет оба вызова с каноническим filter set задачи 029 (--freq-min 4
