@@ -4,6 +4,50 @@
 
 ## 2026-10-01
 
+- feat(planning): rebalance-compare — A/B сравнение альтернатив на одном
+  PlanningContext (030.9) — новая команда `rebalance-compare`
+  (`src/use_cases/rebalance_compare.py::RebalanceCompareUseCase`, строка в
+  карте factory; main.py изменений не требует) + compare-ядро
+  `src/services/scenario_compare.py`. Закрывает класс ошибки «молча сравнили
+  plan A и plan B, посчитанные по разным срезам» — delta смешала бы эффект
+  стратегии с изменением рыночных/портфельных данных; LLM не пишет
+  execute_code ради арифметики сравнения. Preferred-путь: ОДИН PlanningContext
+  (030.3, `--context-id` 030.4 поддержан), каждый вариант — `AutoFitFitter.fit`
+  (030.7) на том же frozen context, raw universe до variant screening —
+  relaxed/strict варианты применяют свои фильтры к одному набору исходных
+  строк. Fallback (`compare_plan_results`): готовые plan results (контракт
+  fitter 030.7 или плоская проекция 030.8) с проверкой одинакового
+  `context_fingerprint` — при несовпадении диагностика `CONTEXT_MISMATCH`,
+  delta не публикуется (`null`), метрики вариантов остаются их собственными
+  canonical выходами. Правило одного calculator: метрики извлекаются только из
+  canonical outputs движка (summary.securities_after/cash_after_estimate/
+  coupon_month_after/coupon_year_after/delta_month/delta_year, positions_after
+  count + issuer_pct, len(constraint_checks), net-trade ISINs), пересчёта
+  портфеля «третьей формулой» нет; единственная новая арифметика — delta
+  вариант − baseline (первый вариант): Decimal, выдача decimal-строками
+  (правило 030 №3), canonical значения движка — как есть (прецедент 030.8).
+  CLI: варианты prefixed-флагами — зеркала rebalance-plan (`--a-sell-all/
+  --a-target-value/--a-freq-min/--a-freq-max/--a-min-credit-rating/
+  --a-exclude-sovereign/--a-max-position-value` и то же с `--b-…`),
+  различаться могут intents и формальные ограничения; граница CLI (парсинг
+  intents, валидация значений, сборка context, canonical проекции плана)
+  переиспользована у 030.8 без копий. Diagnostics: intents
+  INVALID_TARGET_VALUE/INVALID_INTENT/DUPLICATE_TARGET/CONFLICTING_INTENT
+  (с атрибутом `variant`), CONTEXT_* (030.4), CONTEXT_MISMATCH (fallback);
+  machine-readable JSON с exit 0. Вывод: envelope (fingerprint/as_of/
+  data_gate, comparable, diagnostics) + `metrics` по вариантам + `delta`
+  (variant − baseline) + `variants` (каждый plan result: canonical блоки
+  030.8). Persistent snapshot DB для compare не создаётся. Тесты:
+  tests/test_rebalance_compare.py (26, без БД). Полный набор: 737 collected /
+  493 passed / 244 skipped / 0 failed (baseline 030.8 711/467/244/0 + 26;
+  ассерты размера карты команд в тестах 030.8/030.10 обновлены 38→39 —
+  механическое следствие additive-команды). Smoke на локальной scratch-БД
+  (createdb → migrate-db → синтетика → CLI → dropdb): A/B с sell-all и
+  разными constraints — delta securities −12000 / cash +12000 / купон
+  −100/мес; snapshot → --context-id в разных процессах — тот же fingerprint;
+  строгий cap — 7 canonical violations (feasible=false), урезание
+  lower-priority не требуется; invalid intent варианта b — machine-readable
+  с variant='b'.
 - feat(planning): rebalance-plan — high-level CLI планирования: intents →
   fitted целевой портфель одной командой (030.8) — новая команда
   `rebalance-plan` (`src/use_cases/rebalance_plan.py::RebalancePlanUseCase`,

@@ -317,7 +317,7 @@ class TestCliWiring:
         # Additive: существующие команды не тронуты.
         assert 'rebalance-report' in use_case_map
         assert 'rebalance-analysis-snapshot' in use_case_map
-        assert len(use_case_map) == 38
+        assert len(use_case_map) == 39  # + rebalance-compare (030.9)
 
     def test_constraint_flag_validation_value_errors(self, tmp_path):
         """Неверная комбинация флагов-ограничений — ValueError по конвенции

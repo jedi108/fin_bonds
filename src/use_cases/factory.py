@@ -52,6 +52,7 @@ from src.use_cases.update_floaters import UpdateFloatersUseCase
 from src.use_cases.calculate_duration import CalculateDurationUseCase
 from src.use_cases.rebalance_report import RebalanceReportUseCase
 from src.use_cases.rebalance_plan import RebalancePlanUseCase
+from src.use_cases.rebalance_compare import RebalanceCompareUseCase
 from src.use_cases.sync_chatgpt_portfolio import SyncChatgptPortfolioUseCase
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,7 @@ class UseCaseFactory:
             'calculate-duration': CalculateDurationUseCase,
             'rebalance-report': RebalanceReportUseCase,
             'rebalance-plan': RebalancePlanUseCase,
+            'rebalance-compare': RebalanceCompareUseCase,
             'rebalance-analysis-snapshot': AnalysisSnapshotUseCase,
             'sync-chatgpt-portfolio': SyncChatgptPortfolioUseCase,
         }
