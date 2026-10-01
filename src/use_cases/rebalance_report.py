@@ -386,8 +386,8 @@ class RebalanceReportUseCase(UseCase):
 
     def execute(self, args: argparse.Namespace):
         logger.info("🚀 Формирование rebalance-report (schema_version=%s)", SCHEMA_VERSION)
-        self._validate_args(args)
-
+        # 029-T05: canonical validation — внутри build_report (единственная
+        # точка для CLI и программных потребителей, двойной validation нет).
         report = self.build_report(args)
 
         # JSON — в stdout; логи (logging) идут в stderr и ответ не портят.
@@ -434,10 +434,15 @@ class RebalanceReportUseCase(UseCase):
     def build_report(self, args: argparse.Namespace) -> Dict[str, Any]:
         """Собирает канонический отчёт — программный API (019).
 
-        Возвращает тот же dict, что execute() печатает как JSON: CLI и
-        программные потребители (экспортёр ChatGPT) идут через один метод,
-        второго аналитического контура не появляется.
+        029-T05: canonical validation (_validate_args) выполняется здесь —
+        programmatic consumers (экспортёр ChatGPT) не могут обойти её и
+        построить отчёт на невалидной комбинации фильтров. CLI идёт через
+        тот же метод из execute(), повторной validation нет (проверка
+        чистая — повторный вызов идемпотентен). Возвращает тот же dict,
+        что execute() печатает как JSON: второго аналитического контура
+        не появляется.
         """
+        self._validate_args(args)
         now = datetime.now(timezone.utc)
         positions, total_value = self._build_portfolio()
         concentrations = self._build_concentrations(positions, total_value)

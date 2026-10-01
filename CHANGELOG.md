@@ -4,6 +4,16 @@
 
 ## 2026-10-01
 
+- feat(report): canonical validation внутри программного build_report
+  (029-T05) — programmatic consumers (экспортёр ChatGPT) больше не обходят
+  `_validate_args`: validation выполняется в начале `build_report()`, а
+  двойной вызов из `execute()` убран (проверка чистая — повторный вызов
+  идемпотентен). Невалидная комбинация фильтров (freq-in + freq-min/max,
+  freq-min > freq-max, unknown min-credit-rating, screener-limit < 1,
+  max-ytm <= 0) отклоняется той же ошибкой, что и CLI. Переходные явные
+  вызовы `_validate_args` из 029-T04 в sync-chatgpt-portfolio убраны —
+  validation в exporter не дублируется. Тесты: tests/test_rebalance_report.py
+  (TestBuildReportValidatesArgs), tests/test_sync_chatgpt_portfolio.py.
 - feat(tbank): complete RUB row invariant — synthetic zero row (029-T02) —
   успешный `GetPositions(account_id)` без RUB ни в money, ни в blocked
   трактуется как money=0, blocked=0, available=0: в

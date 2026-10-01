@@ -12,6 +12,8 @@ CANDIDATES, CONTROL расширен кандидатными ключами и 
 RebalanceReportUseCase.build_report — rating_scale из конфига и canonical
 validation переиспользуются через единственную точку construction (config.yaml
 в exporter повторно не читается, второй rating scale не создаётся).
+029-T05: canonical validation — часть build_report; exporter сам
+_validate_args не вызывает (второй точки validation нет).
 """
 from __future__ import annotations
 
@@ -318,10 +320,9 @@ class SyncChatgptPortfolioUseCase(UseCase):
         exporter не обязан (029-T04). Strict min-credit-rating обязан
         fail-fast через canonical validation (та же ошибка, что у CLI
         rebalance-report), а не молча пропускать rating filter с пустой
-        шкалой; после 029-T05 (validation внутри build_report) явный вызов
-        остаётся idempotent и может быть убран."""
+        шкалой; 029-T05: validation — часть build_report, exporter сам
+        _validate_args не вызывает (дублирования нет)."""
         report_use_case = RebalanceReportUseCase(db=self.db)
-        report_use_case._validate_args(args)
         return report_use_case.build_report(args)
 
     @staticmethod
@@ -336,15 +337,13 @@ class SyncChatgptPortfolioUseCase(UseCase):
         rating_scale из конфига живёт только в нём (второй scale и повторное
         чтение config.yaml в exporter не появляются), а db — кешированный
         factory connection, оба use case работают с тем же PortfolioStorage
-        instance. Builder прогоняет args через тот же canonical
-        _validate_args, что и CLI rebalance-report (unknown rating code даёт
-        ту же ошибку; после 029-T05 validation станет частью build_report).
-        """
+        instance. 029-T05: args валидируются внутри canonical build_report
+        (unknown rating code даёт ту же ошибку, что CLI rebalance-report);
+        exporter сам _validate_args не вызывает."""
         db = factory.get_db_connection()
         report_use_case = RebalanceReportUseCase.create(factory)
 
         def report_builder(args: argparse.Namespace) -> Dict[str, Any]:
-            report_use_case._validate_args(args)
             return report_use_case.build_report(args)
 
         # Test seam: factory-created canonical use case под builder'ом.

@@ -9,6 +9,8 @@
 - концентрации (эмитенты/риск/частота, нарушения >15%);
 - календарь погашений/оферт redemptions_6m (пул реинвеста);
 - CSV-артефакт (UTF-8 BOM, русские заголовки, строка ИТОГО);
+- canonical validation внутри программного build_report (029-T05):
+  programmatic consumers не обходят _validate_args;
 - запуск одной CLI-командой без env/psql (анти-P-A, subprocess-тест).
 
 Все данные — синтетические фикстуры на тестовой БД (POSTGRES_DSN_TEST),
@@ -822,6 +824,68 @@ class TestCreditRatingFilter:
         use_case = RebalanceReportUseCase(db=db)
         with pytest.raises(ValueError):
             use_case._validate_args(_make_args(min_credit_rating='AA-'))
+
+
+# ---------------------------------------------------------------------------
+# 029-T05: canonical validation внутри программного build_report
+# ---------------------------------------------------------------------------
+
+class TestBuildReportValidatesArgs:
+    """029-T05: programmatic consumers (экспортёр ChatGPT) не могут обойти
+    canonical validation — build_report сам отклоняет невалидную комбинацию
+    фильтров той же ошибкой, что и CLI (execute идёт через тот же метод).
+
+    Use case собирается без БД (__new__ + rating_scale): невалидные args
+    падают на validation до первого обращения к хранилищу — если бы
+    validation шла после, тест упал бы на отсутствии db."""
+
+    @staticmethod
+    def _use_case() -> RebalanceReportUseCase:
+        use_case = RebalanceReportUseCase.__new__(RebalanceReportUseCase)
+        use_case.rating_scale = _RATING_SCALE
+        return use_case
+
+    def test_freq_in_with_freq_min_rejected(self):
+        with pytest.raises(ValueError, match="взаимоисключающие"):
+            self._use_case().build_report(_make_args(freq_min=4, freq_in=[2, 4]))
+
+    def test_freq_in_with_freq_max_rejected(self):
+        with pytest.raises(ValueError, match="взаимоисключающие"):
+            self._use_case().build_report(_make_args(freq_max=12, freq_in=[2, 4]))
+
+    def test_freq_min_above_max_rejected(self):
+        with pytest.raises(ValueError, match="не должен превышать"):
+            self._use_case().build_report(_make_args(freq_min=12, freq_max=4))
+
+    def test_invalid_min_credit_rating_same_error_as_cli(self):
+        use_case = self._use_case()
+        args = _make_args(min_credit_rating='ZZ+')
+        with pytest.raises(ValueError) as build_error:
+            use_case.build_report(args)
+        # та же ошибка, что у CLI (main.py ловит ValueError из _validate_args)
+        with pytest.raises(ValueError) as cli_error:
+            use_case._validate_args(args)
+        assert "не входит в шкалу rating_scale" in str(build_error.value)
+        assert str(build_error.value) == str(cli_error.value)
+
+    def test_screener_limit_below_one_rejected(self):
+        with pytest.raises(ValueError, match="--screener-limit"):
+            self._use_case().build_report(_make_args(screener_limit=0))
+
+    def test_max_ytm_nonpositive_rejected(self):
+        with pytest.raises(ValueError, match="--max-ytm"):
+            self._use_case().build_report(_make_args(max_ytm=0))
+        with pytest.raises(ValueError, match="--max-ytm"):
+            self._use_case().build_report(_make_args(max_ytm=-1))
+
+    def test_valid_args_pass_and_validation_idempotent(self):
+        """Валидные канонические args validation проходят; повторная
+        проверка (CLI поверх build_report) идемпотентна — дублей ошибок
+        и побочных эффектов у validation нет."""
+        use_case = self._use_case()
+        args = _make_args()
+        use_case._validate_args(args)
+        use_case._validate_args(args)  # idempotent, не меняет args
 
 
 # ---------------------------------------------------------------------------

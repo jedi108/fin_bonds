@@ -1404,6 +1404,28 @@ def test_factory_path_unknown_rating_code_canonical_cli_error():
     assert str(exporter_error.value) == str(cli_error.value)
 
 
+def test_builder_does_not_duplicate_validation(monkeypatch):
+    """029-T05: exporter не дублирует canonical validation — явные вызовы
+    _validate_args из 029-T04 убраны, args валидируются ровно один раз
+    внутри build_report (второй точки validation нет)."""
+    rows = [screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-")]
+    exporter, _db, _factory = make_factory_exporter(rows)
+
+    calls = []
+    original = RebalanceReportUseCase._validate_args
+
+    def counting_validate(self, args):
+        calls.append(args)
+        return original(self, args)
+
+    monkeypatch.setattr(RebalanceReportUseCase, "_validate_args", counting_validate)
+
+    report = exporter._report_builder(candidate_report_args())
+
+    assert len(calls) == 1
+    assert report["schema_version"] == 2
+
+
 def test_injected_report_builder_seam_still_supported():
     """Injection seam не сужается: поданный в constructor builder вызывается
     как есть с candidate args (include_held=True) — без дополнительной
