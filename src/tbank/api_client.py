@@ -133,8 +133,12 @@ class TbankApiClient(ITbankApiClient):
         - валюты НЕ конвертируются — каждая строка несёт свою валюту;
           в cash_available_rub войдёт только RUB (фильтр на стороне хранилища);
         - available = money - blocked (blocked RUB не считаются доступными);
+        - complete RUB row invariant (029-T02): успешный ответ счёта без RUB
+          ни в money, ни в blocked — фактический баланс RUB = 0; для каждого
+          счёта в результирующем snapshot существует актуальная RUB row этого
+          sync (synthetic zero row);
         - ошибка API пробрасывается наверх — вызывающий sync не имеет права
-          подменять её cash=0.
+          подменять её cash=0 (API failure ≠ отсутствие RUB в успехе).
         """
         balances: List[Dict[str, Any]] = []
         with Client(self.token) as client:
@@ -159,10 +163,23 @@ class TbankApiClient(ITbankApiClient):
         """Конвертирует money/blocked ответа GetPositions в строки cash-баланса.
 
         Чистая функция (без сети) — покрыта unit-тестами (задача 022).
+
+        Complete RUB row invariant (029-T02): успешный ответ без RUB ни в
+        money, ни в blocked трактуется как money=0, blocked=0, available=0 —
+        синтезируется zero RUB row, чтобы агрегат не складывал fresh строки
+        этого sync с устаревшей RUB row счёта из прошлого успешного sync
+        (MAX(updated_at) продвигается, а stale RUB при этом складывается).
+        API failure сюда не доходит: exception любого счёта прерывает
+        get_money_positions() до записи в БД (zero не синтезируется).
         """
         money_by_ccy = {m.currency: m for m in money}
         blocked_by_ccy = {m.currency: m for m in blocked}
         currencies = sorted(set(money_by_ccy) | set(blocked_by_ccy))
+        if not any(currency.lower() == 'rub' for currency in currencies):
+            # 029-T02: успешный ответ без RUB — синтетическая zero RUB row;
+            # _convert_money_value(None) даёт Decimal(0) для money/blocked.
+            currencies.append('rub')
+            currencies.sort()
         balances: List[Dict[str, Any]] = []
         for currency in currencies:
             money_value = TbankApiClient._convert_money_value(money_by_ccy.get(currency))

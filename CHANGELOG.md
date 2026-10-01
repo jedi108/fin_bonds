@@ -4,6 +4,16 @@
 
 ## 2026-10-01
 
+- feat(tbank): complete RUB row invariant — synthetic zero row (029-T02) —
+  успешный `GetPositions(account_id)` без RUB ни в money, ни в blocked
+  трактуется как money=0, blocked=0, available=0: в
+  `TbankApiClient._money_positions_to_balances()` синтезируется zero RUB row,
+  чтобы после успешного `get_money_positions()` для каждого выбранного счёта
+  существовала актуальная RUB row этого sync (иначе агрегат складывал fresh
+  строки с устаревшей RUB row прошлого sync: 120+500=620 вместо 120).
+  API failure отличается от отсутствия RUB: exception любого счёта прерывает
+  `get_money_positions()` до записи в БД, zero не синтезируется, прошлый cash
+  остаётся как failed snapshot. Тесты: tests/test_tbank_rub_zero_row.py.
 - feat(export): sync-chatgpt-portfolio — factory-backed canonical report
   builder (029-T04) — create(factory) инжектит factory-created
   RebalanceReportUseCase.build_report: rating_scale из конфига и canonical
