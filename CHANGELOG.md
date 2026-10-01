@@ -4,6 +4,34 @@
 
 ## 2026-10-01
 
+- refactor(rebalance): canonical calculation/validation engine извлечён из
+  RebalanceReportUseCase (030.2) — новый `src/services/rebalance_engine.py::
+  RebalanceEngine`, единственный расчётчик целевого портфеля (правило 030:
+  второго калькулятора нет): `evaluate_scenario(trades, constraints)` одним
+  вызовом возвращает valid/feasible/errors/trades/summary/budget_check/
+  constraint_checks/freq_mix_before|after/issuer_limits/positions_after —
+  Python API без shell-парсинга для планировщика (030.7) и adapter'ов
+  (030.8/030.11). Ограничения — плоский `ScenarioConstraints` (без argparse/
+  intents в engine); чтение scenario.json осталось в use case (CLI-контракт).
+  Planning price (030.2): для КАЖДОГО ISIN вселенной движок отдаёт цену
+  расчёта и её basis (`planning_prices`: held_valuation — каноническая оценка
+  view на штуку; market_price; nominal_fallback — legacy фолбэк теперь ЯВЕН;
+  matured_zero — P1-guard) — фундамент правила «одна цена на ISIN внутри
+  plan». В JSON legacy `rebalance-report --scenario` planning_prices не
+  публикуется — контракт команды не изменён (проверено diff-прогоном
+  сценария и ядра отчёта до/после на одной тестовой БД: вывод идентичен
+  байт-в-байт; регресс 209 rebalance/export тестов зелёный). В engine
+  переехали: scenario-математика и валидатор формальных ограничений (024),
+  общая арифметика `issuer_shares`/`value_mix`/`bond_to_json`, YTM-enrichment
+  (единый путь через CalculateYtmUseCase), контрактные константы
+  SCENARIO_*/CONSTRAINT_*/BOND_ROW_KEYS и `ISSUER_CONCENTRATION_LIMIT_PCT`
+  (15.0; из rebalance_report реэкспортируются — старые импорты работают).
+  Новые тесты tests/test_rebalance_engine.py (11): price+basis на каждый ISIN
+  (включая nominal_fallback и matured), одна цена calculator==validator
+  (POSITION_VALUE_LIMIT.actual == qty_after * planning_price, консистентность
+  trades/positions/лимитов), полный результат одним вызовом, блок scenario
+  == результат engine, ключи legacy JSON в прежнем порядке.
+
 - docs(preflight): зафиксированы фактические якоря post-029 для project 030
   (030.1) — код не менялся (подзадача read-only): baseline `make test` зелёный
   (443 collected / 211 passed / 232 skipped / 0 failed); подтверждены CLI

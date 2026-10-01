@@ -49,6 +49,17 @@ CalculateYtmUseCase._enrich_bond_with_ytm через import (не subprocess и 
 не меняется — та же policy, что в 023 для credit_rating): CSV различает
 «Доля выпуска, %» (share_pct) и «Доля эмитента, %» (issuer_pct) — раньше
 под «Доля, %» уходила агрегированная доля эмитента (подтверждённый баг).
+
+030.2 — сценарная математика/валидация (--scenario) вынесена в canonical
+engine `src/services/rebalance_engine.py::RebalanceEngine` (правило 030:
+один расчётчик — никакого второго калькулятора рядом): use case читает
+scenario.json, собирает ScenarioConstraints из canonical args и зовёт
+`evaluate_scenario()` одним вызовом; JSON-контракт блока scenario не меняется
+(ключ `file` добавляет use case, engine-ключ planning_prices в JSON не
+публикуется). Общая арифметика (issuer_shares, value_mix, bond_to_json,
+YTM-enrichment) живёт тоже в engine — отсюда она импортируется, копий нет;
+контрактные константы scenario/constraints реэкспортируются для совместимости
+импортов (тесты, exporter).
 """
 import argparse
 import calendar
@@ -59,12 +70,41 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from src.services.rebalance_engine import (
+    BOND_ROW_KEYS,
+    CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX,
+    CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN,
+    CONSTRAINT_COUPON_FREQUENCY_MISSING,
+    CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST,
+    CONSTRAINT_CREDIT_RATING_BELOW_MIN,
+    CONSTRAINT_CREDIT_RATING_MISSING,
+    CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE,
+    CONSTRAINT_ISSUER_LIMIT,
+    CONSTRAINT_POSITION_VALUE_LIMIT,
+    CONSTRAINT_SOVEREIGN_NOT_ALLOWED,
+    ISSUER_CONCENTRATION_LIMIT_PCT,
+    RebalanceEngine,
+    SCENARIO_ERROR_NEGATIVE_QTY_AFTER,
+    SCENARIO_ERROR_NO_COMPANY_LINK,
+    SCENARIO_ERROR_UNKNOWN_ISIN,
+    SCENARIO_LEG_KEYS,
+    SCENARIO_LIMIT_STATUS_PASS,
+    SCENARIO_LIMIT_STATUS_VIOLATION,
+    SCENARIO_POSITION_KEYS,
+    SCENARIO_SUMMARY_KEYS,
+    SCENARIO_TRADE_KEYS,
+    ScenarioConstraints,
+    _to_float,
+    _to_int,
+    bond_to_json,
+    issuer_shares,
+    value_mix,
+)
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.bond_filters import freq_ok as _freq_ok_rule
 from src.use_cases.bond_filters import is_sovereign as _is_sovereign_rule
 from src.use_cases.bond_filters import parse_freq_list
-from src.use_cases.calculate_ytm import CalculateYtmUseCase
 from src.use_cases.check_db import classify_freshness
 from src.utils import rating_code_to_score
 
@@ -81,9 +121,6 @@ logger = logging.getLogger(__name__)
 # изменение (та же policy, что в 023 для credit_rating).
 SCHEMA_VERSION = 2
 
-# Лимит концентрации эмитента, % портфеля (план ребалансировки 001/002).
-ISSUER_CONCENTRATION_LIMIT_PCT = 15.0
-
 # Сколько эмитентов показывать в concentrations.issuers.top.
 ISSUER_TOP_SIZE = 5
 
@@ -94,77 +131,18 @@ _SCREENER_MAX_RISK = 5
 _SCREENER_MAX_LISTLEVEL = 3
 _SCREENER_POOL_LIMIT = 10000
 
-# Ключи строки бумаги в ответе (portfolio.positions и screener.fixed/floater).
-# 023: credit_rating — настоящий рейтинг кандидата (latest rating_history),
-# risk_level остаётся отдельным полем/фильтром.
-# 025: share_pct — доля выпуска (value / total_value * 100) рядом с
-# issuer_pct: CSV-колонка «Доля, %» раньше писала issuer_pct под именем,
-# выглядевшим как доля выпуска (подтверждённый баг) — теперь различаются.
-BOND_ROW_KEYS = (
-    'isin', 'name', 'ticker', 'qty', 'price', 'value', 'share_pct',
-    'ytm_pct', 'ytm_reason', 'coupon_pct', 'freq',
-    'coupon_kind', 'risk_level', 'list_level', 'maturity', 'offer',
-    'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge', 'credit_rating',
-)
-
 # Заголовки CSV целевого портфеля (UTF-8 BOM, русские заголовки, строка ИТОГО).
 # 025: доля выпуска и доля эмитента — разные колонки (Доля выпуска = share_pct,
 # Доля эмитента = issuer_pct; раньше под «Доля, %» шёл issuer_pct).
+# Ключи canonical bond row (BOND_ROW_KEYS) и контрактные константы блока
+# scenario (SCENARIO_*/CONSTRAINT_*) с 030.2 живут в rebalance_engine и
+# реэкспортируются выше — единственная копия определения.
 CSV_HEADERS = [
     'ISIN', 'Название', 'Тикер', 'Эмитент', 'Кол-во', 'Цена',
     'Стоимость, ₽', 'Доля выпуска, %', 'Доля эмитента, %', 'YTM, %',
     'Купон, %', 'Частота купонов', 'Тип купона', 'Риск', 'Листинг',
     'Погашение', 'Оферта', 'Бейдж',
 ]
-
-# ---------------------------------------------------------------------------
-# Сценарный режим --scenario (005.2): контракт блока scenario.
-# ---------------------------------------------------------------------------
-
-# Явные ошибки сценария (аналог блока 0 scenario_summary.sql / A2 из 002.4).
-SCENARIO_ERROR_UNKNOWN_ISIN = 'UNKNOWN_ISIN'
-SCENARIO_ERROR_NEGATIVE_QTY_AFTER = 'NEGATIVE_QTY_AFTER'
-SCENARIO_ERROR_NO_COMPANY_LINK = 'NO_COMPANY_LINK'
-
-# Статусы лимита эмитента — строки как в блоке 3 A2 (совместимость контракта).
-SCENARIO_LIMIT_STATUS_PASS = 'PASS'
-SCENARIO_LIMIT_STATUS_VIOLATION = 'LIMIT_VIOLATION (>15%)'
-
-# 024: violation types финального валидатора формальных ограничений
-# (scenario.constraint_checks). Это НЕ structural errors (scenario.errors):
-# нарушение не делает сценарий «неготовым», оно делает его неосуществимым.
-CONSTRAINT_POSITION_VALUE_LIMIT = 'POSITION_VALUE_LIMIT'
-CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN = 'COUPON_FREQUENCY_BELOW_MIN'
-CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX = 'COUPON_FREQUENCY_ABOVE_MAX'
-CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST = 'COUPON_FREQUENCY_NOT_IN_LIST'
-CONSTRAINT_COUPON_FREQUENCY_MISSING = 'COUPON_FREQUENCY_MISSING'
-CONSTRAINT_SOVEREIGN_NOT_ALLOWED = 'SOVEREIGN_NOT_ALLOWED'
-CONSTRAINT_CREDIT_RATING_BELOW_MIN = 'CREDIT_RATING_BELOW_MIN'
-CONSTRAINT_CREDIT_RATING_MISSING = 'CREDIT_RATING_MISSING'
-CONSTRAINT_ISSUER_LIMIT = 'ISSUER_LIMIT'
-CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE = 'INSUFFICIENT_CASH_ESTIMATE'
-
-# Ключи строк блока scenario.
-SCENARIO_TRADE_KEYS = (
-    'isin', 'name', 'ticker', 'issuer', 'qty_delta', 'action',
-    'qty_before', 'qty_after', 'price', 'value_delta',
-)
-SCENARIO_POSITION_KEYS = BOND_ROW_KEYS + ('coupon_month',)
-SCENARIO_LEG_KEYS = (
-    'leg', 'isin', 'name', 'ticker', 'issuer', 'qty_delta',
-    'trade_value', 'issuer_pct_after_leg', 'limit_status',
-)
-SCENARIO_SUMMARY_KEYS = (
-    'portfolio_before', 'portfolio_after',
-    # 024: budget — securities/cash до и после; денежные поля «после» —
-    # оценки (qty * eff_price, без НКД и комиссий settlement'а).
-    'securities_before', 'securities_after',
-    'cash_before', 'sales_value', 'purchases_value', 'cash_after_estimate',
-    'investable_total_before', 'investable_total_after',
-    'coupon_month_before', 'coupon_month_after',
-    'coupon_year_before', 'coupon_year_after',
-    'delta_month', 'delta_year',
-)
 
 
 def _parse_freq_in(raw: str) -> List[int]:
@@ -294,45 +272,6 @@ def _add_months(day: date, months: int) -> date:
     return date(year, month, min(day.day, last_day))
 
 
-def _to_float(value: Any) -> Optional[float]:
-    """Decimal/int/str -> float, None проходит (JSON не умеет Decimal)."""
-    if value is None:
-        return None
-    return float(value)
-
-
-def _to_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    return int(value)
-
-
-def _to_iso_day(value: Any) -> Optional[str]:
-    """date/datetime -> 'YYYY-MM-DD', None проходит."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _fmt_qty(value: float) -> str:
-    """Количество в штуках без хвостового '.0' (для бейджей и сообщений)."""
-    qty = float(value)
-    if qty.is_integer():
-        return str(int(qty))
-    return f"{qty:.4f}".rstrip('0').rstrip('.')
-
-
-def _issuer_limit_status(issuer_pct: float) -> str:
-    """Статус лимита эмитента 15% — строки как в блоке 3 A2 (002.4)."""
-    if issuer_pct > ISSUER_CONCENTRATION_LIMIT_PCT:
-        return SCENARIO_LIMIT_STATUS_VIOLATION
-    return SCENARIO_LIMIT_STATUS_PASS
-
-
 class RebalanceReportUseCase(UseCase):
     """
     Сценарий: канонический JSON-отчёт для ребалансировки одной командой.
@@ -347,13 +286,16 @@ class RebalanceReportUseCase(UseCase):
 
     def __init__(self, db: PortfolioStorage, rating_scale: Optional[Dict[str, int]] = None):
         self.db = db
-        # Единый расчётный движок YTM (требование 005.1: единицы YTM — только
-        # из одного источника, расчётный движок CLI-уровня).
-        self._ytm_engine = CalculateYtmUseCase(db)
+        # 030.2: расчёт целевого портфеля/валидация — в canonical engine
+        # (правило 030: один расчётчик); use case остаётся точкой сборки
+        # отчёта и CLI-контракта. Единый расчётный движок YTM внутри engine
+        # (требование 005.1: единицы YTM — только из одного источника).
+        self._engine = RebalanceEngine(db, rating_scale=rating_scale)
         # Шкала рейтингов из конфига (023): порог --min-credit-rating и
         # сравнение идут через существующий rating_code_to_score — второй
         # нормализации рейтингов нет. Пустая шкала валидна, пока порог
-        # не задан (проверяется в _validate_args).
+        # не задан (проверяется в _validate_args). Движку передаётся та же
+        # шкала (валидатор constraint_checks живёт там).
         self.rating_scale = rating_scale or {}
 
     @staticmethod
@@ -601,107 +543,21 @@ class RebalanceReportUseCase(UseCase):
         rows = self._enrich_with_ytm(rows)
 
         total_value = round(sum(_to_float(r.get('value_rub')) or 0.0 for r in rows), 2)
-        issuer_shares = self._issuer_shares(rows, total_value)
+        issuer_shares_map = issuer_shares(rows, total_value)
 
         positions = [
-            self._bond_to_json(row, total_value, issuer_shares, held_default=True)
+            bond_to_json(row, total_value, issuer_shares_map, held_default=True)
             for row in rows
         ]
         return positions, total_value
 
     def _enrich_with_ytm(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Каноническая YTM в процентах — только через расчётный движок calculate-ytm."""
-        return self._ytm_engine._enrich_bonds_with_ytm(rows, argparse.Namespace(min_ytm=None))
-
-    @staticmethod
-    def _issuer_shares(rows: List[Dict[str, Any]], total_value: float) -> Dict[str, float]:
-        """Доля эмитента в портфеле, % (для issuer_pct и концентраций)."""
-        totals: Dict[str, float] = {}
-        for row in rows:
-            issuer = row.get('issuer') or row.get('name') or row.get('isin')
-            totals[issuer] = totals.get(issuer, 0.0) + (_to_float(row.get('value_rub')) or 0.0)
-        if total_value <= 0:
-            return {}
-        return {issuer: round(value / total_value * 100, 2) for issuer, value in totals.items()}
-
-    def _bond_to_json(
-        self,
-        row: Dict[str, Any],
-        total_value: float,
-        issuer_shares: Dict[str, float],
-        held_default: bool = False,
-    ) -> Dict[str, Any]:
-        """Строка бумаги в каноническом контракте (portfolio и screener)."""
-        value = round(_to_float(row.get('value_rub')) or 0.0, 2)
-        share_pct = round(value / total_value * 100, 2) if total_value > 0 else 0.0
-
-        # Бейдж held: в скринере приходит из SQL (002.2), в портфеле строится
-        # по доле ISIN — контракт бейджа единый: 'held (N%)'.
-        badge = row.get('held_badge')
-        if badge is None and held_default and total_value > 0:
-            badge = f"held ({share_pct:.2f}%)"
-
-        issuer = row.get('issuer') or row.get('name') or row.get('isin')
-        # price: у позиций портфеля — из выборки; у кандидатов скринера —
-        # market_price каталога (018: buy-выборка без fallback на nominal).
-        price_raw = row.get('price')
-        if price_raw is None:
-            price_raw = row.get('current_price')
-        return {
-            'isin': row.get('isin'),
-            'name': row.get('name') or row.get('isin'),
-            'ticker': row.get('ticker'),
-            'qty': round(_to_float(row.get('quantity')) or 0.0, 4),
-            'price': round(_to_float(price_raw), 4) if price_raw is not None else None,
-            'value': value,
-            # 025: доля выпуска — раньше считалась, но не возвращалась, из-за
-            # чего CSV писал issuer_pct под заголовком, похожим на долю выпуска.
-            'share_pct': share_pct,
-            'ytm_pct': round(_to_float(row.get('ytm_percent')), 2)
-            if row.get('ytm_percent') is not None else None,
-            'ytm_reason': row.get('ytm_reason'),
-            'coupon_pct': round(_to_float(row.get('coupon_rate_percent')), 2)
-            if row.get('coupon_rate_percent') is not None else None,
-            'freq': _to_int(row.get('coupon_quantity_per_year')),
-            'coupon_kind': 'float' if row.get('floating_coupon_flag') else 'fix',
-            'risk_level': _to_int(row.get('risk_level')),
-            'credit_rating': row.get('credit_rating') or None,
-            'list_level': _to_int(row.get('list_level')),
-            'maturity': _to_iso_day(row.get('maturity_date')),
-            'offer': _to_iso_day(row.get('offer_date')),
-            'amort': bool(row.get('amortization_flag')),
-            'ku': bool(row.get('ku')),
-            'issuer': issuer,
-            'issuer_pct': issuer_shares.get(issuer),
-            'held_badge': badge,
-        }
+        """Каноническая YTM в процентах — единый путь через canonical engine (030.2)."""
+        return self._engine.enrich_with_ytm(rows)
 
     # ------------------------------------------------------------------
     # concentrations
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _value_mix(
-        items: List[Tuple[Any, float]], total_value: float, key: str
-    ) -> List[Dict[str, Any]]:
-        """Стоимостный микс по группировочному признаку (риск/частота).
-
-        Единая арифметика для concentrations ядра и частотного микса
-        «до/после» сценария (005.2): доля группы — от стоимости
-        соответствующего состояния портфеля; группы без значения (None) —
-        в конце списка.
-        """
-        totals: Dict[Any, float] = {}
-        for group, value in items:
-            totals[group] = totals.get(group, 0.0) + value
-
-        def pct(value: float) -> float:
-            return round(value / total_value * 100, 2) if total_value > 0 else 0.0
-
-        return [
-            {key: group, 'value': round(value, 2), 'pct': pct(value)}
-            for group, value in sorted(totals.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
-        ]
 
     def _build_concentrations(
         self, positions: List[Dict[str, Any]], total_value: float
@@ -729,11 +585,11 @@ class RebalanceReportUseCase(UseCase):
                     if item['pct'] > ISSUER_CONCENTRATION_LIMIT_PCT
                 ],
             },
-            'risk_mix': self._value_mix(
+            'risk_mix': value_mix(
                 [(pos['risk_level'], pos['value']) for pos in positions],
                 total_value, 'risk_level',
             ),
-            'freq_mix': self._value_mix(
+            'freq_mix': value_mix(
                 [(pos['freq'], pos['value']) for pos in positions],
                 total_value, 'freq',
             ),
@@ -770,7 +626,7 @@ class RebalanceReportUseCase(UseCase):
         )
         candidates = self._enrich_with_ytm(candidates)
 
-        issuer_shares = {pos['issuer']: pos['issuer_pct'] for pos in positions}
+        issuer_shares_map = {pos['issuer']: pos['issuer_pct'] for pos in positions}
 
         excluded: Dict[str, int] = {
             'held': 0, 'ku': 0, 'sovereign': 0, 'freq': 0, 'risk': 0, 'listlevel': 0,
@@ -832,11 +688,11 @@ class RebalanceReportUseCase(UseCase):
         )
 
         published = [
-            self._bond_to_json(row, total_value, issuer_shares)
+            bond_to_json(row, total_value, issuer_shares_map)
             for row in kept_fixes[:args.screener_limit]
         ]
         published += [
-            self._bond_to_json(row, total_value, issuer_shares)
+            bond_to_json(row, total_value, issuer_shares_map)
             for row in kept_floaters[:args.screener_limit]
         ]
 
@@ -1005,7 +861,8 @@ class RebalanceReportUseCase(UseCase):
         }
 
     # ------------------------------------------------------------------
-    # scenario (--scenario, 005.2): перенос scenario_summary.sql (A2/002.4)
+    # scenario (--scenario, 005.2): расчёт — в canonical engine (030.2),
+    # здесь только CLI-контракт: чтение scenario.json и сборка блока.
     # ------------------------------------------------------------------
 
     def _load_scenario_trades(self, path_str: str) -> List[Dict[str, Any]]:
@@ -1052,485 +909,32 @@ class RebalanceReportUseCase(UseCase):
             trades.append({'isin': isin.strip(), 'qty_delta': float(qty_delta)})
         return trades
 
-    @staticmethod
-    def _make_scenario_state(
-        row: Dict[str, Any], qty_before: float, value_now: Optional[float],
-        today: date, is_held: bool,
-    ) -> Dict[str, Any]:
-        """Состояние одного ISIN вселенной сценария (аналог base-CTE A2).
-
-        Цена «после» (eff_price): погашенные — 0 (P1-guard: без номинального
-        фолбэка и фантомного купона); держимые — каноническая оценка view
-        на штуку (value_rub/qty); покупки — market_price с фолбэком на
-        номинал. Купон ₽/мес = qty * номинал * ставка% / 1200 (амортизация
-        не моделируется — то же ограничение, что у A2/002-P8).
-        """
-        maturity = row.get('maturity_date')
-        is_matured = maturity is not None and maturity < today
-        nominal = _to_float(row.get('nominal')) or 0.0
-        coupon_rate = 0.0 if is_matured else (_to_float(row.get('coupon_rate_percent')) or 0.0)
-
-        if is_matured:
-            eff_price, value_before = 0.0, 0.0
-        elif qty_before > 0 and value_now is not None and value_now > 0:
-            eff_price = value_now / qty_before
-            value_before = value_now
-        else:
-            market_price = _to_float(row.get('market_price'))
-            eff_price = market_price if market_price else nominal
-            value_before = round(qty_before * eff_price, 2)
-
-        return {
-            'row': row,
-            'is_held': is_held,
-            'is_matured': is_matured,
-            'qty_before': qty_before,
-            'value_before': value_before,
-            'eff_price': eff_price,
-            'nominal': nominal,
-            'coupon_rate': coupon_rate,
-            'coupon_month_before': round(qty_before * nominal * coupon_rate / 1200.0, 2),
-            'freq': _to_int(row.get('coupon_quantity_per_year')),
-            'name': row.get('name') or row['isin'],
-            'ticker': row.get('ticker'),
-            'issuer': row.get('issuer') or row.get('name') or row['isin'],
-            'company_id': row.get('company_id'),
-        }
-
     def _build_scenario(self, args: argparse.Namespace) -> Dict[str, Any]:
-        """Блок scenario: trades -> целевой портфель без ручной арифметики (анти-P6).
+        """Блок scenario: расчёт целиком в canonical engine (030.2).
 
-        Валидный сценарий: summary («сейчас → после» по стоимости, бюджету
-        (024) и купонному потоку ₽/мес и ₽/год), частотный микс до/после,
-        лимиты эмитента 15% по каждой ноге (кумулятивно) и по сумме всех ног,
-        целевой портфель positions_after, budget_check и финальная проверка
-        формальных ограничений constraint_checks + feasible (024). При
-        структурных ошибках (блок 0 A2) все блоки «после» = null: числа
-        невалидного сценария нельзя интерпретировать; feasible = null —
-        осуществимость не определена (это не investment-отказ).
+        Use case остаётся точкой CLI-контракта: читает и структурно
+        валидирует scenario.json (_load_scenario_trades), собирает
+        ScenarioConstraints из canonical args (без протягивания argparse
+        в engine) и одним вызовом RebalanceEngine.evaluate_scenario()
+        получает весь расчёт (summary/budget/лимиты эмитента/positions_after/
+        constraint_checks/feasible, 005.2/024). JSON-контракт блока не
+        меняется: ни одно поле не удалено и не переименовано; engine-ключ
+        planning_prices (030.2, цена+basis на ISIN) в JSON не публикуется —
+        он часть Python API движка (030.7+).
         """
-        today = date.today()
         trades = self._load_scenario_trades(args.scenario)
-
-        held_rows = self.db.get_rebalance_portfolio_rows()
-        held_by_isin = {row['isin']: row for row in held_rows}
-
-        # Каталог для ISIN вне портфеля (покупки) — те же колонки, что у позиций.
-        missing = sorted({t['isin'] for t in trades} - set(held_by_isin))
-        catalog_by_isin = {
-            row['isin']: row
-            for row in (self.db.get_scenario_universe_rows(missing) if missing else [])
-        }
-
-        # Вселенная сценария: текущий портфель + все ISIN из сделок.
-        universe: Dict[str, Dict[str, Any]] = {}
-        for isin, row in held_by_isin.items():
-            universe[isin] = self._make_scenario_state(
-                row,
-                qty_before=_to_float(row.get('quantity')) or 0.0,
-                value_now=_to_float(row.get('value_rub')),
-                today=today,
-                is_held=True,
-            )
-        for isin, row in catalog_by_isin.items():
-            if isin not in universe:
-                universe[isin] = self._make_scenario_state(
-                    row, qty_before=0.0, value_now=None, today=today, is_held=False,
-                )
-
-        # Суммарная дельта по ISIN (аналог GROUP BY isin в planned из A2).
-        deltas: Dict[str, float] = {}
-        for trade in trades:
-            deltas[trade['isin']] = deltas.get(trade['isin'], 0.0) + trade['qty_delta']
-        for isin, state in universe.items():
-            delta = deltas.get(isin, 0.0)
-            state['qty_delta'] = delta
-            state['qty_after'] = max(state['qty_before'] + delta, 0.0)
-            state['value_after'] = round(state['qty_after'] * state['eff_price'], 2)
-            state['coupon_month_after'] = round(
-                state['qty_after'] * state['nominal'] * state['coupon_rate'] / 1200.0, 2
-            )
-
-        # Блок 0: явные ошибки сценария (штатно — пустой список).
-        errors: List[Dict[str, Any]] = []
-        for isin in sorted({t['isin'] for t in trades} - set(universe)):
-            errors.append({
-                'type': SCENARIO_ERROR_UNKNOWN_ISIN,
-                'isin': isin,
-                'message': f"{isin}: ISIN не найден ни в портфеле, ни в каталоге — сделка не применена",
-            })
-        for isin, state in universe.items():
-            remainder = state['qty_before'] + state['qty_delta']
-            if remainder < 0:
-                errors.append({
-                    'type': SCENARIO_ERROR_NEGATIVE_QTY_AFTER,
-                    'isin': isin,
-                    'message': (
-                        f"{isin}: остаток после сделок {_fmt_qty(remainder)} шт "
-                        f"(позиция {_fmt_qty(state['qty_before'])} шт, "
-                        f"сделки {_fmt_qty(state['qty_delta'])} шт)"
-                    ),
-                })
-            elif state['qty_after'] > 0 and state['company_id'] is None:
-                errors.append({
-                    'type': SCENARIO_ERROR_NO_COMPANY_LINK,
-                    'isin': isin,
-                    'message': f"{isin}: бумага не связана с эмитентом (company_id IS NULL)",
-                })
-        valid = not errors
-
-        # Целевое состояние (блок 2 A2): непогашенные позиции после сделок.
-        target_states = [
-            state for state in universe.values()
-            if state['qty_after'] > 0 and not state['is_matured']
-        ]
-        total_before = round(sum(s['value_before'] for s in universe.values()), 2)
-        total_after = round(sum(s['value_after'] for s in target_states), 2)
-
-        # Сделки с именами из каталога (анти-P-D) + лимит по каждой ноге
-        # кумулятивно (анти-P6: в 002 суммарную долю РЕСО считали вручную).
-        running = {isin: state['qty_before'] for isin, state in universe.items()}
-        trades_echo: List[Dict[str, Any]] = []
-        legs: List[Dict[str, Any]] = []
-        for leg_no, trade in enumerate(trades, start=1):
-            isin, delta = trade['isin'], trade['qty_delta']
-            state = universe.get(isin)
-            if state is None:
-                trades_echo.append({
-                    'isin': isin, 'name': isin, 'ticker': None, 'issuer': None,
-                    'qty_delta': delta,
-                    'action': 'buy' if delta > 0 else ('sell' if delta < 0 else 'noop'),
-                    'qty_before': None, 'qty_after': None,
-                    'price': None, 'value_delta': None,
-                })
-                continue
-            qty_before_leg = running.get(isin, 0.0)
-            running[isin] = qty_before_leg + delta
-            trades_echo.append({
-                'isin': isin,
-                'name': state['name'],
-                'ticker': state['ticker'],
-                'issuer': state['issuer'],
-                'qty_delta': delta,
-                'action': 'buy' if delta > 0 else ('sell' if delta < 0 else 'noop'),
-                'qty_before': round(qty_before_leg, 4),
-                'qty_after': round(running[isin], 4),
-                'price': round(state['eff_price'], 4),
-                'value_delta': round(delta * state['eff_price'], 2),
-            })
-            issuer_value = sum(
-                max(running[other], 0.0) * other_state['eff_price']
-                for other, other_state in universe.items()
-                if other_state['issuer'] == state['issuer']
-            )
-            issuer_pct = issuer_value / total_after * 100 if total_after > 0 else 0.0
-            legs.append({
-                'leg': leg_no,
-                'isin': isin,
-                'name': state['name'],
-                'ticker': state['ticker'],
-                'issuer': state['issuer'],
-                'qty_delta': delta,
-                'trade_value': round(delta * state['eff_price'], 2),
-                'issuer_pct_after_leg': round(issuer_pct, 2),
-                'limit_status': _issuer_limit_status(issuer_pct),
-            })
-
-        # Лимиты эмитента по сумме всех ног (блок 3 A2) — по целевому портфелю.
-        issuer_totals: Dict[str, float] = {}
-        for state in target_states:
-            issuer = state['issuer']
-            issuer_totals[issuer] = issuer_totals.get(issuer, 0.0) + state['value_after']
-        after_all = [
-            {
-                'issuer': issuer,
-                'value': round(value, 2),
-                'pct': round(value / total_after * 100, 2) if total_after > 0 else 0.0,
-                'limit_status': _issuer_limit_status(
-                    value / total_after * 100 if total_after > 0 else 0.0
-                ),
-            }
-            for issuer, value in issuer_totals.items()
-        ]
-        after_all.sort(key=lambda item: (-item['value'], item['issuer']))
-
-        coupon_month_before = round(
-            sum(s['coupon_month_before'] for s in universe.values()), 2
+        constraints = ScenarioConstraints(
+            freq_min=args.freq_min,
+            freq_max=args.freq_max,
+            freq_in=args.freq_in,
+            exclude_sovereign=bool(args.exclude_sovereign),
+            min_credit_rating=args.min_credit_rating,
+            max_position_value=args.max_position_value,
         )
-        coupon_month_after = round(
-            sum(s['coupon_month_after'] for s in target_states), 2
-        )
-        delta_month = round(coupon_month_after - coupon_month_before, 2)
-
-        # 024: budget — canonical cash из 022 (PortfolioStorage
-        # .get_available_cash_rub; broker API из отчёта запрещён, unknown
-        # cash не превращается в 0). Все денежные поля «после» — оценки:
-        # qty * eff_price не учитывает НКД и комиссии расчётов, поэтому
-        # cash_after — именно estimate, а не точный settlement.
-        cash = self.db.get_available_cash_rub()
-        cash_known = bool(cash['cash_known'])
-        cash_before = (
-            round(_to_float(cash['cash_available_rub']), 2) if cash_known else None
-        )
-        sales_value = round(float(abs(sum(
-            leg['value_delta'] for leg in trades_echo
-            if leg['action'] == 'sell' and leg['value_delta'] is not None
-        ))), 2)
-        purchases_value = round(float(sum(
-            leg['value_delta'] for leg in trades_echo
-            if leg['action'] == 'buy' and leg['value_delta'] is not None
-        )), 2)
-        cash_after_estimate = (
-            round(cash_before + sales_value - purchases_value, 2)
-            if cash_known else None
-        )
-        investable_total_before = (
-            round(total_before + cash_before, 2) if cash_known else None
-        )
-        investable_total_after = (
-            round(total_after + cash_after_estimate, 2) if cash_known else None
-        )
-        budget_check = {
-            'known': cash_known,
-            # unknown cash: passed=null — неизвестность не маскируется под PASS.
-            'passed': (cash_after_estimate >= 0) if cash_known else None,
-        }
-
-        summary = {
-            'portfolio_before': total_before,
-            'portfolio_after': total_after,
-            'securities_before': total_before,
-            'securities_after': total_after,
-            'cash_before': cash_before,
-            'sales_value': sales_value,
-            'purchases_value': purchases_value,
-            'cash_after_estimate': cash_after_estimate,
-            'investable_total_before': investable_total_before,
-            'investable_total_after': investable_total_after,
-            'coupon_month_before': coupon_month_before,
-            'coupon_month_after': coupon_month_after,
-            'coupon_year_before': round(coupon_month_before * 12, 2),
-            'coupon_year_after': round(coupon_month_after * 12, 2),
-            'delta_month': delta_month,
-            'delta_year': round(delta_month * 12, 2),
-        }
-
-        # Частотный микс «до/после»: доля частот в стоимости соответствующего
-        # состояния (до — текущий портфель, после — целевой портфель).
-        freq_mix_before = self._value_mix(
-            [(s['freq'], s['value_before']) for s in universe.values() if s['is_held']],
-            total_before, 'freq',
-        )
-        freq_mix_after = self._value_mix(
-            [(s['freq'], s['value_after']) for s in target_states],
-            total_after, 'freq',
-        )
-
-        # 024: финальный валидатор формальных ограничений — весь целевой
-        # портфель (positions_after), а не только покупки. Structural
-        # validity (valid) отделена от investment feasibility (feasible):
-        # нарушение ограничения НЕ удаляет summary/positions_after.
-        violations = (
-            self._constraint_violations(
-                args, target_states, after_all, budget_check, cash_after_estimate,
-            )
-            if valid else None
-        )
-        if not valid:
-            # Целевого портфеля нет — осуществимость не определена (не false).
-            feasible = None
-        elif violations:
-            feasible = False
-        elif not cash_known:
-            # Единственная неизвестность — budget из-за unknown cash.
-            feasible = None
-        else:
-            feasible = True
-
-        # Целевый портфель в канонической форме строк ядра (+ coupon_month):
-        # YTM — от того же расчётного движка, имена/эмитенты — из каталога.
-        after_rows: List[Dict[str, Any]] = []
-        for state in target_states:
-            raw = dict(state['row'])
-            raw['quantity'] = state['qty_after']
-            raw['value_rub'] = state['value_after']
-            raw['price'] = state['eff_price']
-            after_rows.append(raw)
-        after_rows = self._enrich_with_ytm(after_rows)
-        issuer_shares_after = self._issuer_shares(after_rows, total_after)
-
-        positions_after: List[Dict[str, Any]] = []
-        for raw in after_rows:
-            pos = self._bond_to_json(raw, total_after, issuer_shares_after, held_default=True)
-            pos['coupon_month'] = universe[raw['isin']]['coupon_month_after']
-            if raw['isin'] in deltas:
-                sign = '+' if deltas[raw['isin']] > 0 else ''
-                pos['held_badge'] = f"сделка {sign}{_fmt_qty(deltas[raw['isin']])} шт"
-            positions_after.append(pos)
-        positions_after.sort(key=lambda pos: (-pos['value'], pos['isin']))
-
-        return {
-            'file': args.scenario,
-            'valid': valid,
-            # 024: feasible=true только если сценарий структурно валиден И все
-            # известные формальные проверки пройдены; unknown cash -> null.
-            'feasible': feasible,
-            'errors': errors,
-            'trades': trades_echo,
-            # Блоки «после» валидны только при пустом блоке ошибок (как в A2);
-            # constraint_checks=null — проверки не выполнялись (не «нет нарушений»).
-            'summary': summary if valid else None,
-            'budget_check': budget_check if valid else None,
-            'constraint_checks': violations if valid else None,
-            'freq_mix_before': freq_mix_before if valid else None,
-            'freq_mix_after': freq_mix_after if valid else None,
-            'issuer_limits': {
-                'limit_pct': ISSUER_CONCENTRATION_LIMIT_PCT,
-                'legs': legs,
-                'after_all': after_all,
-                'has_violations': any(
-                    item['limit_status'] != SCENARIO_LIMIT_STATUS_PASS
-                    for item in after_all
-                ),
-            } if valid else None,
-            'positions_after': positions_after if valid else [],
-        }
-
-    def _constraint_violations(
-        self,
-        args: argparse.Namespace,
-        target_states: List[Dict[str, Any]],
-        after_all: List[Dict[str, Any]],
-        budget_check: Dict[str, Any],
-        cash_after_estimate: Optional[float],
-    ) -> List[Dict[str, Any]]:
-        """Финальный валидатор формальных ограничений (024).
-
-        Проверяет ВЕСЬ целевой портфель (positions_after) по canonical args:
-        freq_min/freq_max/freq_in, exclude_sovereign, min_credit_rating,
-        max_position_value и лимит концентрации эмитента 15% (переиспользуется
-        уже посчитанный scenario.issuer_limits.after_all — второго расчёта
-        концентрации нет). Бюджет входит проверкой INSUFFICIENT_CASH_ESTIMATE
-        только при known cash: unknown не превращается в violation.
-
-        Каждая violation машиночитаема: type + isin (где применимо) + actual
-        и limit (где применимо) + человекочитаемый message.
-        """
-        violations: List[Dict[str, Any]] = []
-
-        def add(vtype: str, isin: Optional[str], actual: Any,
-                limit: Any, message: str) -> None:
-            violations.append({
-                'type': vtype,
-                'isin': isin,
-                'actual': actual,
-                'limit': limit,
-                'message': message,
-            })
-
-        freq_constrained = (
-            args.freq_min is not None or args.freq_max is not None
-            or args.freq_in is not None
-        )
-        # Порог рейтинга один раз переводится в балл существующей шкалой
-        # (валидация кода — в _validate_args; второго сравнения рейтингов нет).
-        min_rating_score = (
-            rating_code_to_score(args.min_credit_rating, self.rating_scale)
-            if args.min_credit_rating is not None else None
-        )
-
-        for state in target_states:
-            isin = state['row']['isin']
-
-            if (args.max_position_value is not None
-                    and state['value_after'] > args.max_position_value):
-                add(
-                    CONSTRAINT_POSITION_VALUE_LIMIT, isin,
-                    state['value_after'], args.max_position_value,
-                    f"{isin}: стоимость позиции после сделок "
-                    f"{state['value_after']:.2f} ₽ превышает лимит "
-                    f"{args.max_position_value:.2f} ₽",
-                )
-
-            freq = state['freq']
-            if freq_constrained:
-                if freq is None:
-                    add(
-                        CONSTRAINT_COUPON_FREQUENCY_MISSING, isin,
-                        None, None,
-                        f"{isin}: частота купонов неизвестна (NULL) — "
-                        "формальный фильтр частоты не подтверждён",
-                    )
-                elif args.freq_min is not None and freq < args.freq_min:
-                    add(
-                        CONSTRAINT_COUPON_FREQUENCY_BELOW_MIN, isin,
-                        freq, args.freq_min,
-                        f"{isin}: частота {freq}/год ниже минимальной "
-                        f"{args.freq_min}/год",
-                    )
-                elif args.freq_max is not None and freq > args.freq_max:
-                    add(
-                        CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX, isin,
-                        freq, args.freq_max,
-                        f"{isin}: частота {freq}/год выше максимальной "
-                        f"{args.freq_max}/год",
-                    )
-                elif args.freq_in is not None and freq not in args.freq_in:
-                    add(
-                        CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST, isin,
-                        freq, args.freq_in,
-                        f"{isin}: частота {freq}/год вне списка "
-                        f"{args.freq_in}",
-                    )
-
-            if args.exclude_sovereign and _is_sovereign_rule(state['row']):
-                add(
-                    CONSTRAINT_SOVEREIGN_NOT_ALLOWED, isin,
-                    None, None,
-                    f"{isin}: суверенный эмитент ({state['issuer']}) "
-                    "исключён флагом --exclude-sovereign",
-                )
-
-            if min_rating_score is not None:
-                score = _to_int(state['row'].get('rating_score'))
-                code = state['row'].get('credit_rating') or None
-                if score is None:
-                    add(
-                        CONSTRAINT_CREDIT_RATING_MISSING, isin,
-                        None, args.min_credit_rating,
-                        f"{isin}: нет рейтинга в rating_history — порог "
-                        f"{args.min_credit_rating} не подтверждён",
-                    )
-                elif score < min_rating_score:
-                    add(
-                        CONSTRAINT_CREDIT_RATING_BELOW_MIN, isin,
-                        code, args.min_credit_rating,
-                        f"{isin}: рейтинг {code} ниже порога "
-                        f"{args.min_credit_rating}",
-                    )
-
-        # Лимит эмитента 15% — из уже посчитанного scenario.issuer_limits
-        # (024, п.7: второй расчёт концентрации не создаётся).
-        for item in after_all:
-            if item['limit_status'] != SCENARIO_LIMIT_STATUS_PASS:
-                add(
-                    CONSTRAINT_ISSUER_LIMIT, None,
-                    item['pct'], ISSUER_CONCENTRATION_LIMIT_PCT,
-                    f"Эмитент {item['issuer']}: доля {item['pct']}% в целевом "
-                    f"портфеле превышает лимит "
-                    f"{ISSUER_CONCENTRATION_LIMIT_PCT}%",
-                )
-
-        # Бюджет: violation только при known cash (unknown = null, не 0).
-        if budget_check['known'] and budget_check['passed'] is False:
-            add(
-                CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE, None,
-                cash_after_estimate, 0.0,
-                f"Оценка cash после сделок {cash_after_estimate:.2f} ₽ < 0: "
-                "покупки не покрываются cash_before + sales_value",
-            )
-
-        return violations
+        result = self._engine.evaluate_scenario(trades, constraints)
+        result.pop('planning_prices')
+        # 'file' — единственное CLI-поле блока; порядок ключей прежний.
+        return {'file': args.scenario, **result}
 
     # ------------------------------------------------------------------
     # artifacts (CSV)
