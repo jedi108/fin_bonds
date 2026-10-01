@@ -4,6 +4,49 @@
 
 ## 2026-10-01
 
+- feat(planning): domain intents — typed DTO + normalization (030.5) — новый
+  `src/services/planning_intents.py`: граница «LLM/CLI приносит предметные
+  intents, код нормализует и валидирует» (правило 030 №7). Минимальные
+  intents: `sell_all(ISIN)` (итоговая позиция = 0) и
+  `target_value(ISIN, target_value_rub, priority)` — ВЕРХНЯЯ граница желаемой
+  итоговой стоимости позиции после плана: fitter (030.7) возьмёт максимальный
+  допустимый final qty с `final_position_value <= target_value_rub` (точного
+  равенства нет — целые бумаги + hard limits; requested/fitted возвращает
+  planner, поэтому отдельный `reduce_to_value` для MVP не нужен). DTO frozen:
+  `SellAllIntent`, `TargetValueIntent` (деньги — Decimal; int/str/float
+  канонизируются на границе, bool/NaN/Inf/неположительные отклоняются),
+  `PortfolioConstraints` (freq_min/freq_max/freq_in/min_credit_rating/
+  exclude_sovereign/max_position_value_rub — пассивный planning-DTO,
+  canonical валидатор один, движок 030.2: `to_scenario_constraints()` —
+  relay, Decimal→float только на границе float-домена движка) и
+  `CandidateFilters` (max_risk/max_list_level/max_ytm_pct/include_ku/
+  min_maturity/max_maturity — контракт policy eligibility покупки для 030.6;
+  дефолтов у полей нет намеренно). Один high-level target на ISIN:
+  `normalize_intents()` отвергает повторный target того же вида
+  (`DUPLICATE_TARGET`) и разных видов (`CONFLICTING_INTENT`) — last-write-wins
+  запрещён; диагностики собираются все сразу, при любой из них intents пусты
+  (частичное применение запрещено); `INVALID_INTENT` — прочие проблемы формы
+  (неизвестный type, пустой/нестроковый isin, неположительные/нечисловые
+  деньги, отсутствующий/нецелый priority). Priority — явное обязательное поле
+  (меньше = выше allocation priority, ранг; молчаливого default нет; CLI-маппинг
+  порядка `--target-value` — 030.8); normalized intents эхо-возвращаются 1:1 в
+  порядке входа, `allocation_order()` отдаёт target_value-intents по рангу для
+  fitter'а (sell_all в allocation не участвует). Canonical источники без
+  дублирования: defaults candidate-фильтров — `default_candidate_filters()`
+  из `RebalanceReportUseCase.default_args()` (тот же parser, что CLI отчёта;
+  единственный источник — `_SCREENER_FILTER_SPECS`, 029-T06/030.1), лимит
+  концентрации эмитента — реэкспорт canonical `ISSUER_CONCENTRATION_LIMIT_PCT`
+  движка (030.2), нового policy flag и второй hardcoded копии нет.
+  Нормализация не придумывает продажи (P0.3): результат — 1:1 эхо входа;
+  auto-fit права (уменьшение BUY, explicit sell_all/target_value) — зона 030.7.
+  Legacy `rebalance-report --scenario` не тронут (низкоуровневая агрегация
+  нескольких qty_delta осталась). Тесты: tests/test_planning_intents.py (46,
+  без БД): immutability DTO, duplicate/conflicting без last-write-wins,
+  эхо с priority + стабильный allocation order, identity defaults с
+  canonical report args, issuer limit = объект движка, Decimal-канонизация
+  денег, полный список диагностик за один вызов, relay в ScenarioConstraints.
+  Полный набор: 579 collected / 336 passed / 243 skipped / 0 failed.
+
 - feat(planning): ephemeral context store — core-owned context handle (030.4) —
   новый `src/services/context_store.py` (`EphemeralContextStore`): workflow
   «analysis-snapshot → sandbox Python → plan --context-id» опирается на
