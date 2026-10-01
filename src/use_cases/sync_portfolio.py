@@ -191,8 +191,9 @@ class SyncPortfolioUseCase(UseCase):
             logger.info(f"Получено {len(positions)} позиций из TBank.")
             return positions
         except ValueError:
-            # Fail-fast по списку счетов (TBANK_ACCOUNT_IDS): прерываем sync
-            # ДО очистки/записи, иначе при --source all очистятся TBank-позиции.
+            # Strict preflight счетов (029-T01, общий helper в TbankApiClient):
+            # missing one-of-many configured account -> fail-fast ДО clear/add
+            # TBank positions, частичный snapshot не публикуется.
             raise
         except Exception as e:
             logger.error(f"Не удалось получить портфель из TBank API: {e}", exc_info=True)
@@ -205,6 +206,9 @@ class SyncPortfolioUseCase(UseCase):
         rebalance-report. Broker API из отчёта не вызывается.
 
         Правила:
+        - strict preflight счетов (029-T01): missing one-of-many configured
+          account -> ValueError пробрасывается наверх, sync прерывается ДО
+          записи cash и ДО clear/add positions (частичный snapshot не публикуется);
         - запись только при успешном ответе: API error -> False, строки в БД
           не трогаются (последний успешный cash остаётся, API failure != 0 RUB);
         - пустой ответ тоже не затирает прошлый снапшот (подозрителен);
@@ -214,6 +218,10 @@ class SyncPortfolioUseCase(UseCase):
         logger.info("Шаг: синхронизация RUB cash из TBank API (GetPositions)...")
         try:
             balances = self.tbank_api_client.get_money_positions()
+        except ValueError:
+            # 029-T01: strict preflight configured-accounts — не глотать в
+            # «cash не обновлён»: прерываем sync целиком, пока ничего не записано.
+            raise
         except Exception as e:
             logger.error(f"Не удалось получить cash из TBank API: {e}", exc_info=True)
             return False

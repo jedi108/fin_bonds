@@ -36,30 +36,47 @@ class TbankApiClient(ITbankApiClient):
                 })
         return accounts
 
+    def _resolve_selected_accounts(self, accounts: Sequence[Any]) -> List[Any]:
+        """Strict preflight настроенных счетов (029-T01), общий для позиций и cash.
+
+        Сверяет self.account_ids (TBANK_ACCOUNT_IDS) с известными счетами токена:
+
+        - пустой configured set — все счета токена (текущее поведение);
+        - ВСЕ configured account IDs обязаны присутствовать среди счетов токена:
+          missing one-of-many -> ValueError ДО GetPortfolio/GetPositions и ДО
+          записи в БД. Иначе sync опубликовал бы частичный snapshot (позиции/cash
+          только по найденным счетам) и удалил бы позиции/строки cash отсутствующего
+          счёта, как будто брокер их закрыл.
+
+        Возвращает список счетов для обхода (отфильтрованный по configured set).
+        """
+        if not self.account_ids:
+            return list(accounts)
+        known_ids = {a.id for a in accounts}
+        missing = [account_id for account_id in self.account_ids if account_id not in known_ids]
+        if missing:
+            raise ValueError(
+                "Не все заданные счета TBank найдены среди счетов токена "
+                "(strict preflight). Отсутствующие account_id: "
+                f"{', '.join(missing)}. Заданные account_id: "
+                f"{', '.join(self.account_ids)}. Удалите закрытый/ненужный счёт "
+                "из TBANK_ACCOUNT_IDS (python3 main.py test-tbank accounts)."
+            )
+        return [a for a in accounts if a.id in self.account_ids]
+
     def get_portfolio_positions(self) -> List[PortfolioPosition]:
         """Получает и преобразует все позиции по всем счетам в DTO.
 
-        Если список счетов задан (account_ids), обходятся только они;
-        ни один не найден — ValueError (fail-fast, чтобы sync не записал
-        пустой портфель поверх существующего).
+        Если список счетов задан (account_ids), обходятся только они; strict
+        preflight (029-T01): каждый configured account обязан быть среди счетов
+        токена, иначе ValueError ДО GetPortfolio (fail-fast, чтобы sync не записал
+        частичный портфель поверх существующего).
         """
         positions = []
         with Client(self.token) as client:
             accounts = client.users.get_accounts().accounts
-            if self.account_ids:
-                known_ids = {a.id for a in accounts}
-                missing = [a for a in self.account_ids if a not in known_ids]
-                if missing:
-                    logger.warning("Заданные счета не найдены среди счетов токена: %s", ", ".join(missing))
-                if not any(a.id in self.account_ids for a in accounts):
-                    raise ValueError(
-                        "Ни один из заданных счетов TBank не найден по токену. "
-                        f"Заданные account_id: {', '.join(self.account_ids)}. "
-                        "Проверьте TBANK_ACCOUNT_IDS (python3 main.py test-tbank accounts)."
-                    )
-            for account in accounts:
-                if self.account_ids and account.id not in self.account_ids:
-                    continue
+            selected_accounts = self._resolve_selected_accounts(accounts)
+            for account in selected_accounts:
                 logger.info(f"Загрузка портфеля для счета: {account.name} ({account.id})")
                 portfolio: PortfolioResponse = client.operations.get_portfolio(account_id=account.id)
                 
@@ -108,10 +125,11 @@ class TbankApiClient(ITbankApiClient):
         а не GetPortfolio.total_amount_currencies: money/blocked по каждой валюте
         приходят раздельно, blocked учитывается в available явно.
 
-        Правила (022):
+        Правила (022, 029-T01):
         - обходятся только настроенные account_ids (пустой список — все счета
-          токена, как в get_portfolio_positions); ни один не найден — ValueError
-          (fail-fast, как для позиций);
+          токена, как в get_portfolio_positions); strict preflight: ВСЕ
+          configured account IDs обязаны присутствовать среди счетов токена,
+          иначе ValueError ДО GetPositions (fail-fast, общий helper с позициями);
         - валюты НЕ конвертируются — каждая строка несёт свою валюту;
           в cash_available_rub войдёт только RUB (фильтр на стороне хранилища);
         - available = money - blocked (blocked RUB не считаются доступными);
@@ -121,16 +139,8 @@ class TbankApiClient(ITbankApiClient):
         balances: List[Dict[str, Any]] = []
         with Client(self.token) as client:
             accounts = client.users.get_accounts().accounts
-            if self.account_ids:
-                if not any(a.id in self.account_ids for a in accounts):
-                    raise ValueError(
-                        "Ни один из заданных счетов TBank не найден по токену "
-                        f"(cash sync). Заданные account_id: {', '.join(self.account_ids)}. "
-                        "Проверьте TBANK_ACCOUNT_IDS (python3 main.py test-tbank accounts)."
-                    )
-            for account in accounts:
-                if self.account_ids and account.id not in self.account_ids:
-                    continue
+            selected_accounts = self._resolve_selected_accounts(accounts)
+            for account in selected_accounts:
                 logger.info(f"Загрузка денежных позиций для счета: {account.name} ({account.id})")
                 positions_response = client.operations.get_positions(account_id=account.id)
                 balances.extend(self._money_positions_to_balances(
