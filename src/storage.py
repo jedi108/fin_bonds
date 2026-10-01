@@ -112,7 +112,14 @@ _AGGREGATED_PORTFOLIO_SUBQUERY = """
                MAX(v.name) AS pos_name,
                SUM(v.quantity) AS quantity,
                SUM(v.position_value_rub) AS value_rub,
-               SUM(v.current_price * v.quantity) AS price_x_qty
+               SUM(v.current_price * v.quantity) AS price_x_qty,
+               -- 030.7: источник оценки наибольшей позиции ISIN (та же
+               -- семантика, что в get_chatgpt_portfolio_rows, 008) — fitter
+               -- показывает рядом valuation_source и planning_price_basis
+               -- (разные понятия: чем оценена позиция vs по какой цене план).
+               (array_agg(v.valuation_source
+                          ORDER BY v.position_value_rub DESC NULLS LAST))[1]
+                   AS valuation_source
         FROM v_portfolio_positions_valuation v
         GROUP BY v.isin
 """
@@ -2800,6 +2807,13 @@ class PortfolioStorage:
         хранилище, агент ISIN по памяти не придумывает). YTM хранится в
         процентах годовых (005.4, миграция 013) и отдаётся как есть —
         расчётный движок use-case'а читает её без конвертации.
+
+        030.7 (аддитивно): строка несёт valuation_source — источник оценки
+        наибольшей позиции ISIN (008; та же семантика, что в
+        get_chatgpt_portfolio_rows). Потребителю high-level планирования это
+        позволяет показывать рядом «чем оценена позиция» (valuation_source)
+        и «по какой цене считается план» (planning_price/planning_price_basis
+        движка) — разные понятия. Legacy-потребители лишнее поле игнорируют.
         """
         cursor = self._cursor()
         cursor.execute(f"""
@@ -2832,6 +2846,7 @@ class PortfolioStorage:
                 lr.rating_score,
                 a.quantity,
                 a.value_rub,
+                a.valuation_source,
                 COALESCE(
                     CASE WHEN a.quantity > 0 AND a.price_x_qty IS NOT NULL
                          THEN ROUND(a.price_x_qty / a.quantity, 4) END,

@@ -4,6 +4,59 @@
 
 ## 2026-10-01
 
+- feat(planning): auto-fit fitter — Decimal-деньги, одна planning цена,
+  priority-урезание (030.7) — новый `src/services/planning_fitter.py::
+  AutoFitFitter`: переводит normalized high-level intents (030.5) в целые
+  количества и одну net-сделку на ISIN, валидируя результат ТОЛЬКО каноническим
+  движком `evaluate_scenario` (030.2; второго калькулятора/валидатора нет).
+  Конвейер файла задачи: requested final value → planning_price из
+  PlanningContext → floor до целой бумаги → max-position cap (pre-size) →
+  explicit reductions/sells → budget fit → issuer fit → одна net-сделка →
+  полный canonical validation. Гарантия «одна цена на ISIN внутри plan» —
+  механическая: sizing считается по `context.effective_prices`, и после
+  финальной валидации canonical `planning_prices` прогона сверяются с
+  контекстом — расхождение среза даёт `CONTEXT_PRICE_MISMATCH` и
+  `feasible=null` (план по уехавшей цене не выдаётся). Деньги — Decimal
+  (правило 030 №3): цена — единственный float-релей canonical planning_price
+  через `Decimal(str(price))`; rounding policy явная: qty — целые
+  (floor target / ceil шагов урезания), fitted value — kopecks ROUND_DOWN
+  (не завышает верхнюю границу). Fit-цикл: bounded, детерминированный, каждое
+  изменение проверяется движком на ПОЛНОМ final state («issuer headroom» ни
+  разу не фиксируется); BUY урезаются только вниз целыми шагами до пола
+  `qty_before`, порядок — lower-priority первым (равные — позже в эхе);
+  проверка нарушений — budget (known cash) → issuer 15% (формула учитывает
+  уменьшение и числителя, и знаменателя) → position cap. Продажи/сокращения
+  не режутся и идут до увеличений; untouched holding, нарушающий лимит и не
+  исправимый BUY-урезаниями, остаётся canonical violation (`feasible=false`) —
+  автопродаж и превышения requested targets нет. Unknown cash не превращается
+  в 0: бюджетные урезания не проводятся, `budget_check.known=false`,
+  `feasible=null` (canonical эквивалент). Ineligible BUY (030.6) не подгоняется
+  молча: статус `BUY_NOT_ELIGIBLE` с structured reasons (по строке canonical
+  raw-пула контекста; held-ISIN вне пула — `NOT_IN_BUY_POOL`), без BUY-ноги;
+  direct `target_value` gate не обходит. BUY sizing по номиналу запрещён:
+  `nominal_fallback`/нулевая цена → `PRICE_UNAVAILABLE` (legacy `--scenario`
+  сохраняет свой fallback); sell_all работает всегда. Контракт результата:
+  targets (эхо: isin, status, requested/fitted value, qty_before/after/delta,
+  price, price_basis, valuation_source, fit_reasons INTEGER_QTY/POSITION_CAP/
+  BUDGET_CAP/ISSUER_CAP, buy_reasons), trades, diagnostics, полный canonical
+  `validation`, plan-level `feasible`. Аддитивно в хранилище: строки
+  `get_rebalance_portfolio_rows` (агрегат `_AGGREGATED_PORTFOLIO_SUBQUERY`)
+  дополнены `valuation_source` (008; та же семантика, что в
+  get_chatgpt_portfolio_rows) — в ответе для held позиции рядом стоят
+  «чем оценена позиция» и «по какой цене план» (разные понятия); legacy-потребители
+  лишнее поле игнорируют, JSON-контракт отчёта не менялся. Тесты:
+  tests/test_planning_fitter.py (34, без БД, in-memory двойник + реальный
+  builder/engine): sizing/INTEGER_QTY, net SELL, sell_all (вкл. погашенную),
+  одна net-сделка на ISIN, budget priority-урезание и каскад до нуля,
+  issuer fit (наивный headroom, посчитанный один раз, недостаточен;
+  lower-priority первым; untouched violation → infeasible, не auto-sell),
+  unknown cash → feasible=null, eligibility/NOT_IN_BUY_POOL/
+  PRICE_UNAVAILABLE/UNKNOWN_ISIN, position cap, Decimal-arithmetic,
+  price-consistency regression 951.30 vs 1103.06 (qty 317 по planning_price,
+  не 367 по цене отчёта) и 970.80 (инвариант), CONTEXT_PRICE_MISMATCH,
+  детерминизм, canonical validator spy. Полный набор: 656 collected /
+  413 passed / 243 skipped / 0 failed (baseline 030.6 622/379/243/0 + 34).
+
 - feat(planning): BUY eligibility gate — structural + policy, одна реализация
   со скринером (030.6) — новый `src/services/buy_eligibility.py` и canonical
   таблица structural buy gates в `src/use_cases/bond_filters.py`. Три семантики
