@@ -95,16 +95,19 @@ from src.services.rebalance_engine import (
     SCENARIO_TRADE_KEYS,
     ScenarioConstraints,
     _to_float,
-    _to_int,
     bond_to_json,
     issuer_shares,
     value_mix,
 )
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
-from src.use_cases.bond_filters import freq_ok as _freq_ok_rule
-from src.use_cases.bond_filters import is_sovereign as _is_sovereign_rule
-from src.use_cases.bond_filters import parse_freq_list
+from src.use_cases.bond_filters import (
+    POOL_MAX_LISTLEVEL,
+    POOL_MAX_RISK,
+    parse_freq_list,
+    screener_policy_rejection,
+    screener_ytm_rejection,
+)
 from src.use_cases.check_db import classify_freshness
 from src.utils import rating_code_to_score
 
@@ -127,8 +130,12 @@ ISSUER_TOP_SIZE = 5
 # Широкая выборка кандидатов скринера: фильтры риска/листинга/YTM применяются
 # в use-case'е с подсчётом «сколько отсечено и почему», поэтому SQL-пороги
 # открываются на максимум шкал (риск 1-5, листинг 1-3).
-_SCREENER_MAX_RISK = 5
-_SCREENER_MAX_LISTLEVEL = 3
+# 030.6: canonical значения живут в единственной таблице structural buy gates
+# (src/use_cases/bond_filters.py — тот же источник, что SQL buy-выборки и
+# eligibility-гейта планирования); прежние имена сохранены реэкспортом для
+# существующих импортов (planning_context).
+_SCREENER_MAX_RISK = POOL_MAX_RISK
+_SCREENER_MAX_LISTLEVEL = POOL_MAX_LISTLEVEL
 _SCREENER_POOL_LIMIT = 10000
 
 # Заголовки CSV целевого портфеля (UTF-8 BOM, русские заголовки, строка ИТОГО).
@@ -613,6 +620,12 @@ class RebalanceReportUseCase(UseCase):
         в excluded. Имена/эмитенты/флаги приходят из каталога (анти-P-D).
         Свежесть цены кандидата гарантирована buy-выборкой хранилища (018):
         без реальной market_price не старше 24 часов строка не доходит сюда.
+
+        030.6: построчная policy-политика — общая функция
+        screener_policy_rejection (bond_filters): её же вызывает
+        eligibility-гейт планирования; у отчёта и planner'а одна реализация
+        правил, у этого цикла — только счётчики excluded. include_held —
+        presentation control и в policy-функцию не входит (не eligibility).
         """
         candidates = self.db.get_bonds_yield_table(
             mode='buy',
@@ -645,34 +658,21 @@ class RebalanceReportUseCase(UseCase):
             if row.get('held_share_pct') is not None and not args.include_held:
                 excluded['held'] += 1
                 continue
-            if row.get('ku') and not args.include_ku:
-                excluded['ku'] += 1
+            rejection = screener_policy_rejection(
+                row,
+                include_ku=args.include_ku,
+                max_risk=args.max_risk,
+                max_listlevel=args.max_listlevel,
+                freq_min=args.freq_min,
+                freq_max=args.freq_max,
+                freq_in=args.freq_in,
+                exclude_sovereign=args.exclude_sovereign,
+                min_credit_rating=args.min_credit_rating,
+                min_rating_score=min_rating_score,
+            )
+            if rejection is not None:
+                excluded[rejection.key] += 1
                 continue
-            if args.exclude_sovereign and self._is_sovereign(row):
-                excluded['sovereign'] += 1
-                continue
-            if not self._freq_ok(row, args):
-                excluded['freq'] += 1
-                continue
-            risk_level = _to_int(row.get('risk_level'))
-            if risk_level is None or risk_level > args.max_risk:
-                excluded['risk'] += 1
-                continue
-            list_level = _to_int(row.get('list_level'))
-            if list_level is not None and list_level > args.max_listlevel:
-                excluded['listlevel'] += 1
-                continue
-            # 023: строгий фильтр рейтинга — отдельная ветка от risk_level:
-            # нет строки в rating_history (нет и балла) — rating_missing;
-            # балл ниже порога — rating_below_min. risk_level подменой не служит.
-            if min_rating_score is not None:
-                rating_score = _to_int(row.get('rating_score'))
-                if rating_score is None:
-                    excluded['rating_missing'] += 1
-                    continue
-                if rating_score < min_rating_score:
-                    excluded['rating_below_min'] += 1
-                    continue
             survivors.append(row)
 
         fixes, floaters = [], []
@@ -725,38 +725,24 @@ class RebalanceReportUseCase(UseCase):
             'issuers': self._screener_issuer_aggregate(published),
         }
 
-    @staticmethod
-    def _is_sovereign(row: Dict[str, Any]) -> bool:
-        """Суверенный эмитент — общее правило тулкита (bond_filters, 005.3):
-        связка с companies (entity_type=sovereign) либо каталог-имя ОФЗ."""
-        return _is_sovereign_rule(row)
-
-    @staticmethod
-    def _freq_ok(row: Dict[str, Any], args: argparse.Namespace) -> bool:
-        """Фильтр частоты купонов (P-C) — общее правило тулкита
-        (bond_filters, 005.3/023): NULL-частота фильтру не проходит;
-        freq_min/freq_max — диапазон, freq_in — точный список."""
-        return _freq_ok_rule(
-            _to_int(row.get('coupon_quantity_per_year')),
-            freq_max=args.freq_max,
-            freq_in=args.freq_in,
-            freq_min=args.freq_min,
-        )
+    # (Построчные policy-правила скринера с 030.6 живут в bond_filters
+    # (screener_policy_rejection / screener_ytm_rejection) — единственная
+    # реализация для отчёта и eligibility-гейта планирования; собственных
+    # обёрток у use case'а больше нет.)
 
     def _finish_fixes(
         self, fixes: List[Dict[str, Any]], args: argparse.Namespace, excluded: Dict[str, int]
     ) -> List[Dict[str, Any]]:
-        """Финал фиксов: YTM обязательна и не выше потолка (как в движке calculate-ytm)."""
+        """Финал фиксов: YTM обязательна и не выше потолка (как в движке calculate-ytm).
+
+        030.6: правило — общая screener_ytm_rejection (bond_filters), та же
+        для eligibility-гейта планирования; здесь только счётчик excluded.
+        """
         kept: List[Dict[str, Any]] = []
         for row in fixes:
-            ytm_pct = _to_float(row.get('ytm_percent'))
-            if ytm_pct is None:
-                excluded['fixed_ytm_missing'] += 1
-                continue
-            # Повторяем порог движка на рассчитанном значении (до backfill
-            # SQL-фильтр bc.ytm строки с расчётной YTM на лету не отсекает).
-            if ytm_pct > args.max_ytm:
-                excluded['fixed_max_ytm'] += 1
+            rejection = screener_ytm_rejection(row, max_ytm=args.max_ytm)
+            if rejection is not None:
+                excluded[rejection.key] += 1
                 continue
             kept.append(row)
         return kept
@@ -768,12 +754,9 @@ class RebalanceReportUseCase(UseCase):
         строится по рассчитанной ставке купона с тем же потолком аномалий."""
         kept: List[Dict[str, Any]] = []
         for row in floaters:
-            coupon_pct = _to_float(row.get('coupon_rate_percent'))
-            if coupon_pct is None:
-                excluded['floater_coupon_missing'] += 1
-                continue
-            if coupon_pct > args.max_ytm:
-                excluded['floater_max_ytm'] += 1
+            rejection = screener_ytm_rejection(row, max_ytm=args.max_ytm)
+            if rejection is not None:
+                excluded[rejection.key] += 1
                 continue
             kept.append(row)
         return kept

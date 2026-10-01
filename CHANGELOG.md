@@ -4,6 +4,61 @@
 
 ## 2026-10-01
 
+- feat(planning): BUY eligibility gate — structural + policy, одна реализация
+  со скринером (030.6) — новый `src/services/buy_eligibility.py` и canonical
+  таблица structural buy gates в `src/use_cases/bond_filters.py`. Три семантики
+  планирования разделены (правило 030 №5): structural BUY gate (бумагу вообще
+  можно рассматривать для покупки), policy eligibility (проходит ли фильтры
+  конкретного запроса) и final portfolio constraints (canonical validator
+  движка, 030.7 — сюда не входит; freq/sovereign/rating — не candidate-фильтры
+  и в policy-вызове не задаются). Structural gate — extract, не копия
+  (правило 030 №1): фактические условия WHERE buy-выборки
+  `get_bonds_yield_table(mode='buy')` (currency RUB; is_trade_available false
+  не проходит, true OR null — проходит; perpetual не проходит; maturity не в
+  прошлом; coupon по canonical rule; market_price существует и > 0 — номинал
+  gate не читает; market_price_updated_at в окне 24h; широкие пределы пула
+  риск 1-5/листинг 1-3) перенесены в таблицу `STRUCTURAL_BUY_GATES`
+  (code + SQL-фрагмент + построчный предикат), из которой собран и SQL
+  хранилища, и Python-оценка строки — второго набора «почти одинаковых
+  условий» нет; `_SCREENER_MAX_RISK/_SCREENER_MAX_LISTLEVEL` переехали в
+  `POOL_MAX_RISK/POOL_MAX_LISTLEVEL` (в отчёте — реэкспорт для существующих
+  импортов), окно свежести — `MARKET_PRICE_FRESHNESS_HOURS = 24`. Policy
+  eligibility — построчные правила скринера без изменений вынесены в общие
+  `screener_policy_rejection`/`screener_ytm_rejection` (ku → sovereign → freq
+  → risk → listlevel → rating → YTM fixed/floater, ключи = ключи
+  excluded-счётчиков отчёта): `_build_screener`/_finish_fixes/_finish_floaters
+  зовут их же, planner получает те же (key, actual, limit) — одна реализация
+  с отчётом; include_held/screener_limit/сортировка top-N — presentation
+  controls и в eligibility не входят. Canonical результат — frozen DTO
+  `BuyEligibility` (structural_eligible/policy_eligible раздельно,
+  `buy_eligible`, `reasons[]` из `BuyEligibilityReason(code, actual, limit)`,
+  `status` = `BUY_ELIGIBLE | BUY_NOT_ELIGIBLE`); structural reason codes:
+  UNSUPPORTED_CURRENCY, TRADE_UNAVAILABLE, MATURED, PERPETUAL_NOT_BUYABLE,
+  COUPON_DATA_MISSING, MARKET_PRICE_MISSING, MARKET_PRICE_STALE (+ широкие
+  пределы пула RISK_OUT_OF_POOL, LIST_LEVEL_OUT_OF_POOL), policy codes —
+  ключи excluded + min_maturity/max_maturity. Все time-sensitive причины
+  (MATURED, MARKET_PRICE_STALE, окно погашения) считаются от frozen
+  PlanningContext.as_of, не wall-clock; оценка зависит только от
+  (canonical raw-строка, as_of, `CandidateFilters` — контракт 030.5, defaults
+  из `default_candidate_filters()`). Lifecycle: `buy_gate_applies(qty_delta)`
+  — gate обязателен только при qty_delta > 0; sell/reduce разрешён независимо
+  от eligibility (плохая/погашенная удерживаемая бумага сокращаема), no-op не
+  блокируется; held increase проходит тот же gate без льгот; candidate-only
+  фильтры не применяются к untouched holdings. BUY rejection ≠ auto-fit:
+  непройденная eligibility запрошенной покупки — `BUY_NOT_ELIGIBLE` с
+  structured reasons (единственный источник метки — константа модуля), без
+  тихого урезания до qty_before; количественный fit — 030.7. Параметры
+  buy-SQL следуют новому порядку %s собранного WHERE (результат выборки не
+  изменился); `get_scenario_universe_rows` дополнена полями gate (currency,
+  is_trade_available, market_price_updated_at) — аддитивно, для классификации
+  причин ISIN вне buy-пула. Legacy `rebalance-report`/`--scenario` контракт
+  не менялся. Тесты: tests/test_buy_eligibility.py (43, без БД): каждый
+  structural gate и его предикат, границы (maturity == as_of, NULL-поля как
+  в SQL), frozen as_of, identity policy со скринером (source-тесты связки
+  SQL/gate/скринера), lifecycle sell/reduce/held-increase, машиночитаемость
+  reasons, single-source pool limits. Полный набор: 622 collected /
+  379 passed / 243 skipped / 0 failed.
+
 - feat(planning): domain intents — typed DTO + normalization (030.5) — новый
   `src/services/planning_intents.py`: граница «LLM/CLI приносит предметные
   intents, код нормализует и валидирует» (правило 030 №7). Минимальные

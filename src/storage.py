@@ -20,6 +20,10 @@ from psycopg2.extras import RealDictCursor
 from src.data_models import Bond, CalculatedCoupon, PortfolioPosition, PortfolioBond, RatingTarget
 from src.migrations import discover_migrations, get_applied_versions
 from src.services.cashflow import calculate_bond_cashflow_metrics
+from src.use_cases.bond_filters import (
+    BUY_MATURITY_FLOOR_SQL,
+    STRUCTURAL_BUY_WHERE_SQL,
+)
 from src.utils import round_coupon_rate
 
 logger = logging.getLogger(__name__)
@@ -2606,6 +2610,13 @@ class PortfolioStorage:
         — строгий фильтр --min-credit-rating в rebalance-report идёт по
         настоящему рейтингу, risk_level не подменяет его. mode='portfolio'
         не изменился.
+
+        030.6: structural-условия WHERE buy-ветки (currency, is_trade_available,
+        perpetual, широкие пределы пула, coupon, market_price, окно свежести)
+        НЕ дублируются здесь — они собираются из единственной таблицы
+        structural buy gates (src/use_cases/bond_filters.py), той же, по которой
+        eligibility-гейт планирования оценивает canonical raw-строку; правило
+        «extract, не копия»: гейт меняется в одном месте.
         """
         if mode not in ('buy', 'portfolio'):
             raise ValueError(f"Неизвестный режим таблицы доходностей: {mode!r}")
@@ -2613,11 +2624,13 @@ class PortfolioStorage:
         # 002.3/P9.5: окно погашения собирается динамически — None не
         # подставляется параметром (сравнение с NULL отсекло бы все строки):
         # без нижней границы берём только непогашенные, верхняя отсутствует.
+        # 030.6: floor без явного min_maturity — canonical фрагмент таблицы
+        # structural buy gates (единственный источник с Python-оценкой).
         maturity_filters = []
         if min_maturity:
             maturity_filters.append(("bc.maturity_date >= %s", min_maturity))
         else:
-            maturity_filters.append(("bc.maturity_date >= CURRENT_DATE", None))
+            maturity_filters.append((BUY_MATURITY_FLOOR_SQL, None))
         if max_maturity:
             maturity_filters.append(("bc.maturity_date <= %s", max_maturity))
         maturity_filter_sql = "".join(
@@ -2684,18 +2697,7 @@ class PortfolioStorage:
             {_LATEST_FLOATER_RATE_JOIN}
             {_LATEST_RATING_JOIN}
             {held_join}
-            WHERE bc.currency = 'rub'
-                AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
-                AND bc.perpetual_flag IS NOT TRUE{maturity_filter_sql}
-                AND bc.risk_level <= %s
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL{not_held_filter}
-                -- 018: кандидат на покупку — только реальная свежая рыночная
-                -- цена (аналог условий analyze-buy-candidates); окно 24 часа —
-                -- время записи цены в БД, известное ограничение задачи 009.
-                AND bc.market_price IS NOT NULL
-                AND bc.market_price > 0
-                AND bc.market_price_updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                AND (bc.list_level IS NULL OR bc.list_level <= %s)
+            WHERE {STRUCTURAL_BUY_WHERE_SQL}{maturity_filter_sql}{not_held_filter}
                 AND (bc.ytm IS NULL OR bc.ytm <= %s)
         """
         else:
@@ -2771,10 +2773,15 @@ class PortfolioStorage:
         query = body + filters + " ORDER BY bc.ytm DESC NULLS LAST, real_yield_percent DESC NULLS LAST LIMIT %s"
         # 005.4 (миграция 013): bc.ytm хранится в процентах годовых (24.01 =
         # 24.01%), порог CLI --max-ytm тоже в процентах — сравнение 1:1;
-        # параметры окна погашения — динамические (002.3/P9.5)
-        params = [*maturity_params, max_risk]
+        # параметры окна погашения — динамические (002.3/P9.5).
+        # 030.6: параметры следуют порядку %s в собранном WHERE: в buy-режиме
+        # structural-блок (risk, listlevel) идёт до окна погашения, ytm —
+        # последним; режим portfolio не изменился.
+        params: List[Any] = []
         if mode == 'buy':
-            params += [max_listlevel, max_ytm]
+            params += [max_risk, max_listlevel, *maturity_params, max_ytm]
+        else:
+            params += [*maturity_params, max_risk]
         params += [limit]
 
         cursor = self._cursor()
@@ -2941,6 +2948,11 @@ class PortfolioStorage:
         ошибки NO_COMPANY_LINK (блок 0 артефакта A2/002.4). Фильтров скрининга
         нет — поиск по явному списку ISIN из scenario.json (анти-P-D: ISIN
         приходит из вывода тулкита, не из памяти агента).
+
+        030.6: выборка дополнена полями structural BUY gate (currency,
+        is_trade_available, market_price_updated_at) — аддитивно; по этой
+        permissive-строке eligibility-гейт планирования классифицирует причины
+        отказа для ISIN, не попавшего в buy-пул (BUY_NOT_ELIGIBLE reasons).
         """
         if not isins:
             return []
@@ -2960,6 +2972,10 @@ class PortfolioStorage:
                 bc.amortization_flag,
                 bc.floating_coupon_flag,
                 bc.perpetual_flag,
+                -- 030.6: поля structural BUY gate для построчной оценки
+                bc.currency,
+                bc.is_trade_available,
+                bc.market_price_updated_at,
                 bc.is_for_qualified_investors AS ku,
                 bc.market_price,
                 bc.ytm,
