@@ -4,6 +4,24 @@
 
 ## 2026-10-01
 
+- feat(export): один canonical cash read + candidate metadata + stdout
+  контракт (029-T08) — cash-поля CONTROL (`cash_available_rub` /
+  `cash_updated_at`) копируются из `report["portfolio"]` того же
+  build_report run: второго `db.get_available_cash_rub()` после
+  report_builder в exporter больше нет (убрано окно рассинхронизации
+  CANDIDATES/CONTROL между cash snapshot'ами). Арифметика Sheet сохранена:
+  `portfolio_value_rub` — сумма transport PORTFOLIO rows,
+  `investable_total_rub` = portfolio_value_rub + опубликованный cash
+  (blind copy `report["portfolio"]["investable_total_rub"]` не делается —
+  transport schema не унифицируется с `report["portfolio"]`). `candidate_meta
+  .filters` — только `report["screener"]["filters"]` (все 13 canonical
+  полей, без ручной реконструкции; provenance sync не угадывает). Stdout
+  успешного sync расширен до контракта для skill (T15): Свободные деньги
+  (значение ₽ | неизвестно), Cash snapshot (`cash_updated_at` | unknown),
+  Candidate filters (canonical serialization `report["screener"]["filters"]`).
+  Тесты: cash CONTROL из `report["portfolio"]` + guard на отсутствие второго
+  cash read, candidate_meta.filters == canonical output (13 полей), stdout
+  known/unknown cash + canonical filters serialization.
 - feat(export): data flow args execute → candidate_report_args (029-T07) —
   CLI args sync-chatgpt-portfolio больше не теряются до candidate report:
   `execute(args)` передаёт весь распарсенный Namespace в

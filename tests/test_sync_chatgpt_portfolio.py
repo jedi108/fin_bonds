@@ -36,6 +36,8 @@ class FakeDb:
             "cash_updated_at": None,
             "cash_known": False,
         }
+        # 029-T08: exporter не должен читать cash сам — счётчик для guard-теста.
+        self.cash_reads = 0
         self.freshness = freshness or {
             "bonds_with_market_price": 100,
             "bonds_tradeable_count": 100,
@@ -57,6 +59,7 @@ class FakeDb:
 
     def get_available_cash_rub(self):
         """Canonical cash reader (022) — тот же контракт, что у storage."""
+        self.cash_reads += 1
         return dict(self.cash)
 
 
@@ -709,9 +712,25 @@ def screener_row(**overrides):
     return row
 
 
-def fake_screener_report():
-    """Канонический отчёт-фикстура: блок screener с 2 фиксами и 1 флоатером."""
+def fake_screener_report(cash=None):
+    """Канонический отчёт-фикстура: блок portfolio (cash контекст, 022) и
+    блок screener с 2 фиксами и 1 флоатером. cash — dict из canonical reader
+    (cash_available_rub/cash_updated_at/cash_known); по умолчанию unknown."""
+    cash = cash or {
+        "cash_available_rub": None,
+        "cash_updated_at": None,
+        "cash_known": False,
+    }
+    cash_known = bool(cash["cash_known"])
     return {
+        "portfolio": {
+            "cash_available_rub": (
+                cash["cash_available_rub"] if cash_known else None
+            ),
+            "cash_updated_at": (
+                cash["cash_updated_at"].isoformat() if cash_known else None
+            ),
+        },
         "screener": {
             "filters": {"max_risk": 1, "screener_limit": 10},
             "candidates_total": 7,
@@ -1022,21 +1041,22 @@ def test_build_payload_v3_control_fields_and_candidates():
 
 
 def test_build_payload_v4_control_carries_known_cash():
-    """schema v4: известный cash из canonical reader попадает в CONTROL,
-    investable_total_rub = portfolio_value_rub + cash_available_rub."""
-    db = FakeDb(
-        sample_rows(),
-        cash={
-            "cash_available_rub": 1234.56,
-            "cash_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
-            "cash_known": True,
-        },
-    )
+    """schema v4: известный cash попадает в CONTROL из report["portfolio"]
+    того же canonical report run, investable_total_rub = transport
+    portfolio_value_rub + cash_available_rub; exporter сам cash не читает
+    (второго get_available_cash_rub после report_builder нет, 029-T08)."""
+    db = FakeDb(sample_rows())
     use_case = SyncChatgptPortfolioUseCase(
         db,
         publisher=FakePublisher(),
         ytm_engine=FakeYtmEngine(),
-        report_builder=lambda _args: fake_screener_report(),
+        report_builder=lambda _args: fake_screener_report(
+            cash={
+                "cash_available_rub": 1234.56,
+                "cash_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
+                "cash_known": True,
+            }
+        ),
     )
     control, _rows, _candidates = use_case._build_payload(
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
@@ -1047,6 +1067,7 @@ def test_build_payload_v4_control_carries_known_cash():
     assert control["cash_available_rub"] == 1234.56
     assert control["investable_total_rub"] == 26234.56
     assert control["cash_updated_at"] == "2026-09-30T09:00:00+00:00"
+    assert db.cash_reads == 0
 
 
 def test_build_payload_v4_unknown_cash_is_empty_not_zero():
@@ -1060,6 +1081,113 @@ def test_build_payload_v4_unknown_cash_is_empty_not_zero():
     assert control["cash_available_rub"] is None
     assert control["investable_total_rub"] is None
     assert control["cash_updated_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# 029-T08: один canonical cash read + candidate metadata + stdout контракт
+# ---------------------------------------------------------------------------
+
+# 13 canonical filter полей report["screener"]["filters"] (раздел 13).
+CANONICAL_FILTER_FIELDS = (
+    "freq_min",
+    "freq_max",
+    "freq_in",
+    "min_credit_rating",
+    "exclude_sovereign",
+    "include_held",
+    "include_ku",
+    "max_risk",
+    "max_listlevel",
+    "max_ytm_pct",
+    "min_maturity",
+    "max_maturity",
+    "screener_limit",
+)
+
+
+def _t08_report():
+    """Канонический отчёт с полным filters-блоком (13 полей) и известным cash."""
+    report = fake_screener_report(
+        cash={
+            "cash_available_rub": 4321.5,
+            "cash_updated_at": datetime(2026, 9, 30, 9, 30, tzinfo=timezone.utc),
+            "cash_known": True,
+        }
+    )
+    report["screener"]["filters"] = {
+        "freq_min": None,
+        "freq_max": None,
+        "freq_in": [2],
+        "min_credit_rating": "AA-",
+        "exclude_sovereign": True,
+        "include_held": True,
+        "include_ku": False,
+        "max_risk": 2,
+        "max_listlevel": 2,
+        "max_ytm_pct": 20.0,
+        "min_maturity": None,
+        "max_maturity": None,
+        "screener_limit": 30,
+    }
+    return report
+
+
+def test_candidate_meta_filters_are_canonical_thirteen_fields():
+    """029-T08: candidate_meta.filters == report["screener"]["filters"] как есть
+    (без ручной реконструкции); CONTROL показывает все 13 canonical полей;
+    cash CONTROL — из report["portfolio"], exporter сам cash не читает."""
+    report = _t08_report()
+    db = FakeDb(sample_rows())
+    use_case = SyncChatgptPortfolioUseCase(
+        db,
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+        report_builder=lambda _args: report,
+    )
+    control, _rows, _candidates = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    meta = json.loads(control["candidate_meta"])
+    assert len(CANONICAL_FILTER_FIELDS) == 13
+    assert set(meta["filters"]) == set(CANONICAL_FILTER_FIELDS)
+    assert meta["filters"] == report["screener"]["filters"]
+    assert db.cash_reads == 0
+
+
+def test_execute_stdout_carries_cash_and_candidate_filters(capsys):
+    """029-T08 stdout-контракт (раздел 26): Свободные деньги / Cash snapshot /
+    Candidate filters; filters — canonical serialization report["screener"]
+    ["filters"] (skill T15 не угадывает значения по переданной команде)."""
+    report = _t08_report()
+    use_case = SyncChatgptPortfolioUseCase(
+        FakeDb(sample_rows()),
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+        report_builder=lambda _args: report,
+    )
+
+    use_case.execute(None)
+
+    out = capsys.readouterr().out
+    assert "Свободные деньги: 4321.5 ₽" in out
+    assert "Cash snapshot: 2026-09-30T09:30:00+00:00" in out
+    prefix = "Candidate filters: "
+    filters_line = next(line for line in out.splitlines() if line.startswith(prefix))
+    assert json.loads(filters_line[len(prefix):]) == report["screener"]["filters"]
+
+
+def test_execute_stdout_unknown_cash_and_filters(capsys):
+    """unknown cash в stdout: Свободные деньги «неизвестно», Cash snapshot
+    «unknown»; Candidate filters печатается и для canonical defaults."""
+    use_case = make_v4_use_case(sample_rows(), FakePublisher())
+
+    use_case.execute(None)
+
+    out = capsys.readouterr().out
+    assert "Свободные деньги: неизвестно" in out
+    assert "Cash snapshot: unknown" in out
+    assert "Candidate filters: " in out
 
 
 def test_candidates_projection_carries_credit_rating():

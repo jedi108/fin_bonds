@@ -28,6 +28,14 @@ default_args() + include_held=True + только реально присутс�
 candidate-filter attrs. Backward-compatible no-args контракт:
 vars(candidate_report_args()) == vars(default_args()) +
 include_held=True; CLI args не теряются до candidate report.
+029-T08: один canonical cash read — cash-поля CONTROL копируются из
+report["portfolio"] того же build_report run (второго
+get_available_cash_rub в exporter нет); investable_total_rub остаётся
+транспортом Sheet (сумма PORTFOLIO value_rub + этот cash, без blind copy
+report["portfolio"]["investable_total_rub"]); candidate_meta.filters —
+только report["screener"]["filters"]; stdout несёт Свободные деньги /
+Cash snapshot / Candidate filters (canonical serialization) — контракт
+для skill (T15).
 """
 from __future__ import annotations
 
@@ -486,14 +494,18 @@ class SyncChatgptPortfolioUseCase(UseCase):
         report = self._report_builder(candidate_report_args(candidate_overrides))
         candidate_meta, candidate_rows = build_candidates_payload(report)
 
-        # 025: cash контекст канонического снапшота — тот же canonical reader,
-        # что у rebalance-report (022): PortfolioStorage.get_available_cash_rub.
-        # Никакого broker API; unknown cash публикуется пустой ячейкой, не 0.
-        cash = self.db.get_available_cash_rub()
-        cash_known = bool(cash.get("cash_known"))
-        cash_available_rub = (
-            round(_float(cash.get("cash_available_rub")), 2) if cash_known else None
-        )
+        # 029-T08: один canonical cash read — cash-поля CONTROL берутся из
+        # report["portfolio"] того же build_report run (единственный
+        # get_available_cash_rub происходит внутри canonical отчёта); exporter
+        # второй раз cash не читает — окна рассинхронизации CANDIDATES/CONTROL
+        # нет. unknown cash в отчёте уже None (публикуется пустой ячейкой, не 0).
+        # portfolio_value_rub/investable_total_rub остаются транспортом Sheet:
+        # сумма PORTFOLIO value_rub + этот cash; blind copy
+        # report["portfolio"]["investable_total_rub"] не делается (029 не
+        # унифицирует transport PORTFOLIO valuation schema с report["portfolio"]).
+        portfolio_block = report["portfolio"]
+        cash_available_rub = _float(portfolio_block.get("cash_available_rub"))
+        cash_updated_at = portfolio_block.get("cash_updated_at")
 
         snapshot_id = now.strftime("%Y%m%dT%H%M%SZ")
         control = {
@@ -510,7 +522,7 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 if cash_available_rub is not None
                 else None
             ),
-            "cash_updated_at": _iso(cash.get("cash_updated_at")) if cash_known else None,
+            "cash_updated_at": cash_updated_at,
             "portfolio_updated_at": _iso(freshness.get("portfolio_max_updated_at")),
             "market_updated_at": _iso(freshness.get("market_price_max_updated_at")),
             "warnings": json.dumps(warnings, ensure_ascii=False) if warnings else "",
@@ -537,10 +549,26 @@ class SyncChatgptPortfolioUseCase(UseCase):
             candidate_headers=CANDIDATE_HEADERS,
             candidate_rows=candidate_rows,
         )
+        # 029-T08: stdout-контракт (раздел 26) — skill (T15) читает cash и
+        # фактически применённые фильтры из canonical stdout, а не угадывает
+        # их по переданной команде: cash из того же report["portfolio"],
+        # filters — canonical serialization report["screener"]["filters"]
+        # (= candidate_meta.filters); provenance sync не угадывает.
+        cash = control["cash_available_rub"]
+        cash_line = (
+            f"Свободные деньги: {cash} ₽"
+            if cash is not None
+            else "Свободные деньги: неизвестно"
+        )
+        filters = json.loads(control["candidate_meta"])["filters"]
         print(
-            "✅ Портфель для ChatGPT обновлён\n"
+            "✅ Контекст для ChatGPT обновлён\n"
             f"Snapshot: {control['snapshot_id']}\n"
-            f"Позиций: {control['positions_count']}\n"
-            f"Кандидатов: {control['candidates_count']}\n"
-            f"Freshness: {control['gate_status']}"
+            f"Позиции: {control['positions_count']}\n"
+            f"Кандидаты: {control['candidates_count']}\n"
+            f"Freshness: {control['gate_status']}\n"
+            f"{cash_line}\n"
+            f"Cash snapshot: {control['cash_updated_at'] or 'unknown'}\n"
+            "Candidate filters: "
+            + json.dumps(filters, ensure_ascii=False, sort_keys=True)
         )
