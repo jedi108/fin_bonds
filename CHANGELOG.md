@@ -4,6 +4,80 @@
 
 ## 2026-10-01
 
+- feat(planning): rebalance-plan — high-level CLI планирования: intents →
+  fitted целевой портфель одной командой (030.8) — новая команда
+  `rebalance-plan` (`src/use_cases/rebalance_plan.py::RebalancePlanUseCase`,
+  строка в карте factory; main.py изменений не требует — регистрация через
+  use_case_map): standard Hermes workflow вместо цикла «создать scenario.json
+  → прогнать → вручную уменьшить qty → повторить» (baseline: обычная
+  ребалансировка = report → plan, 2 domain-вызова, 0 ad-hoc кода). Use case —
+  тонкая композиция canonical домена (правило 030 №1, собственной арифметики
+  нет): сырые intents → `normalize_intents` (030.5) → PlanningContext
+  (`--context-id` из EphemeralContextStore 030.4 ИЛИ свежая сборка builder'а
+  030.3) → `AutoFitFitter.fit` (030.7: sizing/netting/budget/issuer fit) →
+  canonical валидация движка `evaluate_scenario` (030.2). Флаги:
+  `--freq-min/--freq-max/--min-credit-rating/--exclude-sovereign/
+  --max-position-value` (формальные ограничения целевого портфеля),
+  повторяемые `--sell-all ISIN` и `--target-value ISIN=RUB` (верхняя граница
+  итоговой стоимости), `--context-id`, `--view` (summary/targets/trades/
+  positions-after/violations/full; default full), `--format json`. Priority
+  присваивается на границе CLI: порядок повторения `--target-value` =
+  allocation priority (первый = 1 = самый приоритетный, меньше = выше —
+  задокументировано в help); candidate-фильтры покупки — canonical defaults
+  отчёта (default_candidate_filters, 030.5/030.6), своих фильтров у CLI нет.
+  Machine-readable diagnostics без traceback (expected infeasibility и
+  operational-состояния — JSON с exit 0, как scenario.errors): intents
+  INVALID_TARGET_VALUE (форма ISIN=RUB) / INVALID_INTENT / DUPLICATE_TARGET /
+  CONFLICTING_INTENT (нормализация 030.5; план на противоречивом входе не
+  строится), context CONTEXT_NOT_FOUND/CONTEXT_STALE/CONTEXT_VERSION_MISMATCH/
+  CONTEXT_FINGERPRINT_MISMATCH (030.4), plan UNKNOWN_ISIN и
+  CONTEXT_PRICE_MISMATCH (fitter), структурные ошибки движка,
+  BUY_NOT_ELIGIBLE (structured reasons[], 030.6), PRICE_UNAVAILABLE;
+  violations целевого портфеля — canonical constraint_checks движка; data
+  freshness НЕ дублируется кодом — canonical data_gate контекста (ось data
+  gate ≠ feasible). Вывод: envelope (идентификация среза: fingerprint/as_of/
+  data_gate; вердикт valid/feasible/price_consistent; diagnostics) в каждом
+  view + блоки проекции; full добавляет observability: constraints и
+  candidate-filters echo, normalized ordered intents с priority,
+  PlanningContext timestamps (as_of/generated_at/positions/cash_updated_at),
+  per-target requested vs fitted / status / fit_reasons / buy_reasons /
+  planning price+basis / valuation_source, финальный вердикт; secrets не
+  выводятся. Деньги planning-слоя (requested/fitted, cash, constraints echo)
+  — decimal-строки (правило 030 №3, как в snapshot 030.10); блоки движка
+  (summary/trades/positions_after/violations) — его canonical float-релей без
+  переформатирования (копии расчёта нет); целевой CSV пишется существующим
+  canonical writer'ом отчёта над positions_after без post-processing
+  (проверено тестом). Аддитивный фикс хранения (контракт raw-строки 030.6,
+  найден smoke'ом на реальном SQL): buy-выборка `get_bonds_yield_table`
+  дополнена колонками structural gates currency/is_trade_available/
+  market_price_updated_at — eligibility-гейт fitter'а переоценивает gates
+  построчно на frozen as_of, строки без колонок давали бы ложные
+  UNSUPPORTED_CURRENCY/MARKET_PRICE_STALE каждой покупаемой бумаге (030.10
+  документировала это как «построчные reasons даёт plan-путь» — plan-путь
+  требует сами колонки); JSON-выдачи (rebalance-report/calculate-ytm)
+  публикуют строки через whitelist ключей — контракты не меняются (та же
+  policy, что valuation_source в 030.7). Тесты: tests/test_rebalance_plan.py
+  (30: 29 без БД + 1 регрессия колонок gates на POSTGRES_DSN_TEST): report →
+  plan valid/feasible, sales/purchases в budget summary, known-cash feasible
+  ≥ 0, re-validate движком сделок плана, CSV canonical writer'ом, views ⊆
+  full, duplicate/conflict/invalid diagnostics, --context-id тот же
+  fingerprint + CONTEXT_* ошибки, priority из порядка --target-value,
+  observability-контракт, без secrets, legacy `rebalance-report --scenario`
+  контракт неизменен (additive-правило №2). tests/test_analysis_snapshot.py:
+  счётчик команд фабрики 37 → 38 (additive). Полный набор: 711 collected /
+  467 passed / 244 skipped / 0 failed (baseline 030.10 681/438/243/0 + 29
+  passed + 1 skip-тест на БД). Ручной smoke end-to-end на локальной
+  scratch-БД (createdb → migrate-db → синтетика → CLI → dropdb): happy path
+  (sell_all + target_value) valid/feasible, 2 ноги (sell −3, buy +3),
+  violations [], cash_after ≥ 0; views summary/targets;
+  DUPLICATE_TARGET/CONFLICTING_INTENT/INVALID_TARGET_VALUE/UNKNOWN_ISIN/
+  CONTEXT_NOT_FOUND — machine-readable; priority-урезание (ISSUER_CAP/
+  BUDGET_CAP на lower-priority BUY); report → plan на одной БД (report честно
+  infeasible, plan fit-ается вокруг лимитов); legacy
+  `rebalance-report --scenario` JSON-контракт прежний (planning_prices не
+  публикуется); snapshot → context_id → plan в разных процессах — тот же
+  fingerprint. Деплой не запускался (по ограничению задачи).
+
 - feat(planning): analysis snapshot — read-only вход для неизвестной аналитики
   (030.10) — новая команда `rebalance-analysis-snapshot` (`src/use_cases/
   analysis_snapshot.py::AnalysisSnapshotUseCase`): один общий read-only вход

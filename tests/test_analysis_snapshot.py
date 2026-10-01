@@ -649,4 +649,4 @@ class TestCliWiring:
         ] is AnalysisSnapshotUseCase
         # Существующие команды не тронуты.
         assert 'rebalance-report' in use_case_map
-        assert len(use_case_map) == 37
+        assert len(use_case_map) == 38

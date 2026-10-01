@@ -2698,7 +2698,18 @@ class PortfolioStorage:
                 -- credit_rating и строгому фильтру --min-credit-rating;
                 -- risk_level остаётся отдельным фильтром.
                 lr.credit_rating,
-                lr.rating_score{held_select}
+                lr.rating_score,
+                -- 030.8: колонки structural buy gates (контракт raw-строки
+                -- buy_eligibility, 030.6): eligibility-гейт fitter'а
+                -- переоценивает gates строки построчно на frozen as_of —
+                -- без них оценка давала бы ложные UNSUPPORTED_CURRENCY/
+                -- MARKET_PRICE_STALE (строка прошла те же gates в WHERE,
+                -- но не несла значений для Python-оценки). Аддитивно:
+                -- JSON-выдачи (rebalance-report/calculate-ytm) публикуют
+                -- строки через whitelist ключей, лишние поля игнорируют.
+                bc.currency,
+                bc.is_trade_available,
+                bc.market_price_updated_at{held_select}
             FROM bonds_catalog bc
             LEFT JOIN companies co ON co.id = bc.company_id
             {_LATEST_FLOATER_RATE_JOIN}
