@@ -7,6 +7,7 @@ import pytest
 
 from src.data_models import Bond
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
+from src.use_cases import sync_chatgpt_portfolio
 from src.use_cases.rebalance_report import RebalanceReportUseCase
 from src.use_cases.sync_chatgpt_portfolio import (
     CANDIDATE_HEADERS,
@@ -1230,3 +1231,238 @@ def test_publisher_candidates_failure_after_writing_leaves_control_not_ready():
     control = spreadsheet.sheets["CONTROL"].as_dicts()
     assert control["sync_status"] == "WRITING"
     assert "READY" not in control.values()
+
+
+# ---------------------------------------------------------------------------
+# 029-T04: factory-backed canonical report builder (rating_scale)
+# ---------------------------------------------------------------------------
+
+# Зеркало шкалы config.yaml (rating_scale) — как в test_rebalance_report:
+# ключи с национальным суффиксом, нормализация внутри rating_code_to_score.
+RATING_SCALE = {
+    "AAA.RU": 13, "AA+.RU": 12, "AA.RU": 11, "AA-.RU": 10,
+    "A+.RU": 9, "A.RU": 8, "A-.RU": 7,
+}
+
+
+class FakeReportDb:
+    """Минимальный storage-контракт RebalanceReportUseCase.build_report без БД:
+    portfolio и redemptions пустые, screener — строки buy-выборки
+    get_bonds_yield_table (rating_score уже в строке, как даёт SQL)."""
+
+    def __init__(self, screener_rows):
+        self.screener_rows = screener_rows
+        self.freshness = {
+            "bonds_with_market_price": 100,
+            "bonds_tradeable_count": 100,
+            "bonds_tradeable_stale_or_missing": 0,
+            "portfolio_positions_rows": 0,
+            "portfolio_zero_value_positions": 0,
+            "portfolio_zero_rows_suspicious": 0,
+            "portfolio_zero_value_isins": "",
+            "last_sync_time": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
+            "portfolio_max_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
+            "market_price_max_updated_at": datetime(
+                2026, 9, 30, 8, 55, tzinfo=timezone.utc
+            ),
+        }
+
+    def get_db_freshness(self):
+        return dict(self.freshness)
+
+    def get_rebalance_portfolio_rows(self):
+        return []
+
+    def get_bonds_yield_table(self, **_kwargs):
+        return [dict(row) for row in self.screener_rows]
+
+    def get_portfolio_redemption_events(self, _months):
+        return []
+
+    def get_available_cash_rub(self):
+        return {"cash_available_rub": None, "cash_updated_at": None, "cash_known": False}
+
+
+class FakeFactory:
+    """Дублёр UseCaseFactory: кешированный db connection + config;
+    повторно прочитать config.yaml через него невозможно по построению."""
+
+    def __init__(self, db, config):
+        self._db = db
+        self.config = config
+
+    def get_db_connection(self):
+        return self._db
+
+
+def screener_candidate(isin, rating_score=None, credit_rating=None):
+    """Строка buy-выборки storage (SQL get_bonds_yield_table): ytm свежий —
+    enrichment берёт его как есть; rating_score — latest rating_history."""
+    return {
+        "isin": isin,
+        "name": f"Bond {isin}",
+        "ticker": isin[-5:],
+        "issuer": "Issuer",
+        "quantity": 0,
+        "value_rub": 0,
+        "price": 950.0,
+        "nominal": 1000.0,
+        "ytm": 15.0,
+        "ytm_updated_at": datetime(2026, 9, 30, 8, 55, tzinfo=timezone.utc),
+        "ytm_null_reason": None,
+        "coupon_rate_percent": 12.0,
+        "coupon_quantity_per_year": 4,
+        "floating_coupon_flag": False,
+        "amortization_flag": False,
+        "perpetual_flag": False,
+        "risk_level": 1,
+        "list_level": 1,
+        "ku": False,
+        "held_share_pct": None,
+        "credit_rating": credit_rating,
+        "rating_score": rating_score,
+        "maturity_date": date(2030, 1, 1),
+        "offer_date": None,
+    }
+
+
+def make_factory_exporter(screener_rows):
+    """Factory-path exporter: create(FakeFactory) с canonical rating_scale."""
+    db = FakeReportDb(screener_rows)
+    factory = FakeFactory(db, {"rating_scale": RATING_SCALE})
+    return SyncChatgptPortfolioUseCase.create(factory), db, factory
+
+
+def test_create_injects_factory_canonical_report_builder():
+    """create(factory) инжектит factory-created canonical
+    RebalanceReportUseCase.build_report: тот же db instance (кешированный
+    factory connection) и та же шкала конфига по identity — второй rating
+    scale в exporter не создаётся, config.yaml сам exporter не читает."""
+    rows = [screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-")]
+    exporter, db, factory = make_factory_exporter(rows)
+    builder_use_case = exporter._report_builder.report_use_case
+
+    assert exporter.db is db
+    assert isinstance(builder_use_case, RebalanceReportUseCase)
+    assert builder_use_case.db is db
+    assert builder_use_case.rating_scale is factory.config["rating_scale"]
+    assert not hasattr(sync_chatgpt_portfolio, "load_config")
+
+
+def test_factory_path_equivalent_to_canonical_create():
+    """Production create-path эквивалентен RebalanceReportUseCase.create
+    (factory): на тех же данных и args screener отчёта совпадает."""
+    rows = [screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-")]
+    exporter, _db, factory = make_factory_exporter(rows)
+
+    args = candidate_report_args()
+    args.min_credit_rating = "AA-"
+    report_via_exporter = exporter._report_builder(args)
+    report_direct = RebalanceReportUseCase.create(factory).build_report(args)
+
+    assert report_via_exporter["screener"] == report_direct["screener"]
+
+
+def test_factory_path_filters_min_credit_rating():
+    """При min-credit-rating AA- factory-path exporter реально фильтрует:
+    AA- проходит (порог включительно), рейтинг ниже порога и отсутствие
+    рейтинга отсекаются с честным подсчётом в excluded."""
+    rows = [
+        screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-"),
+        screener_candidate("RU000CANDL", rating_score=8, credit_rating="A"),
+        screener_candidate("RU000CANDN", rating_score=None, credit_rating=None),
+    ]
+    exporter, _db, _factory = make_factory_exporter(rows)
+
+    args = candidate_report_args()
+    args.min_credit_rating = "AA-"
+    report = exporter._report_builder(args)
+
+    excluded = report["screener"]["excluded"]
+    assert excluded["rating_below_min"] == 1
+    assert excluded["rating_missing"] == 1
+    assert [row["isin"] for row in report["screener"]["fixed"]] == ["RU000CANDA"]
+    assert report["screener"]["filters"]["min_credit_rating"] == "AA-"
+
+
+def test_factory_path_unknown_rating_code_canonical_cli_error():
+    """Unknown rating code — та же ошибка, что canonical rebalance-report CLI:
+    текст совпадает с ошибкой _validate_args factory-created use case."""
+    rows = [screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-")]
+    exporter, _db, factory = make_factory_exporter(rows)
+
+    args = candidate_report_args()
+    args.min_credit_rating = "XYZ"
+    with pytest.raises(ValueError) as exporter_error:
+        exporter._report_builder(args)
+
+    canonical = RebalanceReportUseCase.create(factory)
+    with pytest.raises(ValueError) as cli_error:
+        canonical._validate_args(args)
+
+    assert "не входит в шкалу rating_scale" in str(exporter_error.value)
+    assert str(exporter_error.value) == str(cli_error.value)
+
+
+def test_injected_report_builder_seam_still_supported():
+    """Injection seam не сужается: поданный в constructor builder вызывается
+    как есть с candidate args (include_held=True) — без дополнительной
+    обёртки поверх; payload строится из его отчёта."""
+    seen = []
+
+    def spy_report_builder(args):
+        seen.append(args)
+        return fake_screener_report()
+
+    use_case = SyncChatgptPortfolioUseCase(
+        FakeDb(sample_rows()),
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+        report_builder=spy_report_builder,
+    )
+    control, _rows, candidates = use_case._build_payload(
+        datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+    )
+
+    assert len(seen) == 1
+    assert vars(seen[0]) == vars(candidate_report_args())
+    assert seen[0].include_held is True
+    assert control["candidates_count"] == len(candidates) == 3
+
+
+def test_direct_constructor_min_credit_rating_fail_fast():
+    """Прямой constructor без factory/report_builder: strict min-credit-rating
+    fail-fast по canonical validation (пустая шкала не валидирует код), а не
+    silent skip rating filter."""
+    use_case = SyncChatgptPortfolioUseCase(
+        FakeReportDb([screener_candidate("RU000CANDA", rating_score=10)]),
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+    )
+    args = candidate_report_args()
+    args.min_credit_rating = "AA-"
+
+    with pytest.raises(ValueError, match="не входит в шкалу rating_scale"):
+        use_case._report_builder(args)
+
+
+def test_default_builder_without_rating_threshold_builds_canonical_report():
+    """Без min-credit-rating прямой constructor строит тот же канонический
+    отчёт (canonical validation канонические defaults пропускает)."""
+    rows = [
+        screener_candidate("RU000CANDA", rating_score=10, credit_rating="AA-"),
+        screener_candidate("RU000CANDL", rating_score=8, credit_rating="A"),
+    ]
+    use_case = SyncChatgptPortfolioUseCase(
+        FakeReportDb(rows),
+        publisher=FakePublisher(),
+        ytm_engine=FakeYtmEngine(),
+    )
+
+    report = use_case._report_builder(candidate_report_args())
+
+    assert report["schema_version"] == 2
+    assert {row["isin"] for row in report["screener"]["fixed"]} == {
+        "RU000CANDA",
+        "RU000CANDL",
+    }

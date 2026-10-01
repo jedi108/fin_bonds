@@ -8,6 +8,10 @@ CANDIDATES, CONTROL расширен кандидатными ключами и 
 025: schema v4 — CONTROL несёт cash контекст канонического снапшота
 (cash_available_rub / investable_total_rub / cash_updated_at; unknown —
 пустая ячейка, не 0), CANDIDATES — canonical credit_rating кандидата.
+029-T04: create(factory) инжектит factory-created canonical
+RebalanceReportUseCase.build_report — rating_scale из конфига и canonical
+validation переиспользуются через единственную точку construction (config.yaml
+в exporter повторно не читается, второй rating scale не создаётся).
 """
 from __future__ import annotations
 
@@ -309,7 +313,16 @@ class SyncChatgptPortfolioUseCase(UseCase):
         self._report_builder = report_builder or self._default_report_builder
 
     def _default_report_builder(self, args: argparse.Namespace) -> Dict[str, Any]:
-        return RebalanceReportUseCase(db=self.db).build_report(args)
+        """Прямой constructor (без factory и без injected report_builder):
+        canonical builder без rating_scale — угадывать его из config.yaml
+        exporter не обязан (029-T04). Strict min-credit-rating обязан
+        fail-fast через canonical validation (та же ошибка, что у CLI
+        rebalance-report), а не молча пропускать rating filter с пустой
+        шкалой; после 029-T05 (validation внутри build_report) явный вызов
+        остаётся idempotent и может быть убран."""
+        report_use_case = RebalanceReportUseCase(db=self.db)
+        report_use_case._validate_args(args)
+        return report_use_case.build_report(args)
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
@@ -318,7 +331,25 @@ class SyncChatgptPortfolioUseCase(UseCase):
 
     @classmethod
     def create(cls, factory: "UseCaseFactory") -> "SyncChatgptPortfolioUseCase":
-        return cls(db=factory.get_db_connection())
+        """029-T04: production create-path эквивалентен RebalanceReportUseCase
+        .create(factory) — canonical report builder создаётся фабрикой:
+        rating_scale из конфига живёт только в нём (второй scale и повторное
+        чтение config.yaml в exporter не появляются), а db — кешированный
+        factory connection, оба use case работают с тем же PortfolioStorage
+        instance. Builder прогоняет args через тот же canonical
+        _validate_args, что и CLI rebalance-report (unknown rating code даёт
+        ту же ошибку; после 029-T05 validation станет частью build_report).
+        """
+        db = factory.get_db_connection()
+        report_use_case = RebalanceReportUseCase.create(factory)
+
+        def report_builder(args: argparse.Namespace) -> Dict[str, Any]:
+            report_use_case._validate_args(args)
+            return report_use_case.build_report(args)
+
+        # Test seam: factory-created canonical use case под builder'ом.
+        report_builder.report_use_case = report_use_case
+        return cls(db=db, report_builder=report_builder)
 
     def _get_publisher(self) -> GoogleSheetsPortfolioPublisher:
         if self.publisher is not None:
