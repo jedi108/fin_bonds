@@ -4,6 +4,59 @@
 
 ## 2026-10-01
 
+- feat(planning): ephemeral context store — core-owned context handle (030.4) —
+  новый `src/services/context_store.py` (`EphemeralContextStore`): workflow
+  «analysis-snapshot → sandbox Python → plan --context-id» опирается на
+  core-owned immutable артефакт, а не на данные, вернувшиеся из sandbox
+  (обычный SHA/fingerprint не защищает от «код изменил и данные, и сам hash»;
+  авторитет — только артефакт, созданный самим core). Хранение двухуровневое:
+  process-local dict (сравнение в одном процессе возвращает тот же
+  Python-объект) + ephemeral JSON-артефакт на host
+  (`data/planning_contexts/`: файлы 0600, каталог 0700, запись write-once
+  через O_EXCL+link — частичное обновление context после создания
+  невозможно; persistent snapshot DB не создаётся). `context_id` —
+  secrets.token_hex(16), строго opaque: формат 32 hex валидируется, любое
+  отклонение (включая path traversal) — CONTEXT_NOT_FOUND; в filesystem path
+  id не попадает — имя файла sha256(scope:id). Scoping: артефакт привязан к
+  scope инстанса приложения (sha256 корня проекта + DSN источника данных;
+  сам DSN/tokens в артефакт не попадают) — чужой profile с известным id
+  получает ровно тот же CONTEXT_NOT_FOUND (существование чужого context не
+  раскрывается, файл чужого scope даже не разрешается по имени). Порядок
+  проверок при загрузке: формат id → файл → envelope (store schema version)
+  → scope → версии → TTL → fingerprint; БД store не читает вовсе —
+  `plan --context-id` не перечитывает и не подмешивает свежие market/cash/
+  portfolio rows (неизменность legacy-путей покрыта существующими тестами).
+  Ошибки machine-readable (`.code`): CONTEXT_NOT_FOUND (неизвестен/удалён/
+  невалиден/чужой scope), CONTEXT_STALE (истёк TTL — отдельная ось свежести,
+  не data_gate и не per-instrument eligibility: stale-срез внутри TTL
+  загружается с исходным gate и ценами, TTL eligibility reasons не
+  переписывает; истёкший артефакт удаляется), CONTEXT_VERSION_MISMATCH
+  (context_schema_version / derived calculation_policy_version / формат
+  envelope несовместимы — старый context не пересчитывается новой политикой
+  молча), CONTEXT_FINGERPRINT_MISMATCH (corruption core-owned артефакта:
+  fingerprint пересчитывается при загрузке; консистентную подмену
+  «данные+hash» отсекает граница владения файлом, а не hash). Versioned
+  payload: типизированная сериализация расчётного payload (Decimal/date/
+  datetime — теги, float — нативный JSON round-trip) восстанавливает
+  PlanningContext без потери типов; `calculation_policy_version` — не
+  «магическая строка»: `derive_calculation_policy_version()` — digest
+  канонических policy-входов (canonical issuer limit 15% движка 030.2, raw
+  universe policy 030.3, schema/policy версии, rating-scale семантика
+  config.yaml) — изменение любого входа делает сохранённые context'ы
+  несовместимыми (fail-loud), regression-тест дополнительно проверяет
+  покрытие каждого входа. TTL по умолчанию 6h (bounded; cleanup истёкших и
+  нечитаемых артефактов — при каждом save и явно `cleanup()`). CLI/factory
+  проводка — 030.8/030.10, transport/lifecycle для LLM — 030.11 (не
+  предугадываются). Тесты: tests/test_context_store.py (51, синтетические
+  данные, артефакты в tmp_path): round-trip с доменными типами и равным
+  fingerprint, in-process same object, чужой scope = NOT_FOUND с тем же
+  ответом, sandbox-правки копии payload не меняют авторитет, corruption
+  (данные/fingerprint/обрезка/форма envelope) → FINGERPRINT_MISMATCH,
+  unknown/expired → NOT_FOUND/STALE, TTL отдельно от data gate, cleanup,
+  schema/policy/envelope версии → VERSION_MISMATCH, derived policy digest
+  покрывает каждый вход, загрузка без единого чтения БД, path traversal
+  отвергается, права 0600/0700, secrets в артефакте отсутствуют, write-once.
+
 - feat(planning): PlanningContext — builder + fingerprint (030.3) — новый
   `src/services/planning_context.py`: immutable срез данных один раз на
   plan/compare-run поверх canonical engine 030.2. Согласованное чтение —
