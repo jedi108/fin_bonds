@@ -16,6 +16,7 @@ from src.tbank.api_client import TbankApiClient
 from src.monitoring.adapters.factory import AdapterFactory
 
 from src.use_cases.add_bond_to_catalog import AddBondToCatalogUseCase
+from src.use_cases.analysis_snapshot import AnalysisSnapshotUseCase
 from src.use_cases.analyze_liquidity import AnalyzeLiquidityUseCase
 from src.use_cases.analyze_buy_candidates import AnalyzeBuyCandidatesUseCase
 from src.use_cases.calculate_spread import CalculateSpreadUseCase
@@ -202,6 +203,7 @@ class UseCaseFactory:
             'update-floaters': UpdateFloatersUseCase,
             'calculate-duration': CalculateDurationUseCase,
             'rebalance-report': RebalanceReportUseCase,
+            'rebalance-analysis-snapshot': AnalysisSnapshotUseCase,
             'sync-chatgpt-portfolio': SyncChatgptPortfolioUseCase,
         }
 

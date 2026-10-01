@@ -4,6 +4,54 @@
 
 ## 2026-10-01
 
+- feat(planning): analysis snapshot — read-only вход для неизвестной аналитики
+  (030.10) — новая команда `rebalance-analysis-snapshot` (`src/use_cases/
+  analysis_snapshot.py::AnalysisSnapshotUseCase`): один общий read-only вход
+  для аналитики, которую domain API пока не покрывает; escape hatch расширяет
+  вычисления, а не источники данных. Snapshot строится на том же
+  PlanningContextBuilder (030.3), что plan/compare — отдельного SQL-контура
+  нет; расчётов в snapshot нет (правило 030 №1): только агрегация canonical
+  среза — effective_prices/YTM движка 030.2, data_gate classify_freshness,
+  raw buy-пул RAW_UNIVERSE_POLICY. Поток: context build -> EphemeralContextStore
+  .save (030.4) -> handle {context_id, context_fingerprint, expires_at} ->
+  copy-for-reading payload; последующий plan --context-id загружает
+  core-owned context по fingerprint (проверено end-to-end). Payload:
+  context (schema/policy версии контракта 030.3 + derived-версия store 030.4,
+  opaque context_id, fingerprint, frozen as_of, data_gate, freshness metadata,
+  TTL-окно), portfolio (canonical cash — unknown не превращается в 0; позиции
+  с canonical оценкой view, valuation_source и planning price/basis),
+  universe (canonical raw buy-пул БЕЗ presentation top-N — screener_limit
+  отчёта не применяется, политика пула опубликована рядом), capabilities/
+  limitations (machine-readable реестр datasets post-029: доступно
+  portfolio/cash/buy_universe/planning_prices/ytm/credit_rating/...;
+  недоступно exact_coupon_schedule/amortization_schedule/settlement_costs/
+  per_instrument_duration/per_instrument_market_price_freshness/rating_dates
+  — с canonical причинами). Structural BUY eligibility (030.6): строка
+  canonical buy-пула — eligibility=true, reasons=[] (релей факта buy-path:
+  SQL-гейты той же таблицы STRUCTURAL_BUY_GATES прошли на frozen as_of;
+  построчный Python-пересчёт в snapshot сознательно не применяется — срезы
+  не несут колонок gates, оценка дала бы ложные причины); held-позиция вне
+  пула — eligibility=false + NOT_IN_BUY_POOL (тот же код, что fitter 030.7):
+  «есть в портфеле/каталоге» ≠ «можно покупать». NULL сохраняется + canonical
+  reason (ytm_pct=null + ytm_reason; unknown cash=null + cash_known=false);
+  деньги — decimal строки, арифметики нет. `--requires ytm,exact_coupon_...`
+  возвращает typed data gap ANALYSIS_DATA_UNAVAILABLE + какой source field/
+  dataset не хватает (данные не синтезируются). Compact по умолчанию
+  (metadata + counts + preview), полный payload — `--full` (adapter 030.11
+  передаёт его как data artifact, LLM получает metadata/preview). Без secrets:
+  нет DSN/tokens/broker-order capability, read-only, сценарии/сделки не
+  создаёт; payload помечен приватным артефактом (не отправлять наружу,
+  030.12). Фабрика — строго additive (команда в use_case_map), legacy-команды
+  не тронуты. Тесты: tests/test_analysis_snapshot.py (25, без БД): версии/
+  context_id/fingerprint/as_of/data_gate, store.load возвращает тот же
+  core-owned context, universe > presentation top-N, NULL+reason, presence vs
+  eligibility (NOT_IN_BUY_POOL), capabilities/limitations, data gap без
+  синтеза, compact vs full, отсутствие secrets, CLI-проводка. Полный набор:
+  681 collected / 438 passed / 243 skipped / 0 failed (baseline 030.7
+  656/413/243/0 + 25). Ручной smoke end-to-end на локальной scratch-БД
+  (миграции + синтетика): compact/full/data-gap JSON валидны, gate
+  canonical, context_id загружается из нового процесса.
+
 - feat(planning): auto-fit fitter — Decimal-деньги, одна planning цена,
   priority-урезание (030.7) — новый `src/services/planning_fitter.py::
   AutoFitFitter`: переводит normalized high-level intents (030.5) в целые
