@@ -14,6 +14,13 @@ validation переиспользуются через единственную 
 в exporter повторно не читается, второй rating scale не создаётся).
 029-T05: canonical validation — часть build_report; exporter сам
 _validate_args не вызывает (второй точки validation нет).
+029-T06: CLI sync-chatgpt-portfolio принимает 12 candidate-filter args
+через общий add_screener_filter_arguments(defaults=False) — без
+materialization canonical defaults (argparse.SUPPRESS): в sync Namespace
+попадают только явно переданные флаги, и explicit override переносится
+в канонические args по факту присутствия атрибута, а не сравнением со
+скопированным default. include_held=True остаётся product-default
+экспорта; флагов --include-held/--exclude-held у exporter нет.
 """
 from __future__ import annotations
 
@@ -29,7 +36,11 @@ from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
 from src.use_cases.check_db import classify_freshness
-from src.use_cases.rebalance_report import RebalanceReportUseCase
+from src.use_cases.rebalance_report import (
+    SCREENER_FILTER_DESTS,
+    RebalanceReportUseCase,
+    add_screener_filter_arguments,
+)
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -227,15 +238,25 @@ def build_schema_rows() -> List[List[Any]]:
     return rows
 
 
-def candidate_report_args() -> argparse.Namespace:
+def candidate_report_args(
+    overrides: Optional[argparse.Namespace] = None,
+) -> argparse.Namespace:
     """Аргументы rebalance-report для кандидатного экспорта (019).
 
     Defaults — канонические RebalanceReportUseCase.default_args(), экспортёр
-    их не дублирует; единственное изменение — include_held=True: уже держимые
-    бумаги должны попасть в выборку с бейджем held (доля N%) для ревью.
+    их не дублирует; единственное product-изменение — include_held=True: уже
+    держимые бумаги должны попасть в выборку с бейджем held (доля N%) для
+    ревью. 029-T06: overrides — CLI Namespace sync-chatgpt-portfolio
+    (defaults подавлены через argparse.SUPPRESS): переносятся только
+    явно переданные candidate-filter args, по факту присутствия атрибута
+    (hasattr), а не сравнением с вручную скопированным default.
     """
     args = RebalanceReportUseCase.default_args()
     args.include_held = True
+    if overrides is not None:
+        for dest in SCREENER_FILTER_DESTS:
+            if hasattr(overrides, dest):
+                setattr(args, dest, getattr(overrides, dest))
     return args
 
 
@@ -327,8 +348,11 @@ class SyncChatgptPortfolioUseCase(UseCase):
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
-        # P0 намеренно без опций: destination фиксирован в env.
-        return None
+        # 029-T06: candidate filters rebalance-report принимает exporter — тот
+        # же общий helper, но без materialization canonical defaults
+        # (argparse.SUPPRESS): sync Namespace несёт только explicit overrides.
+        # Destination фиксирован в env, как и в P0.
+        add_screener_filter_arguments(parser, defaults=False)
 
     @classmethod
     def create(cls, factory: "UseCaseFactory") -> "SyncChatgptPortfolioUseCase":
@@ -359,7 +383,9 @@ class SyncChatgptPortfolioUseCase(UseCase):
         )
 
     def _build_payload(
-        self, now: Optional[datetime] = None
+        self,
+        now: Optional[datetime] = None,
+        candidate_overrides: Optional[argparse.Namespace] = None,
     ) -> Tuple[Dict[str, Any], List[List[Any]], List[List[Any]]]:
         now = now or datetime.now(timezone.utc)
         freshness = self.db.get_db_freshness()
@@ -447,8 +473,9 @@ class SyncChatgptPortfolioUseCase(UseCase):
 
         # 020: кандидаты — только из канонического отчёта rebalance-report
         # (build_report + candidate_report_args, пересчётов нет); metadata
-        # переносится в CONTROL как есть.
-        report = self._report_builder(candidate_report_args())
+        # переносится в CONTROL как есть. 029-T06: явные candidate-filter
+        # overrides CLI идут в канонические args (defaults не дублируются).
+        report = self._report_builder(candidate_report_args(candidate_overrides))
         candidate_meta, candidate_rows = build_candidates_payload(report)
 
         # 025: cash контекст канонического снапшота — тот же canonical reader,
@@ -488,7 +515,8 @@ class SyncChatgptPortfolioUseCase(UseCase):
         return control, table_rows, candidate_rows
 
     def execute(self, args: argparse.Namespace):
-        control, rows, candidate_rows = self._build_payload()
+        # 029-T06: candidate-filter overrides CLI попадают в кандидатный экспорт.
+        control, rows, candidate_rows = self._build_payload(candidate_overrides=args)
         self._get_publisher().publish(
             control=control,
             headers=PORTFOLIO_HEADERS,

@@ -187,6 +187,104 @@ def _parse_iso_date(raw: str) -> str:
     return raw
 
 
+# ---------------------------------------------------------------------------
+# 029-T06: общий CLI-контракт candidate/screener фильтров.
+#
+# _SCREENER_FILTER_SPECS — единственный источник parsing semantics и canonical
+# default values этих 12 фильтров: его использует и RebalanceReportUseCase
+# (setup_parser/default_args), и sync-chatgpt-portfolio (без materialization
+# defaults, см. add_screener_filter_arguments). Ручных копий default
+# max-risk/max-listlevel/max-ytm/screener-limit в коде быть не должно.
+# ---------------------------------------------------------------------------
+_SCREENER_FILTER_SPECS = (
+    ('--freq-min', dict(
+        type=int, default=None,
+        help='Минимальная частота купонов в год (023): «от квартальных '
+             'до ежемесячных» = --freq-min 4 --freq-max 12. NULL/0-частота '
+             'строгий диапазон не проходит; взаимоисключимо с --freq-in.'
+    )),
+    ('--freq-max', dict(
+        type=int, default=None,
+        help='Максимальная частота купонов в год (напр. 4 = не чаще '
+             'квартальных; P-C). С --freq-min задаёт диапазон; '
+             'взаимоисключимо с --freq-in.'
+    )),
+    ('--freq-in', dict(
+        type=_parse_freq_in, default=None,
+        help='Только указанные частоты купонов через запятую (напр. 2,4; P-C). '
+             'Взаимоисключимо с --freq-min/--freq-max.'
+    )),
+    ('--min-credit-rating', dict(
+        type=str, default=None,
+        help='Минимальный кредитный рейтинг кандидата (023), напр. AA-: '
+             'строгий порог по latest rating_history — без рейтинга или '
+             'ниже порога кандидат исключается. Код нормализуется '
+             'существующим rating_code_to_score (AAA(RU)/ruAAA = AAA); '
+             'risk_level рейтингом не подменяется.'
+    )),
+    ('--exclude-sovereign', dict(
+        action='store_true',
+        help='Исключить суверенных эмитентов: ОФЗ и евро-РФ (P-G).'
+    )),
+    ('--include-ku', dict(
+        action='store_true',
+        help='Включить бумаги для квалифицированных инвесторов '
+             '(по умолчанию исключены).'
+    )),
+    ('--max-risk', dict(
+        type=int, default=1,
+        help='Максимальный уровень риска Т-Банка кандидатов (1-5). Default: 1.'
+    )),
+    ('--max-listlevel', dict(
+        type=int, choices=[1, 2, 3], default=2,
+        help='Максимальный уровень листинга MOEX кандидатов. Default: 2.'
+    )),
+    ('--max-ytm', dict(
+        type=float, default=35.0,
+        help='Потолок YTM кандидатов, %% годовых (аномалия = ВДО/дистресс). Default: 35.0.'
+    )),
+    ('--min-maturity', dict(
+        type=_parse_iso_date, default=None,
+        help='Минимальная дата погашения кандидатов, YYYY-MM-DD.'
+    )),
+    ('--max-maturity', dict(
+        type=_parse_iso_date, default=None,
+        help='Максимальная дата погашения кандидатов, YYYY-MM-DD.'
+    )),
+    ('--screener-limit', dict(
+        type=int, default=10,
+        help='Размер топов fixed[]/floater[] в скринере. Default: 10.'
+    )),
+)
+
+# dest-имена тех же 12 фильтров — выводятся из таблицы определений (второго
+# списка имён не появляется; используется exporter'ом для переноса explicit
+# overrides в канонические args отчёта).
+SCREENER_FILTER_DESTS = tuple(
+    flag.lstrip('-').replace('-', '_') for flag, _kwargs in _SCREENER_FILTER_SPECS
+)
+
+
+def add_screener_filter_arguments(
+    parser: argparse.ArgumentParser, *, defaults: bool = True
+) -> None:
+    """Регистрирует 12 candidate/screener фильтров (029-T06) — публичный
+    переиспользуемый helper, единственный источник parsing semantics.
+
+    defaults=True (rebalance-report): canonical default values materialize
+    в Namespace — тот же parser contract питает и default_args().
+    defaults=False (sync-chatgpt-portfolio): default=argparse.SUPPRESS —
+    в sync Namespace попадают только явно переданные флаги, второй набор
+    defaults не materialize; explicit override определяется по факту
+    присутствия атрибута (hasattr), а не сравнением со скопированным default.
+    """
+    for flag, kwargs in _SCREENER_FILTER_SPECS:
+        if defaults:
+            parser.add_argument(flag, **kwargs)
+        else:
+            parser.add_argument(flag, **{**kwargs, 'default': argparse.SUPPRESS})
+
+
 def _add_months(day: date, months: int) -> date:
     """Дата + months месяцев (календарно, как make_interval в PostgreSQL)."""
     total = day.month - 1 + months
@@ -260,30 +358,13 @@ class RebalanceReportUseCase(UseCase):
 
     @staticmethod
     def setup_parser(parser: argparse.ArgumentParser):
+        # 029-T06: 12 candidate/screener фильтров — общий helper с canonical
+        # defaults (единственный источник argument definitions + default values
+        # и для CLI, и для default_args(), и для exporter'а).
+        add_screener_filter_arguments(parser, defaults=True)
         parser.add_argument(
             '--format', choices=['json'], default='json',
             help='Формат ответа: json — канонический машинный формат для агента.'
-        )
-        parser.add_argument(
-            '--freq-max', type=int, default=None,
-            help='Максимальная частота купонов в год (напр. 4 = не чаще '
-                 'квартальных; P-C). С --freq-min задаёт диапазон; '
-                 'взаимоисключимо с --freq-in.'
-        )
-        parser.add_argument(
-            '--freq-min', type=int, default=None,
-            help='Минимальная частота купонов в год (023): «от квартальных '
-                 'до ежемесячных» = --freq-min 4 --freq-max 12. NULL/0-частота '
-                 'строгий диапазон не проходит; взаимоисключимо с --freq-in.'
-        )
-        parser.add_argument(
-            '--freq-in', type=_parse_freq_in, default=None,
-            help='Только указанные частоты купонов через запятую (напр. 2,4; P-C). '
-                 'Взаимоисключимо с --freq-min/--freq-max.'
-        )
-        parser.add_argument(
-            '--exclude-sovereign', action='store_true',
-            help='Исключить суверенных эмитентов: ОФЗ и евро-РФ (P-G).'
         )
         parser.add_argument(
             '--include-held', action='store_true',
@@ -291,48 +372,11 @@ class RebalanceReportUseCase(UseCase):
                  'с бейджем held (доля N%%); по умолчанию они исключены (анти-P2 из 002).'
         )
         parser.add_argument(
-            '--include-ku', action='store_true',
-            help='Включить бумаги для квалифицированных инвесторов '
-                 '(по умолчанию исключены).'
-        )
-        parser.add_argument(
-            '--min-maturity', type=_parse_iso_date, default=None,
-            help='Минимальная дата погашения кандидатов, YYYY-MM-DD.'
-        )
-        parser.add_argument(
-            '--max-maturity', type=_parse_iso_date, default=None,
-            help='Максимальная дата погашения кандидатов, YYYY-MM-DD.'
-        )
-        parser.add_argument(
-            '--max-risk', type=int, default=1,
-            help='Максимальный уровень риска Т-Банка кандидатов (1-5). Default: 1.'
-        )
-        parser.add_argument(
-            '--min-credit-rating', type=str, default=None,
-            help='Минимальный кредитный рейтинг кандидата (023), напр. AA-: '
-                 'строгий порог по latest rating_history — без рейтинга или '
-                 'ниже порога кандидат исключается. Код нормализуется '
-                 'существующим rating_code_to_score (AAA(RU)/ruAAA = AAA); '
-                 'risk_level рейтингом не подменяется.'
-        )
-        parser.add_argument(
             '--max-position-value', type=float, default=None,
             help='Формальное ограничение (024): максимальная стоимость одного '
                  'выпуска в целевом портфеле, ₽ (напр. 150000). Проверяется '
                  'каждая позиция positions_after, включая уже держимые без '
                  'сделок; нарушение — constraint_checks POSITION_VALUE_LIMIT.'
-        )
-        parser.add_argument(
-            '--max-listlevel', type=int, choices=[1, 2, 3], default=2,
-            help='Максимальный уровень листинга MOEX кандидатов. Default: 2.'
-        )
-        parser.add_argument(
-            '--max-ytm', type=float, default=35.0,
-            help='Потолок YTM кандидатов, %% годовых (аномалия = ВДО/дистресс). Default: 35.0.'
-        )
-        parser.add_argument(
-            '--screener-limit', type=int, default=10,
-            help='Размер топов fixed[]/floater[] в скринере. Default: 10.'
         )
         parser.add_argument(
             '--redemptions-months', type=int, default=6,

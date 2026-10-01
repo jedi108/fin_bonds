@@ -1,3 +1,4 @@
+import argparse
 import json
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -8,7 +9,11 @@ import pytest
 from src.data_models import Bond
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.use_cases import sync_chatgpt_portfolio
-from src.use_cases.rebalance_report import RebalanceReportUseCase
+from src.use_cases.rebalance_report import (
+    SCREENER_FILTER_DESTS,
+    RebalanceReportUseCase,
+    add_screener_filter_arguments,
+)
 from src.use_cases.sync_chatgpt_portfolio import (
     CANDIDATE_HEADERS,
     CONSUMER_RULE,
@@ -1488,3 +1493,134 @@ def test_default_builder_without_rating_threshold_builds_canonical_report():
         "RU000CANDA",
         "RU000CANDL",
     }
+
+
+# ---------------------------------------------------------------------------
+# 029-T06: общий helper screener CLI args — sync-chatgpt-portfolio
+# ---------------------------------------------------------------------------
+
+def _sync_parse(argv):
+    parser = argparse.ArgumentParser(add_help=False)
+    SyncChatgptPortfolioUseCase.setup_parser(parser)
+    return parser.parse_args(argv)
+
+
+def _sync_parser_options(parser):
+    return {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+    }
+
+
+class TestScreenerCliArgsForwarding:
+    def test_no_args_keeps_default_export(self):
+        """Пустой CLI: в sync Namespace нет materialized defaults, кандидатные
+        args = canonical defaults rebalance-report + include_held=True —
+        текущий default export не меняется."""
+        overrides = _sync_parse([])
+        for dest in SCREENER_FILTER_DESTS:
+            assert not hasattr(overrides, dest)
+        assert vars(candidate_report_args(overrides)) == vars(candidate_report_args())
+
+    def test_all_12_candidate_filter_args_accepted(self):
+        """sync parser принимает все 12 candidate-filter args из спеки 029-T06."""
+        parser = argparse.ArgumentParser(add_help=False)
+        SyncChatgptPortfolioUseCase.setup_parser(parser)
+        opts = _sync_parser_options(parser)
+        for flag in (
+            "--freq-min", "--freq-max", "--freq-in", "--min-credit-rating",
+            "--exclude-sovereign", "--include-ku", "--max-risk",
+            "--max-listlevel", "--max-ytm", "--min-maturity",
+            "--max-maturity", "--screener-limit",
+        ):
+            assert flag in opts
+        # и ничего лишнего сверх 12 фильтров не появляется (add_help=False)
+        expected = {f"--{dest.replace('_', '-')}" for dest in SCREENER_FILTER_DESTS}
+        assert opts == expected
+
+    def test_freq_rating_sovereign_ku_forwarded(self):
+        overrides = _sync_parse([
+            "--freq-min", "4", "--freq-max", "12",
+            "--min-credit-rating", "AA-", "--exclude-sovereign", "--include-ku",
+        ])
+        args = candidate_report_args(overrides)
+        assert args.freq_min == 4
+        assert args.freq_max == 12
+        assert args.min_credit_rating == "AA-"
+        assert args.exclude_sovereign is True
+        assert args.include_ku is True
+        # непереданные фильтры остаются canonical defaults (не нулями/копией)
+        assert args.max_risk == 1
+        assert args.max_listlevel == 2
+        assert args.max_ytm == 35.0
+        assert args.screener_limit == 10
+
+    def test_risk_listlevel_ytm_maturity_limit_forwarded(self):
+        overrides = _sync_parse([
+            "--max-risk", "3", "--max-listlevel", "3", "--max-ytm", "20",
+            "--min-maturity", "2027-01-01", "--max-maturity", "2030-06-30",
+            "--screener-limit", "5",
+        ])
+        args = candidate_report_args(overrides)
+        assert args.max_risk == 3
+        assert args.max_listlevel == 3
+        assert args.max_ytm == 20.0
+        assert args.min_maturity == "2027-01-01"
+        assert args.max_maturity == "2030-06-30"
+        assert args.screener_limit == 5
+
+    def test_freq_in_forwarded(self):
+        args = candidate_report_args(_sync_parse(["--freq-in", "2,4"]))
+        assert args.freq_in == [2, 4]
+        assert args.freq_min is None
+        assert args.freq_max is None
+
+    def test_include_held_stays_true_product_default(self):
+        """include_held=True — product-default exporter при любых overrides;
+        бессмысленного --include-held store_true и --exclude-held нет."""
+        args = candidate_report_args(_sync_parse(["--include-ku", "--max-risk", "2"]))
+        assert args.include_held is True
+        parser = argparse.ArgumentParser(add_help=False)
+        SyncChatgptPortfolioUseCase.setup_parser(parser)
+        opts = _sync_parser_options(parser)
+        assert "--include-held" not in opts
+        assert "--exclude-held" not in opts
+
+    def test_rebalance_specific_args_not_in_sync_parser(self):
+        """scenario/csv/max-position-value/redemptions/format/include-held
+        остаются у rebalance-report — exporter их не принимает."""
+        parser = argparse.ArgumentParser(add_help=False)
+        SyncChatgptPortfolioUseCase.setup_parser(parser)
+        opts = _sync_parser_options(parser)
+        for flag in (
+            "--format", "--include-held", "--max-position-value",
+            "--redemptions-months", "--csv-out", "--scenario",
+        ):
+            assert flag not in opts
+
+
+class TestScreenerCliArgsDriftGuard:
+    def test_defaults_come_from_shared_definitions(self):
+        """Drift guard: defaults=True даёт те же canonical значения, что
+        default_args() (общие parser definitions — единственный источник);
+        sync Namespace (defaults=False) ничего не materialize — второй
+        источник defaults появиться не может."""
+        parser = argparse.ArgumentParser(add_help=False)
+        add_screener_filter_arguments(parser, defaults=True)
+        helper_defaults = vars(parser.parse_args([]))
+        assert set(helper_defaults) == set(SCREENER_FILTER_DESTS)
+        canonical = vars(RebalanceReportUseCase.default_args())
+        for dest, value in helper_defaults.items():
+            assert canonical[dest] == value, dest
+
+    def test_overrides_reach_canonical_validation(self):
+        """Forwarded фильтры попадают в canonical args: невалидная комбинация
+        (freq-max + freq-in) отклоняется той же validation, что и у CLI
+        rebalance-report (exporter второй валидации не заводит)."""
+        args = candidate_report_args(
+            _sync_parse(["--freq-max", "4", "--freq-in", "2,4"])
+        )
+        use_case = RebalanceReportUseCase.__new__(RebalanceReportUseCase)
+        with pytest.raises(ValueError, match="взаимоисключающие"):
+            use_case._validate_args(args)

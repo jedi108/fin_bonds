@@ -4,6 +4,28 @@
 
 ## 2026-10-01
 
+- feat(cli): shared screener filter arguments helper (029-T06) — 12
+  candidate/screener фильтров rebalance-report (--freq-min/--freq-max/
+  --freq-in/--min-credit-rating/--exclude-sovereign/--include-ku/--max-risk/
+  --max-listlevel/--max-ytm/--min-maturity/--max-maturity/--screener-limit)
+  вынесены в переиспользуемый public helper
+  `add_screener_filter_arguments(parser, *, defaults=True)`: единственный
+  источник parsing semantics и canonical defaults (таблица определений +
+  выводимый из неё `SCREENER_FILTER_DESTS`; ручных копий default
+  max-risk/max-listlevel/max-ytm/screener-limit больше нет). CLI
+  rebalance-report не изменился (setup_parser использует helper с
+  defaults=True, default_args() продолжает materialize defaults тем же
+  parser contract). sync-chatgpt-portfolio теперь принимает все 12
+  candidate-filter args через тот же helper с defaults=False
+  (argparse.SUPPRESS): в sync Namespace materialize второго набора defaults
+  нет, explicit override переносится в канонические args кандидатного
+  отчёта по факту присутствия атрибута (`candidate_report_args(overrides)`,
+  hasattr), forwarded фильтры проходят canonical validation build_report.
+  include_held=true остаётся product-default экспорта; флагов
+  --include-held/--exclude-held у exporter нет; scenario/csv/
+  max-position-value/redemptions-специфика остаётся у rebalance-report.
+  Тесты: tests/test_sync_chatgpt_portfolio.py (TestScreenerCliArgsForwarding,
+  TestScreenerCliArgsDriftGuard).
 - feat(storage): atomic cash snapshot publish (029-T03) — upsert актуальных
   cash-строк и prune счетов вне configured/selected set выполняются в ОДНОЙ
   DB transaction: новый `PortfolioStorage.replace_cash_balances_snapshot()`
