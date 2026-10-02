@@ -487,6 +487,39 @@ class TestCliWiring:
         assert args.b_exclude_sovereign is True
         assert args.b_max_position_value == 350000.0
 
+    def test_setup_parser_candidate_policy_defaults(self):
+        """031.1: зеркала candidate-policy флагов default=None — canonical
+        defaults решает _filters_from_args (копий значений в CLI нет)."""
+        args = _parse_cli([])
+        for prefix in ('a', 'b'):
+            assert getattr(args, f'{prefix}_max_risk') is None
+            assert getattr(args, f'{prefix}_max_listlevel') is None
+            assert getattr(args, f'{prefix}_max_ytm') is None
+            assert getattr(args, f'{prefix}_include_ku') is None
+            assert getattr(args, f'{prefix}_min_maturity') is None
+            assert getattr(args, f'{prefix}_max_maturity') is None
+
+    def test_candidate_policy_mirror_flags_parse(self):
+        args = _parse_cli([
+            '--a-max-risk', '3', '--a-include-ku',
+            '--a-min-maturity', '2026-01-01',
+            '--b-max-ytm', '50', '--b-max-listlevel', '3',
+            '--b-max-maturity', '2030-06-01',
+        ])
+        assert args.a_max_risk == 3
+        assert args.a_include_ku is True
+        assert args.a_min_maturity == '2026-01-01'
+        assert args.b_max_ytm == 50.0
+        assert args.b_max_listlevel == 3
+        assert args.b_max_maturity == '2030-06-01'
+
+    def test_candidate_policy_flag_validation_value_error(self, tmp_path):
+        """Sanity-порог candidate-фильтра — конвенция legacy отчёта
+        (те же правила, что rebalance-plan)."""
+        use_case = _make_compare_use_case(_make_fake(), tmp_path)
+        with pytest.raises(ValueError, match='--max-ytm'):
+            use_case.build_compare(_parse_cli(['--a-max-ytm', '0']))
+
     def test_command_registered_in_factory_map(self):
         factory = UseCaseFactory.__new__(UseCaseFactory)
         use_case_map = UseCaseFactory.get_use_case_map(factory)
@@ -519,6 +552,46 @@ class TestCliWiring:
             'fitted_target_value_rub'
         ] == '12000'
         assert payload['context_fingerprint'] == _context(fake).context_fingerprint
+
+    def test_candidate_policy_ab_variants(self, tmp_path):
+        """Варианты различаются candidate-policy — валидный A/B (031.1):
+        a (--a-include-ku) покупает KU-бумагу, b (canonical default) —
+        BUY_NOT_ELIGIBLE ('ku'); echo фильтров вариантов различен, raw
+        universe общий (strict не удалил строки, нужные a)."""
+        ku_isin = 'RU000A0KUBND'
+        from test_rebalance_plan import _pool_row
+
+        ku_row = _pool_row(ku_isin, market_price='1000', issuer='КУ Эмитент')
+        ku_row['ku'] = True  # policy-признак КУ (structural gate его не читает)
+        fake = _make_fake(universe_rows=[
+            *[
+                _pool_row(
+                    f'RU000A0BASE{n}', market_price='1000',
+                    issuer=f'Базовый эмитент {n}',
+                    held_share_pct=Decimal('14.29'),
+                )
+                for n in range(BASE_COUNT)
+            ],
+            ku_row,
+        ])
+        use_case = _make_compare_use_case(fake, tmp_path)
+        payload = use_case.build_compare(_parse_cli([
+            '--a-include-ku',
+            '--a-target-value', f'{ku_isin}=5000',
+            '--b-target-value', f'{ku_isin}=5000',
+        ]))
+        assert payload['comparable'] is True
+        assert payload['diagnostics'] == []
+        a_block, b_block = payload['variants']['a'], payload['variants']['b']
+        # Per-variant candidate-policy echo (canonical default у b).
+        assert a_block['filters']['include_ku'] is True
+        assert b_block['filters']['include_ku'] is False
+        assert a_block['targets'][0]['status'] == 'FITTED'
+        assert b_block['targets'][0]['status'] == 'BUY_NOT_ELIGIBLE'
+        assert b_block['targets'][0]['buy_reasons'][0]['code'] == 'ku'
+        # KU-покупка только у a: 8 позиций против 7.
+        assert payload['metrics']['a']['positions_count'] == 8
+        assert payload['metrics']['b']['positions_count'] == 7
 
     def test_execute_prints_valid_json(self, tmp_path, capsys):
         use_case = _make_compare_use_case(_make_fake(), tmp_path)

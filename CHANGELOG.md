@@ -2,6 +2,40 @@
 
 Все заметные изменения проекта. Стиль — по коммитам: `feat(scope): ... (task NNN)`.
 
+## 2026-10-02
+
+- feat(planning): candidate-policy флаги в rebalance-plan / rebalance-compare
+  (031.1, promote-gap 030.15) — plan-путь больше не заперт на canonical
+  дефолтах candidate-фильтров (при которых новые не-ОФЗ BUY дают пустой
+  shortlist): `rebalance-plan` получил группу `--max-risk/--max-listlevel/
+  --max-ytm/--include-ku/--min-maturity/--max-maturity` (exploration-policy
+  BUY eligibility 030.6, НЕ формальные ограничения целевого портфеля —
+  разные оси, help-тексты разведены). Parsing semantics — из единственного
+  источника `_SCREENER_FILTER_SPECS` отчёта (029-T06, реэкспорт specs в
+  `CANDIDATE_POLICY_FLAG_SPECS`); canonical DEFAULTS значений в CLI не
+  копируются — default=None, resolved-значения собирает новый boundary-метод
+  `RebalancePlanUseCase._filters_from_args` поверх `default_candidate_filters()`
+  (030.5): явный флаг переопределяет, без флага — canonical default.
+  Фильтры образуют `CandidateFilters` для fitter'а (сигнатура fit не менялась,
+  030.6/030.7); sell_all/reduce фильтры не затрагивают (eligibility — только
+  BUY/increase); sanity-порог `--max-ytm > 0` — конвенция legacy отчёта
+  (ValueError), eligibility-валидация — только движок. Machine-readable
+  контракт сохранён: ineligible BUY — `BUY_NOT_ELIGIBLE` + structured
+  reason codes, без silent auto-fit; echo `filters` в full view отражает
+  resolved policy. `rebalance-compare`: зеркала `--a-*/--b-*` для каждого
+  нового флага (варианты могут различаться candidate-policy — валидный A/B);
+  per-variant фильтры идут через существовавший программный канал
+  `CompareVariant.filters`, в блоке каждого варианта — echo `filters`
+  (additive). Legacy `rebalance-report`/`--scenario` не менялись (additive-
+  правило 030 №2). Тесты: tests/test_rebalance_plan.py (+8: defaults-identity
+  с default_candidate_filters, overrides по полям, аддитивность Namespace без
+  новых атрибутов, флаги доезжают до fitter через targets/trades/filters echo
+  — risk и maturity), tests/test_rebalance_compare.py (+4: defaults зеркал,
+  парсинг зеркал, ValueError порога, A/B по include-ku с различным echo и
+  метриками). Полный набор: 749 collected / 505 passed / 244 skipped /
+  0 failed (baseline 030.14: 737/493/244/0, +12 тестов); legacy-набор
+  (rebalance-report/scenario/equivalence/engine) зелёный без правок.
+
 ## 2026-10-01
 
 - test(planning): regression consolidation проекта 030 (030.14) — полный

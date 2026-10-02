@@ -16,9 +16,11 @@ Use case — тонкая композиция canonical домена (прав�
 
 Варианты задаются prefixed-флагами (зеркала флагов rebalance-plan):
 `--a-sell-all/--a-target-value/--a-freq-min/...` и `--b-...`; различаться
-могут и intents, и формальные ограничения (strict vs relaxed). Raw universe
-до variant screening гарантирован самим PlanningContext (030.3): оба
-варианта применяют свои фильтры к одному набору исходных строк.
+могут intents, формальные ограничения (strict vs relaxed) и candidate-policy
+покупки (031.1: `--a-max-risk/--a-include-ku/...` — exploration-policy
+BUY eligibility, 030.6) — это валидный A/B. Raw universe до variant
+screening гарантирован самим PlanningContext (030.3): оба варианта
+применяют свои фильтры к одному набору исходных строк.
 
 Сравнение — только по canonical outputs (правило 030 №1): метрики каждого
 варианта извлекаются из summary/trades/positions_after/constraint_checks
@@ -42,10 +44,11 @@ canonical блоки 030.8 — summary/budget_check/targets/trades/positions_aft
 violations). Legacy `rebalance-report`, `rebalance-plan` и
 `rebalance-analysis-snapshot` не меняются (additive-правило 030 №2).
 
-Не делается (границы 030.9): persistent snapshot DB для compare, adapter/
-sandbox (030.10/030.11), per-variant CLI candidate-фильтры (policy-фильтры
-покупки — canonical defaults отчёта, как в 030.8; per-variant filters
-доступны программному API CompareVariant).
+Не делается (границы 030.9/031.1): persistent snapshot DB для compare,
+adapter/sandbox (030.10/030.11), context_id в compare (031.3). Per-variant
+candidate-policy — зеркала plan-флагов (031.1), тем же программным API
+остаётся CompareVariant.filters; без явных флагов — canonical defaults
+отчёта (default_candidate_filters), как в 030.8.
 """
 import argparse
 import json
@@ -64,7 +67,10 @@ from src.services.scenario_compare import (
     compare_plan_results,
 )
 from src.use_cases.base import UseCase
-from src.use_cases.rebalance_plan import RebalancePlanUseCase
+from src.use_cases.rebalance_plan import (
+    CANDIDATE_POLICY_FLAG_SPECS,
+    RebalancePlanUseCase,
+)
 
 if TYPE_CHECKING:
     from src.use_cases.factory import UseCaseFactory
@@ -116,6 +122,14 @@ _VARIANT_FLAG_SPECS = (
              'одного выпуска в целевом портфеле, ₽ (fitter pre-size\'ит '
              'покупки под лимит).',
     )),
+    # Candidate-policy покупки (031.1) — зеркала specs plan (parsing
+    # semantics — _SCREENER_FILTER_SPECS отчёта); defaults значений здесь
+    # тоже НЕ materialize (default=None) — canonical defaults + явные
+    # overrides решает `_filters_from_args` плана (030.5/031.1).
+    *(
+        (dest, {**kwargs, 'help': 'Вариант: ' + kwargs['help']})
+        for dest, kwargs in CANDIDATE_POLICY_FLAG_SPECS
+    ),
 )
 
 
@@ -227,6 +241,10 @@ class RebalanceCompareUseCase(UseCase):
                 name=prefix,
                 intents=list(normalization.intents),
                 constraints=self._plan._constraints_from_args(sub_args),
+                # Candidate-policy варианта (031.1): canonical defaults +
+                # явные --{prefix}-* overrides; зеркала plan — тот же
+                # boundary-метод, второго разбора фильтров нет.
+                filters=self._plan._filters_from_args(sub_args),
             ))
         if envelope['diagnostics']:
             # Сравнение не строится на противоречивом входе (030.5).
@@ -241,16 +259,24 @@ class RebalanceCompareUseCase(UseCase):
             return envelope
 
         # 3. Каждый вариант — fitter на том же context; проекции — canonical
-        #    блоки 030.8 (вторая проекция плана не пишется).
+        #    блоки 030.8 (вторая проекция плана не пишется). Candidate-
+        #    policy per-variant (031.1): программный CompareVariant без
+        #    filters получает canonical defaults; echo — в блоке варианта.
         filters = default_candidate_filters()
         variant_blocks: Dict[str, Any] = {}
         for variant in variants:
+            variant_filters = (
+                variant.filters
+                if variant.filters is not None else filters
+            )
             projection = self._plan._fit_and_project(
-                context, list(variant.intents), variant.constraints, filters
+                context, list(variant.intents), variant.constraints,
+                variant_filters,
             )
             variant_blocks[variant.name] = {
                 'name': variant.name,
                 'context_fingerprint': context.context_fingerprint,
+                'filters': self._plan._filters_payload(variant_filters),
                 **projection,
             }
 

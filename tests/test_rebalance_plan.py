@@ -33,6 +33,7 @@ import pytest
 
 from src.services.context_store import EphemeralContextStore
 from src.services.planning_context import PlanningContextBuilder
+from src.services.planning_intents import default_candidate_filters
 from src.services.rebalance_engine import (
     SCENARIO_ERROR_UNKNOWN_ISIN,
     SCENARIO_POSITION_KEYS,
@@ -336,6 +337,143 @@ class TestCliWiring:
         use_case.build_plan(
             _args(min_credit_rating='AA-', target_value=list(_TARGET_NEW1))
         )
+
+    def test_setup_parser_candidate_policy_defaults(self):
+        """031.1: candidate-policy флаги default=None — canonical defaults
+        НЕ materialize в Namespace (копий значений в CLI нет); значения по
+        умолчанию решает _filters_from_args (default_candidate_filters)."""
+        parser = argparse.ArgumentParser(add_help=False)
+        RebalancePlanUseCase.setup_parser(parser)
+        args = parser.parse_args([])
+        assert args.max_risk is None
+        assert args.max_listlevel is None
+        assert args.max_ytm is None
+        assert args.include_ku is None
+        assert args.min_maturity is None
+        assert args.max_maturity is None
+
+    def test_candidate_policy_flags_parse(self):
+        """Parsing semantics — канон отчёта: ISO-даты валидируются,
+        listlevel ограничен choices (1-3)."""
+        parser = argparse.ArgumentParser(add_help=False)
+        RebalancePlanUseCase.setup_parser(parser)
+        args = parser.parse_args([
+            '--max-risk', '3', '--max-listlevel', '2', '--max-ytm', '40.5',
+            '--include-ku',
+            '--min-maturity', '2026-01-01', '--max-maturity', '2030-12-31',
+        ])
+        assert args.max_risk == 3
+        assert args.max_listlevel == 2
+        assert args.max_ytm == 40.5
+        assert args.include_ku is True
+        assert args.min_maturity == '2026-01-01'
+        assert args.max_maturity == '2030-12-31'
+        # choices=[1,2,3] унаследованы из _SCREENER_FILTER_SPECS.
+        with pytest.raises(SystemExit):
+            parser.parse_args(['--max-listlevel', '5'])
+        with pytest.raises(SystemExit):
+            parser.parse_args(['--min-maturity', '01.02.2026'])
+
+
+# ---------------------------------------------------------------------------
+# Candidate-policy флаги → CandidateFilters → fitter (031.1)
+# ---------------------------------------------------------------------------
+
+
+class TestCandidatePolicy:
+    """031.1: plan-путь выражает exploration-policy BUY eligibility; без
+    флагов — canonical defaults отчёта, явный флаг переопределяет."""
+
+    def test_defaults_identity_with_canonical(self, tmp_path):
+        """Без флагов _filters_from_args == canonical
+        default_candidate_filters() (identity, не копия значений)."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        assert use_case._filters_from_args(_args()) == (
+            default_candidate_filters()
+        )
+
+    def test_flags_override_canonical_defaults(self, tmp_path):
+        """Явный флаг переопределяет только своё поле; остальные —
+        canonical defaults."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        defaults = default_candidate_filters()
+        filters = use_case._filters_from_args(_args(
+            max_risk=4, max_ytm=20.0, include_ku=True,
+            min_maturity='2026-06-01',
+        ))
+        assert filters.max_risk == 4
+        assert filters.max_ytm_pct == 20.0
+        assert filters.include_ku is True
+        assert filters.min_maturity == '2026-06-01'
+        # Не заданные флагами поля — canonical defaults.
+        assert filters.max_list_level == defaults.max_list_level
+        assert filters.max_maturity == defaults.max_maturity
+
+    def test_additive_namespace_without_new_attrs(self, tmp_path):
+        """Программный Namespace без новых атрибутов (до-031.1 контракт)
+        получает canonical defaults — legacy-потребители не ломаются."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        bare = argparse.Namespace(
+            freq_min=None, freq_max=None, min_credit_rating=None,
+            exclude_sovereign=False, max_position_value=None,
+            sell_all=None, target_value=None, context_id=None,
+            view='full', format='json',
+        )
+        assert use_case._filters_from_args(bare) == default_candidate_filters()
+
+    def test_wider_risk_policy_reaches_fitter(self, tmp_path):
+        """Флаг доезжает до fitter (наблюдение через targets/trades):
+        risk_level=3 за canonical default max_risk=1 — BUY_NOT_ELIGIBLE
+        ('risk'); --max-risk 3 — FITTED с BUY-ногой, filters echo = 3."""
+        risky = 'RU000A0RISKY'
+        fake = _make_fake(universe_rows=_base_universe() + [
+            _pool_row(risky, market_price='1000', issuer='Рискованный',
+                      risk_level=3),
+        ])
+        use_case = _make_use_case(fake, tmp_path)
+
+        strict = use_case.build_plan(_args(target_value=[f'{risky}=5000']))
+        target = strict['targets'][0]
+        assert target['status'] == 'BUY_NOT_ELIGIBLE'
+        assert target['buy_reasons'] == [
+            {'code': 'risk', 'actual': 3, 'limit': 1}
+        ]
+        assert strict['trades'] == []
+        assert strict['filters']['max_risk'] == 1  # canonical default
+
+        wide = use_case.build_plan(
+            _args(target_value=[f'{risky}=5000'], max_risk=3)
+        )
+        target = wide['targets'][0]
+        assert target['status'] == 'FITTED'
+        assert target['fitted_target_value_rub'] == '5000'
+        assert any(
+            t['isin'] == risky and t['action'] == 'buy'
+            for t in wide['trades']
+        )
+        assert wide['filters']['max_risk'] == 3
+
+    def test_maturity_flag_reaches_fitter(self, tmp_path):
+        """--min-maturity как policy-окно BUY eligibility: погашение NEW1
+        (2027-06-15) раньше порога — отказ 'min_maturity', BUY-ноги нет."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        payload = use_case.build_plan(_args(
+            target_value=list(_TARGET_NEW1), min_maturity='2028-01-01',
+        ))
+        target = payload['targets'][0]
+        assert target['status'] == 'BUY_NOT_ELIGIBLE'
+        assert target['buy_reasons'] == [
+            {'code': 'min_maturity', 'actual': '2027-06-15',
+             'limit': '2028-01-01'}
+        ]
+        assert payload['filters']['min_maturity'] == '2028-01-01'
+
+    def test_max_ytm_validation_value_error(self, tmp_path):
+        """Sanity-порог max-ytm — конвенция legacy отчёта (ValueError)."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        with pytest.raises(ValueError, match='--max-ytm'):
+            use_case.build_plan(_args(target_value=list(_TARGET_NEW1),
+                                      max_ytm=0))
 
 
 # ---------------------------------------------------------------------------

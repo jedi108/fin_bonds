@@ -19,6 +19,15 @@ Use case присваивает priority intents НА границе CLI: пор
 идёт перед target-value intents (fitter применяет sells до увеличений
 независимо от порядка).
 
+Candidate-policy покупки (031.1) — отдельная ось CLI, НЕ формальные
+ограничения целевого портфеля: `--max-risk/--max-listlevel/--max-ytm/
+--include-ku/--min-maturity/--max-maturity` задают exploration-policy
+BUY eligibility (030.6) и собираются в `CandidateFilters` для fitter'а;
+без флага — canonical default `default_candidate_filters()` (копий
+значений в CLI нет, parsing semantics — из `_SCREENER_FILTER_SPECS`
+отчёта). sell_all/reduce фильтры не затрагивают: eligibility — только
+для BUY/increase (030.6).
+
 План строится на PlanningContext (правило 030 №4): без `--context-id` —
 свежая сборка PlanningContextBuilder (frozen as_of, REPEATABLE READ,
 canonical data_gate, effective_prices); с `--context-id` — core-owned
@@ -93,11 +102,17 @@ from src.services.planning_fitter import (
 from src.services.planning_intents import (
     INTENT_TYPE_SELL_ALL,
     INTENT_TYPE_TARGET_VALUE,
+    CandidateFilters,
     PortfolioConstraints,
     default_candidate_filters,
     normalize_intents,
 )
 from src.use_cases.base import UseCase
+# Единственный источник parsing semantics candidate-фильтров (029-T06):
+# таблица определений отчёта — type/choices/date-валидация переиспользуются,
+# canonical DEFAULTS значений отсюда НЕ копируются (default=None, см.
+# CANDIDATE_POLICY_FLAG_SPECS ниже).
+from src.use_cases.rebalance_report import _SCREENER_FILTER_SPECS
 from src.utils import rating_code_to_score
 
 if TYPE_CHECKING:
@@ -109,6 +124,57 @@ logger = logging.getLogger(__name__)
 # расчётного контекста — context_schema_version/calculation_policy_version
 # (030.3) и derived-версия store'а (030.4).
 PLAN_SCHEMA_VERSION = 1
+
+# ---------------------------------------------------------------------------
+# Candidate-policy флаги plan (031.1): eligibility новой/увеличиваемой
+# позиции (030.6) — ДРУГАЯ ось, чем формальные ограничения целевого
+# портфеля (--freq-min/--freq-max/--min-credit-rating/--exclude-sovereign/
+# --max-position-value). Parsing semantics (type/choices/date-валидация) —
+# из единственного источника `_SCREENER_FILTER_SPECS` отчёта (029-T06);
+# canonical DEFAULTS значений здесь НЕ materialize (default=None) — их
+# единственный источник `default_candidate_filters()` (030.5), явный флаг
+# переопределяет. В группу не входят: --freq-in (031.2) и --screener-limit
+# (presentation control отчёта, 030.6/030.10 — universe контекста не
+# режется). rebalance-compare зеркалит те же specs с префиксами --a-/--b-.
+# ---------------------------------------------------------------------------
+_CANDIDATE_POLICY_FLAGS = (
+    '--max-risk', '--max-listlevel', '--max-ytm',
+    '--include-ku', '--min-maturity', '--max-maturity',
+)
+_CANDIDATE_POLICY_HELP = {
+    '--max-risk':
+        'Candidate-policy покупки (НЕ ограничение целевого портфеля): '
+        'максимальный уровень риска Т-Банка кандидата (1-5). Без флага — '
+        'canonical default отчёта (default_candidate_filters).',
+    '--max-listlevel':
+        'Candidate-policy покупки: максимальный уровень листинга MOEX '
+        'кандидата (1-3). Без флага — canonical default отчёта.',
+    '--max-ytm':
+        'Candidate-policy покупки: потолок YTM кандидата, %% годовых '
+        '(аномалия = ВДО/дистресс). Без флага — canonical default отчёта.',
+    '--include-ku':
+        'Candidate-policy покупки: включить бумаги для квалифицированных '
+        'инвесторов (canonical default — исключены).',
+    '--min-maturity':
+        'Candidate-policy покупки: минимальная дата погашения кандидата, '
+        'YYYY-MM-DD. Без флага — canonical default отчёта.',
+    '--max-maturity':
+        'Candidate-policy покупки: максимальная дата погашения кандидата, '
+        'YYYY-MM-DD. Без флага — canonical default отчёта.',
+}
+# (dest, argparse kwargs) с default=None: значения по умолчанию решает
+# `_filters_from_args` поверх `default_candidate_filters()`.
+CANDIDATE_POLICY_FLAG_SPECS = tuple(
+    (
+        flag.lstrip('-').replace('-', '_'),
+        {
+            **dict(_SCREENER_FILTER_SPECS)[flag],
+            'default': None,
+            'help': _CANDIDATE_POLICY_HELP[flag],
+        },
+    )
+    for flag in _CANDIDATE_POLICY_FLAGS
+)
 
 # Compact projections (файл задачи): каждое view — подмножество одного full
 # payload'а. full — по умолчанию (полный план для агента), остальные —
@@ -151,12 +217,13 @@ class RebalancePlanUseCase(UseCase):
     """High-level план ребалансировки: intents → fitted целевой портфель.
 
     Флаги задают ПОКУПКИ/ПРОДАЖИ намерениями (`--sell-all ISIN`,
-    `--target-value ISIN=RUB`) и формальные ограничения целевого портфеля
+    `--target-value ISIN=RUB`), формальные ограничения целевого портфеля
     (--freq-min/--freq-max/--min-credit-rating/--exclude-sovereign/
-    --max-position-value); количества код не спрашивает у агента — sizing
-    делает fitter по единой planning-цене. Candidate-фильтры покупки —
-    canonical defaults отчёта (default_candidate_filters, 030.5/030.6):
-    собственных фильтров у CLI нет.
+    --max-position-value) и candidate-policy покупки (031.1: --max-risk/
+    --max-listlevel/--max-ytm/--include-ku/--min-maturity/--max-maturity —
+    eligibility новой/увеличиваемой позиции, 030.6; без флага — canonical
+    default default_candidate_filters()); количества код не спрашивает у
+    агента — sizing делает fitter по единой planning-цене.
     """
 
     def __init__(
@@ -204,6 +271,13 @@ class RebalancePlanUseCase(UseCase):
                  'pre-size\'ит покупки под лимит; нарушение любой позицией '
                  '— violation POSITION_VALUE_LIMIT.'
         )
+        # Candidate-policy покупки (031.1): parsing semantics — из
+        # _SCREENER_FILTER_SPECS (единственный источник), defaults — НЕ
+        # отсюда (default=None → default_candidate_filters).
+        for dest, kwargs in CANDIDATE_POLICY_FLAG_SPECS:
+            parser.add_argument(
+                f"--{dest.replace('_', '-')}", dest=dest, **kwargs
+            )
         parser.add_argument(
             '--sell-all', action='append', default=None, metavar='ISIN',
             help='Продать позицию целиком (итог = 0), напр. --sell-all RU000A... '
@@ -293,7 +367,7 @@ class RebalancePlanUseCase(UseCase):
 
         if context is not None:
             constraints = self._constraints_from_args(args)
-            filters = default_candidate_filters()
+            filters = self._filters_from_args(args)
             plan_blocks = self._fit_and_project(
                 context, list(normalization.intents), constraints, filters
             )
@@ -330,6 +404,11 @@ class RebalancePlanUseCase(UseCase):
             raise ValueError("--freq-min не должен превышать --freq-max")
         if args.max_position_value is not None and args.max_position_value <= 0:
             raise ValueError("--max-position-value должен быть > 0")
+        # Candidate-policy (031.1): sanity-проверка порога — конвенция legacy
+        # отчёта; eligibility-валидация — только движок/fitter (030.6).
+        max_ytm = getattr(args, 'max_ytm', None)
+        if max_ytm is not None and max_ytm <= 0:
+            raise ValueError("--max-ytm должен быть > 0")
         if args.min_credit_rating is not None:
             threshold = rating_code_to_score(
                 args.min_credit_rating, self.rating_scale
@@ -574,7 +653,8 @@ class RebalancePlanUseCase(UseCase):
 
     @staticmethod
     def _filters_payload(filters: Any) -> Dict[str, Any]:
-        """Echo candidate-фильтров BUY eligibility (030.6; canonical defaults)."""
+        """Echo candidate-фильтров BUY eligibility (030.6/031.1): resolved
+        значения — canonical defaults + явные overrides CLI-флагов."""
         return {
             'max_risk': filters.max_risk,
             'max_list_level': filters.max_list_level,
@@ -653,4 +733,27 @@ class RebalancePlanUseCase(UseCase):
                 Decimal(str(args.max_position_value))
                 if args.max_position_value is not None else None
             ),
+        )
+
+    def _filters_from_args(self, args: argparse.Namespace) -> CandidateFilters:
+        """Candidate-policy флаги → CandidateFilters для fitter'а (031.1).
+
+        Явный флаг переопределяет; без флага — canonical default
+        `default_candidate_filters()` (единственный источник defaults,
+        копий значений нет). getattr-доступ — аддитивность: программные
+        Namespace без новых атрибутов получают canonical defaults.
+        """
+        defaults = default_candidate_filters()
+
+        def resolve(dest: str, canonical):
+            value = getattr(args, dest, None)
+            return canonical if value is None else value
+
+        return CandidateFilters(
+            max_risk=resolve('max_risk', defaults.max_risk),
+            max_list_level=resolve('max_listlevel', defaults.max_list_level),
+            max_ytm_pct=resolve('max_ytm', defaults.max_ytm_pct),
+            include_ku=resolve('include_ku', defaults.include_ku),
+            min_maturity=resolve('min_maturity', defaults.min_maturity),
+            max_maturity=resolve('max_maturity', defaults.max_maturity),
         )
