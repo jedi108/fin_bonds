@@ -4,6 +4,28 @@
 
 ## 2026-10-02
 
+- feat(planning): верхнеуровневый `context_id` в JSON-envelope
+  `rebalance-compare` (031.3, находка 030.15 отклонение 3): plan и snapshot
+  публикуют идентификатор среза, compare — нет (только
+  `context_fingerprint`+`as_of`), что ломало симметрию artifact-flow —
+  при работе через adapter/snapshot-flow compare-ответ нельзя связать с
+  context-handle. Envelope compare теперь несёт `context_id` при обоих
+  путях: по `--context-id` — opaque id core-owned PlanningContext, на
+  котором считались оба варианта (эхо флага, прецедент plan 030.8;
+  согласованность id ↔ fingerprint — store.load(id) отдаёт контекст
+  опубликованного fingerprint); при свежей сборке — честный null (handle у
+  свежего контекста нет — конвенция 030.8 «идентификатор среза —
+  context_fingerprint»; minter handle'ов — snapshot 030.4, plan/compare —
+  загрузчики); до построения контекста (invalid intents, CONTEXT_*-отказ) —
+  null, как и fingerprint. Additive: существующие поля не удаляются/
+  переименовываются; `compare_schema_version` НЕ инкрементирована —
+  конвенция репозитория: additive-расширения envelope версии контракта не
+  меняют (031.1 добавил per-variant echo `filters` в compare без
+  инкремента; `COMPARE_SCHEMA_VERSION` версионирует состав metrics/delta).
+  Adapter прозрачен (whitelist не менялся); per-variant context_id — out of
+  scope. Тесты: tests/test_rebalance_compare.py (+3: эхо id по store-пути с
+  round-trip id ↔ fingerprint, публикация поля (null) при свежей сборке,
+  null при отказе контекста); legacy-тесты без правок.
 - feat(planning): `--freq-in` — белый список частот как формальное ограничение
   целевого портфеля в rebalance-plan / rebalance-compare (031.2, promote-gap
   030.12 отклонение 5): `PortfolioConstraints.freq_in` и canonical validator

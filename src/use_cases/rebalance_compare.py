@@ -38,18 +38,25 @@ delta не публикуется). Ожидаемые отказы — machine-
 неверная комбинация флагов-ограничений — ValueError по конвенции отчёта.
 
 Вывод: JSON envelope (артефакт, версия контракта, идентификация среза:
-fingerprint/as_of/data_gate; вердикт comparable + diagnostics) + `metrics`
-(минимальные метрики сравнения по вариантам), `delta` (variant − baseline,
-decimal-строки; null при not comparable) и `variants` (каждый plan result:
-canonical блоки 030.8 — summary/budget_check/targets/trades/positions_after/
-violations). Legacy `rebalance-report`, `rebalance-plan` и
-`rebalance-analysis-snapshot` не меняются (additive-правило 030 №2).
+context_id/context_fingerprint/as_of/data_gate; вердикт comparable +
+diagnostics) + `metrics` (минимальные метрики сравнения по вариантам),
+`delta` (variant − baseline, decimal-строки; null при not comparable) и
+`variants` (каждый plan result: canonical блоки 030.8 — summary/
+budget_check/targets/trades/positions_after/violations). Верхнеуровневый
+context_id (031.3) — симметрия artifact-flow с plan/snapshot (прецедент
+030.8): эхо --context-id — opaque id core-owned среза, на котором считались
+оба варианта (store.load(id) отдаёт контекст опубликованного
+context_fingerprint); у свежей сборки handle нет — честный null,
+идентификатор среза здесь context_fingerprint (minter handle'ов — snapshot,
+030.4; plan/compare — загрузчики). Legacy `rebalance-report`,
+`rebalance-plan` и `rebalance-analysis-snapshot` не меняются (additive-
+правило 030 №2).
 
 Не делается (границы 030.9/031.1): persistent snapshot DB для compare,
-adapter/sandbox (030.10/030.11), context_id в compare (031.3). Per-variant
-candidate-policy — зеркала plan-флагов (031.1), тем же программным API
-остаётся CompareVariant.filters; без явных флагов — canonical defaults
-отчёта (default_candidate_filters), как в 030.8.
+adapter/sandbox (030.10/030.11). Per-variant candidate-policy — зеркала
+plan-флагов (031.1), тем же программным API остаётся CompareVariant.filters;
+без явных флагов — canonical defaults отчёта (default_candidate_filters),
+как в 030.8.
 """
 import argparse
 import json
@@ -216,6 +223,9 @@ class RebalanceCompareUseCase(UseCase):
             'artifact': 'rebalance_compare',
             'compare_schema_version': COMPARE_SCHEMA_VERSION,
             'generated_at': canonical_datetime_str(datetime.now(timezone.utc)),
+            # context_id (031.3) — верхнеуровневое эхо --context-id
+            # (прецедент plan 030.8); до построения контекста — честный null.
+            'context_id': None,
             'context_fingerprint': None,
             'as_of': None,
             'data_gate': None,
@@ -262,8 +272,9 @@ class RebalanceCompareUseCase(UseCase):
             return envelope
 
         # 2. ОДИН PlanningContext (030.3/030.4) — фундамент сопоставимости.
+        context_id = getattr(args, 'context_id', None)
         context, context_diagnostics = self._plan._build_context(
-            argparse.Namespace(context_id=getattr(args, 'context_id', None))
+            argparse.Namespace(context_id=context_id)
         )
         if context_diagnostics:
             envelope['diagnostics'].extend(context_diagnostics)
@@ -296,7 +307,13 @@ class RebalanceCompareUseCase(UseCase):
             [variant_blocks[variant.name] for variant in variants],
             names=[variant.name for variant in variants],
         )
+        # context_id (031.3) публикуется при обоих путях: по --context-id —
+        # opaque id загруженного среза (id ↔ fingerprint согласованы —
+        # store.load(id) возвращает этот context); при свежей сборке — null
+        # (handle у свежего контекста нет, конвенция plan 030.8:
+        # идентификатор среза — context_fingerprint).
         envelope.update({
+            'context_id': context_id,
             'context_fingerprint': context.context_fingerprint,
             'as_of': canonical_datetime_str(context.as_of),
             'data_gate': self._plan._data_gate_payload(context),

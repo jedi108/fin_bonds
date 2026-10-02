@@ -18,6 +18,9 @@
   как есть;
 - CLI: prefixed-флаги a/b, machine-readable diagnostics с атрибутом
   variant, CONTEXT_*, фабричная карта (additive);
+- верхнеуровневый context_id в envelope (031.3): эхо --context-id по
+  store-пути (id ↔ fingerprint согласованы), честный null у свежей сборки
+  и при отказе контекста;
 - legacy команды не тронуты.
 
 Все данные — синтетические (in-memory двойник PortfolioStorage + реальный
@@ -738,3 +741,66 @@ class TestCliWiring:
             'password', 'secret', 'authorization',
         ):
             assert marker.lower() not in raw.lower(), marker
+
+
+# ---------------------------------------------------------------------------
+# Верхнеуровневый context_id в envelope (031.3): симметрия artifact-flow
+# с plan/snapshot (прецедент 030.8)
+# ---------------------------------------------------------------------------
+
+
+class TestContextIdEnvelope:
+    def test_store_path_publishes_context_id(self, tmp_path):
+        """--context-id: envelope несёт opaque id core-owned среза, на
+        котором считались оба варианта; id ↔ fingerprint согласованы —
+        load по опубликованному id отдаёт контекст опубликованного
+        fingerprint (тот же frozen срез)."""
+        fake = _make_fake()
+        store = EphemeralContextStore(
+            root_dir=tmp_path / 'planning_contexts',
+            scope_digest='test-scope',
+            rating_scale={},
+        )
+        handle = store.save(_context(fake))
+        use_case = _make_compare_use_case(fake, tmp_path, store=store)
+        payload = use_case.build_compare(_parse_cli([
+            '--context-id', handle['context_id'],
+            '--a-target-value', f'{NEW1}=12000',
+            '--b-target-value', f'{NEW1}=12000',
+            '--b-max-position-value', '6000',
+        ]))
+        assert payload['comparable'] is True
+        assert payload['diagnostics'] == []
+        assert payload['context_id'] == handle['context_id']
+        loaded = store.load(payload['context_id'])
+        assert loaded.context_fingerprint == payload['context_fingerprint']
+
+    def test_fresh_build_publishes_context_id_field(self, tmp_path):
+        """Без флага поле публикуется тоже; у свежей сборки handle нет
+        (конвенция plan 030.8: minter handle'ов — snapshot 030.4) — честный
+        null, идентификатор среза — context_fingerprint."""
+        fake = _make_fake()
+        use_case = _make_compare_use_case(fake, tmp_path)
+        payload = use_case.build_compare(_parse_cli([
+            '--a-target-value', f'{NEW1}=12000',
+            '--b-target-value', f'{NEW1}=6000',
+        ]))
+        assert payload['comparable'] is True
+        assert 'context_id' in payload
+        assert payload['context_id'] is None
+        assert payload['context_fingerprint'] == _context(fake).context_fingerprint
+
+    def test_failed_context_keeps_context_id_none(self, tmp_path):
+        """Контекст не построен (неизвестный id) — варианты не считались:
+        поле присутствует, но null (конвенция plan: идентификация — только
+        у построенного среза); запрошенный id — в diagnostics."""
+        use_case = _make_compare_use_case(_make_fake(), tmp_path)
+        payload = use_case.build_compare(_parse_cli([
+            '--context-id', 'f' * 32,
+            '--a-target-value', f'{NEW1}=12000',
+            '--b-target-value', f'{NEW1}=6000',
+        ]))
+        assert [d['code'] for d in payload['diagnostics']] == ['CONTEXT_NOT_FOUND']
+        assert 'context_id' in payload
+        assert payload['context_id'] is None
+        assert payload['context_fingerprint'] is None
