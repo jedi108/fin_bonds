@@ -228,6 +228,7 @@ def _args(**overrides):
     defaults = {
         'freq_min': None,
         'freq_max': None,
+        'freq_in': None,
         'min_credit_rating': None,
         'exclude_sovereign': False,
         'max_position_value': None,
@@ -270,6 +271,7 @@ class TestCliWiring:
         args = parser.parse_args([])
         assert args.freq_min is None
         assert args.freq_max is None
+        assert args.freq_in is None
         assert args.min_credit_rating is None
         assert args.exclude_sovereign is False
         assert args.max_position_value is None
@@ -337,6 +339,34 @@ class TestCliWiring:
         use_case.build_plan(
             _args(min_credit_rating='AA-', target_value=list(_TARGET_NEW1))
         )
+
+    def test_freq_in_conflicts_with_freq_range(self, tmp_path):
+        """031.2: --freq-in взаимоисключим с --freq-min/--freq-max — конвенция
+        отчёта (ValueError): явная диагностика комбинации вместо молчаливого
+        приоритета диапазона или списка в if/elif-цепочке validator'а движка."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        with pytest.raises(ValueError, match='--freq-min'):
+            use_case.build_plan(_args(freq_min=4, freq_in=[2, 4]))
+        with pytest.raises(ValueError, match='--freq-max'):
+            use_case.build_plan(_args(freq_max=12, freq_in=[2, 4]))
+        # Конфликт ловится и на compare-пути (тот же _validate_args, см. compare).
+
+    def test_freq_in_flag_parses_csv(self):
+        """031.2: parsing semantics — канон отчёта (CSV-список целых,
+        parse_freq_list); пустой/нечисловой ввод — ошибка argparse (exit 2),
+        не traceback."""
+        parser = argparse.ArgumentParser(add_help=False)
+        RebalancePlanUseCase.setup_parser(parser)
+        args = parser.parse_args(['--freq-in', '2,4'])
+        assert args.freq_in == [2, 4]
+        args = parser.parse_args(['--freq-in', ' 2 , 4 '])
+        assert args.freq_in == [2, 4]
+        with pytest.raises(SystemExit):
+            parser.parse_args(['--freq-in', ''])
+        with pytest.raises(SystemExit):
+            parser.parse_args(['--freq-in', '2,x'])
+        with pytest.raises(SystemExit):
+            parser.parse_args(['--freq-in', ','])
 
     def test_setup_parser_candidate_policy_defaults(self):
         """031.1: candidate-policy флаги default=None — canonical defaults
@@ -606,6 +636,75 @@ class TestFinalPositionsCanonical:
         assert len(rows) == len(payload['positions_after']) + 2
         assert rows[-1][0] == 'ИТОГО'
         assert float(rows[-1][6]) == payload['summary']['portfolio_after']
+
+
+# ---------------------------------------------------------------------------
+# --freq-in: constraint → canonical validator движка (031.2)
+# ---------------------------------------------------------------------------
+
+
+class TestFreqInConstraint:
+    """031.2: --freq-in → PortfolioConstraints.freq_in → to_scenario_constraints
+    → canonical validator движка. Freq в списке — план проходит; вне списка —
+    canonical violation COUPON_FREQUENCY_NOT_IN_LIST (второго валидатора нет:
+    use case только релеит ограничение)."""
+
+    def test_flag_reaches_constraints(self, tmp_path):
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        assert use_case._constraints_from_args(
+            _args(freq_in=[2, 4])
+        ).freq_in == (2, 4)
+        assert use_case._constraints_from_args(_args()).freq_in is None
+        # Аддитивность: программный Namespace без нового атрибута (до-031.2
+        # контракт) — ограничение не задано, legacy-потребители не ломаются.
+        bare = argparse.Namespace(
+            freq_min=None, freq_max=None, min_credit_rating=None,
+            exclude_sovereign=False, max_position_value=None,
+            sell_all=None, target_value=None, context_id=None,
+            view='full', format='json',
+        )
+        assert use_case._constraints_from_args(bare).freq_in is None
+        use_case._validate_args(bare)  # и валидация границы не падает
+
+    def test_freq_in_list_passes(self, tmp_path):
+        """Все бумаги среза с freq=4: --freq-in 4 — план валиден и осуществим,
+        canonical constraint_checks пуст, echo constraints отражает список."""
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        payload = use_case.build_plan(_args(
+            sell_all=list(_SELL_BASE0),
+            target_value=list(_TARGET_NEW1),
+            freq_in=[4],
+        ))
+        assert payload['valid'] is True
+        assert payload['feasible'] is True
+        assert payload['violations'] == []
+        assert payload['constraints']['freq_in'] == [4]
+
+    def test_freq_outside_list_is_engine_violation(self, tmp_path):
+        """Freq=4 вне списка [2]: каждая позиция целевого портфеля — canonical
+        violation COUPON_FREQUENCY_NOT_IN_LIST (движок), feasible=false;
+        summary/positions_after не удаляются (024)."""
+        from src.services.rebalance_engine import (
+            CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST,
+        )
+
+        use_case = _make_use_case(_make_fake(), tmp_path)
+        payload = use_case.build_plan(_args(
+            sell_all=list(_SELL_BASE0),
+            target_value=list(_TARGET_NEW1),
+            freq_in=[2],
+        ))
+        assert payload['valid'] is True  # структурная валидность отделена
+        assert payload['feasible'] is False
+        violations = payload['violations']
+        assert len(violations) == len(payload['positions_after']) == 7
+        assert all(
+            v['type'] == CONSTRAINT_COUPON_FREQUENCY_NOT_IN_LIST
+            for v in violations
+        )
+        assert violations[0]['actual'] == 4
+        assert list(violations[0]['limit']) == [2]
+        assert payload['summary']['portfolio_after'] == 84000.0
 
 
 # ---------------------------------------------------------------------------

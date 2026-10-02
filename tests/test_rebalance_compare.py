@@ -469,6 +469,7 @@ class TestCliWiring:
             assert getattr(args, f'{prefix}_target_value') is None
             assert getattr(args, f'{prefix}_freq_min') is None
             assert getattr(args, f'{prefix}_freq_max') is None
+            assert getattr(args, f'{prefix}_freq_in') is None
             assert getattr(args, f'{prefix}_min_credit_rating') is None
             assert getattr(args, f'{prefix}_exclude_sovereign') is False
             assert getattr(args, f'{prefix}_max_position_value') is None
@@ -512,6 +513,14 @@ class TestCliWiring:
         assert args.b_max_ytm == 50.0
         assert args.b_max_listlevel == 3
         assert args.b_max_maturity == '2030-06-01'
+
+    def test_freq_in_mirror_flags_parse(self):
+        """031.2: зеркала --a-freq-in/--b-freq-in — parsing semantics канона
+        отчёта (CSV-список целых)."""
+        args = _parse_cli(['--a-freq-in', '2,4'])
+        assert args.a_freq_in == [2, 4]
+        with pytest.raises(SystemExit):
+            _parse_cli(['--b-freq-in', ''])
 
     def test_candidate_policy_flag_validation_value_error(self, tmp_path):
         """Sanity-порог candidate-фильтра — конвенция legacy отчёта
@@ -677,6 +686,45 @@ class TestCliWiring:
             ]))
         with pytest.raises(ValueError, match='--max-position-value'):
             use_case.build_compare(_parse_cli(['--a-max-position-value', '0']))
+
+    def test_freq_in_conflicts_with_freq_range_per_variant(self, tmp_path):
+        """031.2: --{prefix}-freq-in взаимоисключим с --{prefix}-freq-min/max —
+        тот же reused _validate_args плана (ValueError, конвенция отчёта)."""
+        use_case = _make_compare_use_case(_make_fake(), tmp_path)
+        with pytest.raises(ValueError, match='--freq-min'):
+            use_case.build_compare(_parse_cli([
+                '--a-freq-min', '4', '--a-freq-in', '2,4',
+            ]))
+        with pytest.raises(ValueError, match='--freq-max'):
+            use_case.build_compare(_parse_cli([
+                '--b-freq-max', '12', '--b-freq-in', '2,4',
+            ]))
+
+    def test_freq_in_ab_variant(self, tmp_path):
+        """Варианты различаются freq-ограничением — валидный A/B (031.2):
+        a без списка проходит (freq=4 у всех бумаг среза), b с --b-freq-in 2
+        даёт canonical COUPON_FREQUENCY_NOT_IN_LIST на каждую позицию целевого
+        портфеля; delta/metrics читают canonical outputs движка."""
+        fake = _make_fake()
+        use_case = _make_compare_use_case(fake, tmp_path)
+        payload = use_case.build_compare(_parse_cli([
+            '--a-target-value', f'{NEW1}=12000',
+            '--b-target-value', f'{NEW1}=12000',
+            '--b-freq-in', '2',
+        ]))
+        assert payload['comparable'] is True
+        assert payload['diagnostics'] == []
+        a_block, b_block = payload['variants']['a'], payload['variants']['b']
+        assert a_block['violations'] == []
+        assert a_block['feasible'] is True
+        assert len(b_block['violations']) == len(b_block['positions_after']) == 8
+        assert all(
+            v['type'] == 'COUPON_FREQUENCY_NOT_IN_LIST'
+            for v in b_block['violations']
+        )
+        assert payload['metrics']['a']['violations_count'] == 0
+        assert payload['metrics']['b']['violations_count'] == 8
+        assert payload['delta']['b']['violations_count'] == 8
 
     def test_payload_contains_no_secrets(self, tmp_path):
         use_case = _make_compare_use_case(_make_fake(), tmp_path)

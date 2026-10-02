@@ -15,7 +15,8 @@ Use case — тонкая композиция canonical домена (прав�
       → canonical проекции движка (030.2) + scenario_compare (030.9)
 
 Варианты задаются prefixed-флагами (зеркала флагов rebalance-plan):
-`--a-sell-all/--a-target-value/--a-freq-min/...` и `--b-...`; различаться
+`--a-sell-all/--a-target-value/--a-freq-min/--a-freq-in/...` и `--b-...`;
+различаться
 могут intents, формальные ограничения (strict vs relaxed) и candidate-policy
 покупки (031.1: `--a-max-risk/--a-include-ku/...` — exploration-policy
 BUY eligibility, 030.6) — это валидный A/B. Raw universe до variant
@@ -69,6 +70,7 @@ from src.services.scenario_compare import (
 from src.use_cases.base import UseCase
 from src.use_cases.rebalance_plan import (
     CANDIDATE_POLICY_FLAG_SPECS,
+    FREQ_IN_FLAG_SPEC,
     RebalancePlanUseCase,
 )
 
@@ -105,6 +107,15 @@ _VARIANT_FLAG_SPECS = (
         type=int, default=None,
         help='Вариант: формальное ограничение — максимальная частота купонов '
              'в год в целевом портфеле.',
+    )),
+    # freq_in (031.2): parsing semantics (CSV-список целых) — тот же канон
+    # отчёта, что у plan (FREQ_IN_FLAG_SPEC); взаимоисключимость с freq_min/
+    # freq_max варианта проверяет reused _validate_args плана (ValueError).
+    ('freq_in', dict(
+        type=FREQ_IN_FLAG_SPEC[1]['type'], default=None,
+        help='Вариант: формальное ограничение — только указанные частоты '
+             'купонов в год в целевом портфеле, через запятую (напр. 2,4). '
+             'Взаимоисключимо с --freq-min/--freq-max варианта.',
     )),
     ('min_credit_rating', dict(
         type=str, default=None,

@@ -133,9 +133,10 @@ PLAN_SCHEMA_VERSION = 1
 # из единственного источника `_SCREENER_FILTER_SPECS` отчёта (029-T06);
 # canonical DEFAULTS значений здесь НЕ materialize (default=None) — их
 # единственный источник `default_candidate_filters()` (030.5), явный флаг
-# переопределяет. В группу не входят: --freq-in (031.2) и --screener-limit
-# (presentation control отчёта, 030.6/030.10 — universe контекста не
-# режется). rebalance-compare зеркалит те же specs с префиксами --a-/--b-.
+# переопределяет. В группу не входят: --freq-in (031.2 — отдельная
+# constraint-ось, FREQ_IN_FLAG_SPEC ниже) и --screener-limit (presentation
+# control отчёта, 030.6/030.10 — universe контекста не режется).
+# rebalance-compare зеркалит те же specs с префиксами --a-/--b-.
 # ---------------------------------------------------------------------------
 _CANDIDATE_POLICY_FLAGS = (
     '--max-risk', '--max-listlevel', '--max-ytm',
@@ -174,6 +175,30 @@ CANDIDATE_POLICY_FLAG_SPECS = tuple(
         },
     )
     for flag in _CANDIDATE_POLICY_FLAGS
+)
+
+# Constraint-флаг --freq-in (031.2): белый список допустимых частот купонов —
+# ФОРМАЛЬНОЕ ОГРАНИЧЕНИЕ целевого портфеля (ось PortfolioConstraints.freq_in →
+# to_scenario_constraints → canonical validator движка, constraint_checks
+# COUPON_FREQUENCY_*; нарушение подтверждает только движок), НЕ candidate-
+# policy (031.1) и не отчётный screener-фильтр кандидатов. Parsing semantics
+# (CSV-список целых, 005.3) — из единственного источника
+# `_SCREENER_FILTER_SPECS` отчёта (029-T06); canonical default-значения в CLI
+# не materialize (default=None = ограничение не задано, семантика движка).
+# Взаимоисключимость с --freq-min/--freq-max — конвенция отчёта (ValueError в
+# _validate_args): без неё canonical validator (if/elif-цепочка проверок freq)
+# молча приоритизировал бы диапазон над списком.
+_FREQ_IN_HELP_OVERRIDE = (
+    'Формальное ограничение: только указанные частоты купонов в год в '
+    'ЦЕЛЕВОМ портфеле, через запятую (напр. 2,4 = «только квартальные и '
+    'полугодовые»). Взаимоисключимо с --freq-min/--freq-max.'
+)
+FREQ_IN_FLAG_SPEC = (
+    'freq_in',
+    {
+        **dict(_SCREENER_FILTER_SPECS)['--freq-in'],
+        'help': _FREQ_IN_HELP_OVERRIDE,
+    },
 )
 
 # Compact projections (файл задачи): каждое view — подмножество одного full
@@ -218,7 +243,7 @@ class RebalancePlanUseCase(UseCase):
 
     Флаги задают ПОКУПКИ/ПРОДАЖИ намерениями (`--sell-all ISIN`,
     `--target-value ISIN=RUB`), формальные ограничения целевого портфеля
-    (--freq-min/--freq-max/--min-credit-rating/--exclude-sovereign/
+    (--freq-min/--freq-max/--freq-in/--min-credit-rating/--exclude-sovereign/
     --max-position-value) и candidate-policy покупки (031.1: --max-risk/
     --max-listlevel/--max-ytm/--include-ku/--min-maturity/--max-maturity —
     eligibility новой/увеличиваемой позиции, 030.6; без флага — canonical
@@ -252,6 +277,10 @@ class RebalancePlanUseCase(UseCase):
             '--freq-max', type=int, default=None,
             help='Формальное ограничение: максимальная частота купонов в год '
                  'в целевом портфеле (напр. 12).'
+        )
+        dest, kwargs = FREQ_IN_FLAG_SPEC
+        parser.add_argument(
+            f"--{dest.replace('_', '-')}", dest=dest, **kwargs
         )
         parser.add_argument(
             '--min-credit-rating', type=str, default=None,
@@ -402,6 +431,18 @@ class RebalancePlanUseCase(UseCase):
         if (args.freq_min is not None and args.freq_max is not None
                 and args.freq_min > args.freq_max):
             raise ValueError("--freq-min не должен превышать --freq-max")
+        # --freq-in (031.2) взаимоисключим с диапазоном частот — конвенция
+        # отчёта (005.1/P-C, calculate-ytm 005.3): явный отказ комбинации
+        # вместо молчаливого приоритета списка или диапазона в if/elif-цепочке
+        # canonical validator'а движка. getattr — аддитивность: программный
+        # Namespace без нового атрибута (до-031.2 контракт) не ломается.
+        freq_in = getattr(args, 'freq_in', None)
+        if freq_in is not None and args.freq_min is not None:
+            raise ValueError("--freq-min и --freq-in взаимоисключающие: "
+                             "выберите один способ задания частот")
+        if freq_in is not None and args.freq_max is not None:
+            raise ValueError("--freq-max и --freq-in взаимоисключающие: "
+                             "выберите один способ задания частот")
         if args.max_position_value is not None and args.max_position_value <= 0:
             raise ValueError("--max-position-value должен быть > 0")
         # Candidate-policy (031.1): sanity-проверка порога — конвенция legacy
@@ -722,11 +763,13 @@ class RebalancePlanUseCase(UseCase):
     def _constraints_from_args(
         self, args: argparse.Namespace
     ) -> PortfolioConstraints:
-        """Формальные ограничения целевого портфеля из флагов (030.5).
-        Деньги — Decimal на границе (float флага → через str)."""
+        """Формальные ограничения целевого портфеля из флагов (030.5/031.2).
+        Деньги — Decimal на границе (float флага → через str); freq_in —
+        getattr по той же причине аддитивности, что в _validate_args."""
         return PortfolioConstraints(
             freq_min=args.freq_min,
             freq_max=args.freq_max,
+            freq_in=getattr(args, 'freq_in', None),  # None = не задано
             exclude_sovereign=bool(args.exclude_sovereign),
             min_credit_rating=args.min_credit_rating,
             max_position_value_rub=(

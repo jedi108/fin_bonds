@@ -4,6 +4,39 @@
 
 ## 2026-10-02
 
+- feat(planning): `--freq-in` — белый список частот как формальное ограничение
+  целевого портфеля в rebalance-plan / rebalance-compare (031.2, promote-gap
+  030.12 отклонение 5): `PortfolioConstraints.freq_in` и canonical validator
+  движка (constraint_checks COUPON_FREQUENCY_*) поддерживали список давно, но
+  в plan-CLI флага не было — «только месячные и квартальные» не выражалось
+  через typed domain API, а отчётный `--freq-in` rebalance-report — это
+  screener-фильтр кандидатов, не гарантия целевого портфеля (report-фильтр ≠
+  final-target гарантия). `rebalance-plan`: constraint-флаг `--freq-in`
+  (CSV-список целых, parsing semantics — из единственного источника
+  `_SCREENER_FILTER_SPECS` отчёта 029-T06 через новый реэкспорт
+  `FREQ_IN_FLAG_SPEC`; help отражает constraint-семантику целевого портфеля),
+  default=None = ограничение не задано; пустой/нечисловой список — ошибка
+  argparse (конвенция `parse_freq_list`), не traceback; флаг →
+  `_constraints_from_args` → `PortfolioConstraints.freq_in` (getattr —
+  аддитивность: программный Namespace без нового атрибута не ломается) →
+  `to_scenario_constraints` → валидация только canonical движком (второй
+  валидатор не создаётся; freq в списке проходит, вне — violation
+  COUPON_FREQUENCY_NOT_IN_LIST по всему целевому портфелю, feasible=false,
+  summary/positions_after не удаляются — 024). Конфликт с freq-диапазоном:
+  `--freq-in` взаимоисключим с `--freq-min/--freq-max` — ValueError по
+  конвенции отчёта (005.1/P-C, calculate-ytm 005.3) в `_validate_args`:
+  явный отказ комбинации вместо молчаливого приоритета диапазона над
+  списком в if/elif-цепочке validator'а движка. `rebalance-compare`: зеркала
+  `--a-freq-in`/`--b-freq-in` (parsing semantics того же канона; конфликт с
+  диапазоном варианта ловит reused `_validate_args` плана; варианты могут
+  различаться freq-ограничением — валидный A/B). Echo `constraints.freq_in`
+  в full view plan'а существовал с 030.5 — теперь реально заполняется.
+  Legacy `rebalance-report`/`--scenario` не менялись (additive-правило 030
+  №2). Тесты: tests/test_rebalance_plan.py (+5: конфликт с freq-min/max,
+  CSV-парсинг и пустой/нечисловой ввод, флаг → constraints с аддитивностью
+  Namespace, freq в списке проходит с echo, вне списка — canonical
+  violation), tests/test_rebalance_compare.py (+3: defaults/парсинг зеркал,
+  конфликт по вариантам, A/B freq-ограничений через metrics/delta).
 - feat(planning): candidate-policy флаги в rebalance-plan / rebalance-compare
   (031.1, promote-gap 030.15) — plan-путь больше не заперт на canonical
   дефолтах candidate-фильтров (при которых новые не-ОФЗ BUY дают пустой
