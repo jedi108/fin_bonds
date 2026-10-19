@@ -309,6 +309,17 @@ class MoexApiClient(IMoexApiClient):
         
         return [dict(zip(columns, row)) for row in data]
 
+    def _merge_board_blocks(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """securities доски + YIELD* из marketdata/marketdata_yields по SECID."""
+        extra: Dict[str, Dict[str, Any]] = {}
+        for block in ('marketdata', 'marketdata_yields'):
+            for row in self._format_iss_response(data.get(block, {})):
+                extra.setdefault(row.get('SECID'), {}).update(row)
+        return [
+            {**extra.get(sec.get('SECID'), {}), **sec}
+            for sec in self._format_iss_response(data.get('securities', {}))
+        ]
+
     def fetch_all_bonds_data(self) -> Dict[str, Dict[str, Any]]:
         """
         Загружает данные по всем облигациям с основных торговых площадок MOEX.
@@ -327,11 +338,14 @@ class MoexApiClient(IMoexApiClient):
             endpoint = f"/engines/stock/markets/bonds/boards/{board}/securities.json"
             params = {
                 'iss.meta': 'off',
-                'iss.only': 'securities',
+                'iss.only': 'securities,marketdata,marketdata_yields',
                 'securities.columns': ','.join(columns),
+                # issue #2: внешняя доходность MOEX — тем же запросом, что и OFFERDATE
+                'marketdata.columns': 'SECID,YIELD',
+                'marketdata_yields.columns': 'SECID,YIELDDATE,YIELDDATETYPE',
             }
             data = self._make_request(f"{self.base_url}{endpoint}", params)
-            for bond in self._format_iss_response(data.get('securities', {})) if data else []:
+            for bond in self._merge_board_blocks(data) if data else []:
                 isin = bond.get('ISIN')
                 if isin and isin not in all_bonds:
                     all_bonds[isin] = bond

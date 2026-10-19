@@ -68,6 +68,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
+from src.services.cashflow import ytm_check_fields
 from src.services.context_store import EphemeralContextStore
 from src.services.planning_context import (
     PlanningContext,
@@ -119,14 +120,15 @@ AVAILABLE_DATASETS: Dict[str, str] = {
     ),
     'ytm': (
         'обогащённая каноническая YTM движка: ytm_pct + ytm_reason + '
-        'ytm_updated_at; NULL сохраняется с reason'
+        'ytm_to (горизонт offer/maturity) + moex_yield_pct/ytm_check '
+        '(сверка с MOEX YIELD) + ytm_updated_at; NULL сохраняется с reason'
     ),
     'coupon_rate_frequency': (
         'ставка купона (COALESCE с флоатером), частота, coupon_kind, '
         'amortization/perpetual флаги'
     ),
     'maturity': (
-        'дата погашения; у позиций также дата оферты'
+        'дата погашения и дата put-оферты (offer)'
     ),
     'credit_rating': (
         'последний рейтинг из rating_history: код + балл (без даты рейтинга — '
@@ -488,6 +490,7 @@ class AnalysisSnapshotUseCase(UseCase):
             'credit_rating': row.get('credit_rating') or None,
             'rating_score': _opt_int(row.get('rating_score')),
             'maturity': _opt_iso_day(row.get('maturity_date')),
+            'offer': _opt_iso_day(row.get('offer_date')),
             'nominal': _opt_decimal_str(row.get('nominal')),
             'coupon_pct': _opt_decimal_str(row.get('coupon_rate_percent')),
             'coupon_freq': _opt_int(row.get('coupon_quantity_per_year')),
@@ -498,6 +501,8 @@ class AnalysisSnapshotUseCase(UseCase):
             # Обогащённая движком YTM: NULL сохраняется + canonical reason.
             'ytm_pct': _opt_float(row.get('ytm_percent')),
             'ytm_reason': row.get('ytm_reason'),
+            # issues #2/#3: горизонт YTM явно + сверка с MOEX YIELD
+            **ytm_check_fields(row),
             # Freshness metadata аналитического поля — есть post-029.
             'ytm_updated_at': _opt_iso_dt(row.get('ytm_updated_at')),
             # Цена расчёта + basis движка (030.2) — релей, не пересчёт.

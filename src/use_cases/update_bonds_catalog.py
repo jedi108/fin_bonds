@@ -8,7 +8,7 @@ import os
 import csv
 from decimal import Decimal
 from datetime import date, datetime
-from typing import Optional, List, TYPE_CHECKING
+from typing import Any, Dict, Optional, List, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, asdict
 import argparse
 
@@ -39,6 +39,13 @@ def _parse_moex_date(value: Optional[str]) -> Optional[date]:
     if not value or value.startswith('0000'):
         return None
     return date.fromisoformat(value[:10])
+
+
+def _parse_moex_yield(sec: Dict[str, Any]) -> Tuple[Optional[Decimal], Optional[date], Optional[str]]:
+    """(YIELD, YIELDDATE, YIELDDATETYPE) строки ISS; YIELD 0/пусто — нет сделок, None."""
+    raw = sec.get('YIELD')
+    value = Decimal(str(raw)) if raw else None
+    return value, _parse_moex_date(sec.get('YIELDDATE')), sec.get('YIELDDATETYPE') or None
 
 
 def fetch_and_prepare_bond_details(bond: Bond) -> BondDTO:
@@ -215,12 +222,19 @@ class UpdateBondsCatalogUseCase(UseCase):
         self.logger.info("--- Обновление данных с MOEX (листинг, купон) ---")
         # issue #1: T-Bank не отдаёт оферту — без этого шага у фиксов offer_date
         # пуст и YTM считается к погашению вместо оферты.
+        moex_bonds = self.moex_client.fetch_all_bonds_data()
         offers = {
             isin: _parse_moex_date(sec.get('OFFERDATE'))
-            for isin, sec in self.moex_client.fetch_all_bonds_data().items()
+            for isin, sec in moex_bonds.items()
         }
         changed = self.db.update_offer_dates(offers)
         self.logger.info(f"Даты оферт MOEX: изменено {changed} из {len(offers)}.")
+        yields = {isin: _parse_moex_yield(sec) for isin, sec in moex_bonds.items()}
+        self.logger.info(
+            "Доходность MOEX: обновлено %d (с YIELD: %d).",
+            self.db.update_moex_yields(yields),
+            sum(1 for y, _, _ in yields.values() if y is not None),
+        )
 
         bonds_to_update = self.db.get_bonds_for_moex_update()
         self.logger.info(f"Найдено {len(bonds_to_update)} облигаций для обновления.")

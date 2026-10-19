@@ -36,6 +36,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.services.cashflow import ytm_check_fields
 from src.storage import PortfolioStorage
 from src.use_cases.bond_filters import is_sovereign as _is_sovereign_rule
 from src.use_cases.calculate_ytm import CalculateYtmUseCase
@@ -78,7 +79,8 @@ CONSTRAINT_INSUFFICIENT_CASH_ESTIMATE = 'INSUFFICIENT_CASH_ESTIMATE'
 # issuer_pct («Доля выпуска, %» ≠ «Доля эмитента, %»).
 BOND_ROW_KEYS = (
     'isin', 'name', 'ticker', 'qty', 'price', 'value', 'share_pct',
-    'ytm_pct', 'ytm_reason', 'coupon_pct', 'freq',
+    'ytm_pct', 'ytm_reason', 'ytm_to', 'moex_yield_pct', 'ytm_check',
+    'coupon_pct', 'freq',
     'coupon_kind', 'risk_level', 'list_level', 'maturity', 'offer',
     'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge', 'credit_rating',
 )
@@ -224,6 +226,8 @@ def bond_to_json(
         'ytm_pct': round(_to_float(row.get('ytm_percent')), 2)
         if row.get('ytm_percent') is not None else None,
         'ytm_reason': row.get('ytm_reason'),
+        # issues #2/#3: горизонт YTM явно + сверка с MOEX YIELD
+        **ytm_check_fields(row),
         'coupon_pct': round(_to_float(row.get('coupon_rate_percent')), 2)
         if row.get('coupon_rate_percent') is not None else None,
         'freq': _to_int(row.get('coupon_quantity_per_year')),

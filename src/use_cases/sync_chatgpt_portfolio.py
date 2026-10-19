@@ -46,6 +46,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from src.services.cashflow import ytm_check_fields
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
@@ -67,7 +68,8 @@ logger = logging.getLogger(__name__)
 # v3 (020): SCHEMA (самодокументация) + CANDIDATES (кандидаты buy-выборки).
 # v4 (025): CONTROL + cash контекст (cash_available_rub/investable_total_rub/
 # cash_updated_at; unknown = пустая ячейка), CANDIDATES + credit_rating.
-SCHEMA_VERSION = 4
+# v5 (issues #2/#3): ytm_to (горизонт YTM) + moex_yield_pct/ytm_check (сверка с MOEX).
+SCHEMA_VERSION = 5
 PORTFOLIO_HEADERS = (
     "isin",
     "name",
@@ -82,6 +84,9 @@ PORTFOLIO_HEADERS = (
     "issuer_pct",
     "ytm_pct",
     "ytm_reason",
+    "ytm_to",
+    "moex_yield_pct",
+    "ytm_check",
     "coupon_pct",
     "coupon_frequency",
     "coupon_type",
@@ -114,7 +119,10 @@ PORTFOLIO_SCHEMA = (
     ("issuer_pct", "percent", "Issuer share of the portfolio"),
     ("ytm_pct", "percent_per_year or empty", "Yield to the put-offer date if one is ahead (offer_date), otherwise to maturity; NOT the coupon rate (see coupon_pct); an empty value is a deliberate NULL — see ytm_reason"),
     ("ytm_reason", "string or empty", "Reason for empty ytm_pct (perpetual, floating_coupon, amortization_schedule_missing, coupon_frequency_missing, maturity_missing_or_past, market_price_missing_or_nonpositive, nominal_missing_or_nonpositive, coupon_rate_missing_or_negative, solver_no_convergence; not_applicable = YTM calc never ran). Empty when ytm_pct is present"),
-    ("coupon_pct", "percent_per_year", "Coupon rate"),
+    ("ytm_to", "offer or maturity or empty", "Horizon of ytm_pct: offer = to the put-offer date (offer_date), maturity = to maturity_date; empty when ytm_pct is empty"),
+    ("moex_yield_pct", "percent_per_year or empty", "External MOEX yield (ISS marketdata.YIELD, last trade) for cross-check only; may differ from ytm_pct by methodology"),
+    ("ytm_check", "ok / mismatch / no_moex_data or empty", "Cross-check of ytm_pct vs moex_yield_pct: mismatch = difference above the config threshold or a different horizon date; report both numbers with a methodology caveat. Empty when ytm_pct is empty"),
+    ("coupon_pct", "percent_per_year", "Coupon rate — NOT a yield; call it the coupon rate only"),
     ("coupon_frequency", "count", "Coupons per year"),
     ("coupon_type", "FIX or FLOAT", "Coupon type"),
     ("maturity_date", "ISO date", "Maturity date"),
@@ -168,6 +176,9 @@ CANDIDATE_HEADERS = (
     "price_rub",
     "ytm_pct",
     "ytm_reason",
+    "ytm_to",
+    "moex_yield_pct",
+    "ytm_check",
     "coupon_pct",
     "coupon_frequency",
     "maturity_date",
@@ -192,7 +203,10 @@ CANDIDATE_SCHEMA = (
     ("price_rub", "RUB", "Fresh market price required by the canonical screener buy selection (no nominal fallback)"),
     ("ytm_pct", "percent_per_year or empty", "Yield to the put-offer date if one is ahead (offer_date), otherwise to maturity; NOT the coupon rate (see coupon_pct); an empty value is a deliberate NULL — see ytm_reason"),
     ("ytm_reason", "string or empty", "Reason for empty ytm_pct (e.g. floating_coupon); empty when ytm_pct is present"),
-    ("coupon_pct", "percent_per_year or empty", "Coupon rate"),
+    ("ytm_to", "offer or maturity or empty", "Horizon of ytm_pct: offer = to the put-offer date (offer_date), maturity = to maturity_date; empty when ytm_pct is empty"),
+    ("moex_yield_pct", "percent_per_year or empty", "External MOEX yield (ISS marketdata.YIELD, last trade) for cross-check only; may differ from ytm_pct by methodology"),
+    ("ytm_check", "ok / mismatch / no_moex_data or empty", "Cross-check of ytm_pct vs moex_yield_pct: mismatch = difference above the config threshold or a different horizon date; report both numbers with a methodology caveat. Empty when ytm_pct is empty"),
+    ("coupon_pct", "percent_per_year or empty", "Coupon rate — NOT a yield; call it the coupon rate only"),
     ("coupon_frequency", "count", "Coupons per year"),
     ("maturity_date", "ISO date", "Maturity date"),
     ("offer_date", "ISO date or empty", "Offer (put/call) date"),
@@ -307,6 +321,9 @@ def build_candidates_payload(
                 "price_rub": row["price"],
                 "ytm_pct": row["ytm_pct"],
                 "ytm_reason": row["ytm_reason"],
+                "ytm_to": row["ytm_to"],
+                "moex_yield_pct": row["moex_yield_pct"],
+                "ytm_check": row["ytm_check"],
                 "coupon_pct": row["coupon_pct"],
                 "coupon_frequency": row["freq"],
                 "maturity_date": row["maturity"],
@@ -464,6 +481,7 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 # Причина пустого ytm_pct: готовый ключ enrichment'а (None,
                 # если YTM рассчитана); экспортер не пересчитывает её сам.
                 "ytm_reason": row.get("ytm_reason"),
+                **ytm_check_fields(row),
                 "coupon_pct": _float(row.get("coupon_rate_percent")),
                 "coupon_frequency": row.get("coupon_quantity_per_year"),
                 "coupon_type": coupon_type,

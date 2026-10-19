@@ -620,6 +620,24 @@ class PortfolioStorage:
         self.update_bonds_derived_metrics([isin for _, isin in changed])
         return len(changed)
 
+    def update_moex_yields(
+        self, yields: Dict[str, Tuple[Optional[Decimal], Optional[date], Optional[str]]]
+    ) -> int:
+        """Сохраняет внешнюю доходность MOEX (issue #2): {isin: (YIELD, YIELDDATE, YIELDDATETYPE)}.
+
+        Наш ytm не трогается — значение нужно только для сверки (ytm_check).
+        """
+        if not yields:
+            return 0
+        cursor = self._cursor()
+        with self.conn:
+            cursor.executemany(
+                "UPDATE bonds_catalog SET moex_yield = %s, moex_yield_date = %s, "
+                "moex_yield_date_type = %s WHERE isin = %s",
+                [(y, d, t, isin) for isin, (y, d, t) in yields.items()],
+            )
+        return len(yields)
+
     def get_bonds_for_moex_update(self) -> List[Bond]:
         """
         Возвращает облигации, которые нужно обновить данными с MOEX.
@@ -2117,6 +2135,8 @@ class PortfolioStorage:
                 bc.list_level,
                 bc.maturity_date,
                 bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
 
                 -- Выплата по купону на 1 облигацию
                 ROUND(
@@ -2250,6 +2270,8 @@ class PortfolioStorage:
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
 
                 -- Купонный платеж на 1 бумагу
                 ROUND(
@@ -2693,6 +2715,9 @@ class PortfolioStorage:
                 COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
+                bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,
@@ -2757,6 +2782,9 @@ class PortfolioStorage:
                 COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
+                bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,
@@ -2866,6 +2894,8 @@ class PortfolioStorage:
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,
@@ -2958,6 +2988,8 @@ class PortfolioStorage:
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,
@@ -3022,6 +3054,8 @@ class PortfolioStorage:
                 bc.coupon_quantity_per_year,
                 bc.maturity_date,
                 bc.offer_date,
+                bc.moex_yield,
+                bc.moex_yield_date,
                 bc.risk_level,
                 bc.list_level,
                 bc.amortization_flag,

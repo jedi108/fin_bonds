@@ -209,14 +209,14 @@ def test_reason_columns_follow_value_columns():
         PORTFOLIO_HEADERS.index("duration_reason")
         == PORTFOLIO_HEADERS.index("modified_duration") + 1
     )
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_build_payload_row_values_match_headers_order():
     """Каждая ячейка строки лежит на позиции своего заголовка."""
     control, rows = build_payload(make_rows())
 
-    assert control["schema_version"] == 4
+    assert control["schema_version"] == 5
     assert len(rows[0]) == len(PORTFOLIO_HEADERS)
     expected = {
         "isin": "RU000A",
@@ -325,7 +325,7 @@ def test_valuation_columns_follow_value_column():
         PORTFOLIO_HEADERS.index("valuation_warning")
         == PORTFOLIO_HEADERS.index("valuation_source") + 1
     )
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_valuation_warning_by_source():
@@ -694,6 +694,9 @@ def screener_row(**overrides):
         "share_pct": 0.0,
         "ytm_pct": 15.0,
         "ytm_reason": None,
+        "ytm_to": "maturity",
+        "moex_yield_pct": 14.8,
+        "ytm_check": "ok",
         "coupon_pct": 12.0,
         "freq": 4,
         "coupon_kind": "fix",
@@ -789,6 +792,9 @@ def test_candidate_projection_fields_match_source_screener():
         "price_rub": source["price"],
         "ytm_pct": source["ytm_pct"],
         "ytm_reason": source["ytm_reason"],
+        "ytm_to": source["ytm_to"],
+        "moex_yield_pct": source["moex_yield_pct"],
+        "ytm_check": source["ytm_check"],
         "coupon_pct": source["coupon_pct"],
         "coupon_frequency": source["freq"],
         "maturity_date": source["maturity"],
@@ -836,7 +842,7 @@ def test_candidate_projection_carries_screener_metadata():
 def test_p0_portfolio_payload_not_touched_by_candidate_export():
     """P0 PORTFOLIO payload не меняется кандидатным экспортом: колонки те же
     (v3 поднимает только версию контракта), candidate_type/rank не протекают."""
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     assert PORTFOLIO_HEADERS[0] == "isin"
     assert "candidate_type" not in PORTFOLIO_HEADERS
     assert "rank" not in PORTFOLIO_HEADERS
@@ -1026,7 +1032,7 @@ def test_build_payload_v3_control_fields_and_candidates():
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
 
-    assert control["schema_version"] == 4
+    assert control["schema_version"] == 5
     assert control["positions_count"] == len(rows)
     assert control["candidates_count"] == len(candidate_rows) == 3
     assert json.loads(control["candidate_meta"]) == {
@@ -1062,7 +1068,7 @@ def test_build_payload_v4_control_carries_known_cash():
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
 
-    assert control["schema_version"] == 4
+    assert control["schema_version"] == 5
     assert control["portfolio_value_rub"] == 25000
     assert control["cash_available_rub"] == 1234.56
     assert control["investable_total_rub"] == 26234.56

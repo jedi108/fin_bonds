@@ -27,7 +27,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, List, Dict, Any, Optional, Tuple
 
-from src.services.cashflow import calculate_bond_cashflow_metrics
+from src.services.cashflow import calculate_bond_cashflow_metrics, ytm_check_fields
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.bond_filters import freq_ok, is_sovereign, parse_freq_list
@@ -54,8 +54,9 @@ _EXCLUDED_KEYS = ('sovereign', 'freq', 'min_ytm', 'max_ytm', 'limit_truncated')
 # Ключи строки бумаги в JSON-ответе (общие с BOND_ROW_KEYS rebalance-report).
 _BOND_JSON_KEYS = (
     'isin', 'name', 'ticker', 'price', 'ytm_pct', 'ytm_reason',
+    'ytm_to', 'moex_yield_pct', 'ytm_check',
     'coupon_pct', 'freq', 'coupon_kind', 'risk_level', 'list_level',
-    'maturity', 'amort', 'ku', 'issuer', 'coupon_month_per_bond', 'held_badge',
+    'maturity', 'offer', 'amort', 'ku', 'issuer', 'coupon_month_per_bond', 'held_badge',
 )
 # Дополнение для режима portfolio (позиция портфеля).
 _BOND_JSON_KEYS_PORTFOLIO = _BOND_JSON_KEYS + ('qty', 'avg_price', 'price_change_pct')
@@ -320,6 +321,8 @@ class CalculateYtmUseCase(UseCase):
             'price': round(_to_float(price_raw), 4) if price_raw is not None else None,
             'ytm_pct': round(float(ytm), 2) if ytm is not None else None,
             'ytm_reason': bond.get('ytm_reason'),
+            # issues #2/#3: горизонт YTM явно + сверка с MOEX YIELD
+            **ytm_check_fields(bond),
             'coupon_pct': round(_to_float(bond.get('coupon_rate_percent')), 2)
             if bond.get('coupon_rate_percent') is not None else None,
             'freq': _to_int(bond.get('coupon_quantity_per_year')),
@@ -327,6 +330,7 @@ class CalculateYtmUseCase(UseCase):
             'risk_level': _to_int(bond.get('risk_level')),
             'list_level': _to_int(bond.get('list_level')),
             'maturity': _to_iso_day(bond.get('maturity_date')),
+            'offer': _to_iso_day(bond.get('offer_date')),
             'amort': bool(bond.get('amortization_flag')),
             'ku': bool(bond.get('ku')),
             'issuer': bond.get('issuer') or bond.get('name') or bond.get('isin'),

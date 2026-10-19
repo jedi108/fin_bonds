@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 import logging
-from typing import Optional, Union, Tuple, List
+from functools import lru_cache
+from typing import Any, Dict, Mapping, Optional, Union, Tuple, List
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,56 @@ def _parse_date(val: Union[date, datetime, str, None]) -> Optional[date]:
         except (ValueError, TypeError):
             return None
     return None
+
+
+# issue #2: порог сверки нашей YTM с MOEX YIELD по умолчанию (п.п.), config.yaml ytm_check_threshold_pp
+_YTM_CHECK_THRESHOLD_PP = 2.0
+
+
+def ytm_horizon_date(
+    maturity_date: Union[date, datetime, str, None],
+    offer_date: Union[date, datetime, str, None],
+    valuation_date: Union[date, datetime, str, None] = None,
+) -> Tuple[Optional[date], Optional[str]]:
+    """Горизонт YTM (issue #1): (дата, 'offer' | 'maturity'); оферта — если она между оценкой и погашением."""
+    v_date = _parse_date(valuation_date) or date.today()
+    m_date = _parse_date(maturity_date)
+    o_date = _parse_date(offer_date)
+    if o_date is not None and v_date < o_date and (m_date is None or o_date < m_date):
+        return o_date, 'offer'
+    return (m_date, 'maturity') if m_date is not None else (None, None)
+
+
+@lru_cache(maxsize=1)
+def _ytm_check_threshold_pp() -> float:
+    from src.utils import load_config  # ленивый импорт: сервис остаётся чистым без конфига
+    try:
+        return float(load_config().get('ytm_check_threshold_pp', _YTM_CHECK_THRESHOLD_PP))
+    except Exception:  # нет config.yaml (тесты/скрипты) — порог по умолчанию
+        return _YTM_CHECK_THRESHOLD_PP
+
+
+def ytm_check_fields(row: Mapping[str, Any], threshold_pp: Optional[float] = None) -> Dict[str, Any]:
+    """Горизонт и сверка YTM с MOEX (issues #2, #3) для JSON-строки бумаги.
+
+    row — строка выборки: ytm_percent, maturity_date, offer_date, moex_yield, moex_yield_date.
+    ytm_check: None (нет нашей YTM) | 'no_moex_data' | 'ok' | 'mismatch' (разница > порога
+    или другой горизонт). Наш ytm_pct под MOEX не подгоняется — только пометка.
+    """
+    ytm = row.get('ytm_percent')
+    horizon, ytm_to = ytm_horizon_date(row.get('maturity_date'), row.get('offer_date'))
+    moex = row.get('moex_yield')
+    moex_pct = round(float(moex), 2) if moex is not None else None
+    if ytm is None:
+        return {'ytm_to': None, 'moex_yield_pct': moex_pct, 'ytm_check': None}
+    if moex_pct is None:
+        check = 'no_moex_data'
+    else:
+        limit = _ytm_check_threshold_pp() if threshold_pp is None else threshold_pp
+        moex_date = _parse_date(row.get('moex_yield_date'))
+        off_horizon = moex_date is not None and horizon is not None and moex_date != horizon
+        check = 'mismatch' if off_horizon or abs(float(ytm) - moex_pct) > limit else 'ok'
+    return {'ytm_to': ytm_to, 'moex_yield_pct': moex_pct, 'ytm_check': check}
 
 
 def calculate_bond_cashflow_metrics(
@@ -87,10 +138,8 @@ def calculate_bond_cashflow_metrics(
     m_date = _parse_date(maturity_date)
     if m_date is None or m_date <= v_date:
         return CashflowMetrics(null_reason='maturity_missing_or_past')
-    o_date = _parse_date(offer_date)
-    if o_date is not None and v_date < o_date < m_date:
-        # shortcut: выкуп по 100% номинала; если появятся выпуски с BUYBACKPRICE≠100 — хранить цену выкупа
-        m_date = o_date
+    # shortcut: выкуп по 100% номинала; если появятся выпуски с BUYBACKPRICE≠100 — хранить цену выкупа
+    m_date, _ = ytm_horizon_date(m_date, offer_date, v_date)
 
     # 4. Цена (clean-цена в рублях за бумагу)
     if market_price is None or float(market_price) <= 0:
