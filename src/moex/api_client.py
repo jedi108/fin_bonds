@@ -323,30 +323,19 @@ class MoexApiClient(IMoexApiClient):
         logger.info("Загрузка всех облигаций с MOEX API. Это может занять некоторое время...")
 
         for board in boards:
-            start = 0
-            while True:
-                endpoint = f"/engines/stock/markets/bonds/boards/{board}/securities.json"
-                params = {
-                    'iss.meta': 'off',
-                    'iss.only': 'securities',
-                    'securities.columns': ','.join(columns),
-                    'limit': 100,
-                    'start': start
-                }
-                
-                data = self._make_request(endpoint, params)
-                securities = self._format_iss_response(data.get('securities', {})) if data else []
+            # ISS отдаёт доску целиком и игнорирует start/limit — пагинация зацикливалась
+            endpoint = f"/engines/stock/markets/bonds/boards/{board}/securities.json"
+            params = {
+                'iss.meta': 'off',
+                'iss.only': 'securities',
+                'securities.columns': ','.join(columns),
+            }
+            data = self._make_request(f"{self.base_url}{endpoint}", params)
+            for bond in self._format_iss_response(data.get('securities', {})) if data else []:
+                isin = bond.get('ISIN')
+                if isin and isin not in all_bonds:
+                    all_bonds[isin] = bond
 
-                if not securities:
-                    break
-
-                for bond in securities:
-                    isin = bond.get('ISIN')
-                    if isin and isin not in all_bonds:
-                        all_bonds[isin] = bond
-                
-                start += 100
-            
             logger.info(f"Загружено {len(all_bonds)} уникальных облигаций после сканирования доски {board}.")
 
         logger.info(f"Всего загружено {len(all_bonds)} уникальных облигаций с MOEX.")
