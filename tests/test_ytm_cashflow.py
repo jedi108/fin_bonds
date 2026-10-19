@@ -199,3 +199,30 @@ def test_intentional_null_reasons_contract():
     )
     assert m_rate.ytm is None
     assert m_rate.null_reason == 'coupon_rate_missing_or_negative'
+
+
+# issue #1: фикс-купон 19% с put-офертой через ~месяц. К погашению движок
+# давал ~18.8% (купон «навсегда»), брокер/MOEX показывают ~14.5% к оферте.
+_PUT_OFFER_CASE = dict(
+    valuation_date=date(2026, 10, 20),
+    nominal=Decimal('1000'),
+    maturity_date=date(2030, 5, 1),
+    coupon_quantity_per_year=12,
+    coupon_rate_percent=Decimal('19.0043'),
+    market_price=Decimal('1005'),
+)
+
+
+def test_ytm_goes_to_future_put_offer():
+    to_maturity = calculate_bond_cashflow_metrics(**_PUT_OFFER_CASE)
+    to_offer = calculate_bond_cashflow_metrics(**_PUT_OFFER_CASE, offer_date=date(2026, 11, 23))
+    assert abs(float(to_maturity.ytm) - 0.1881) < 5e-4
+    # к оферте YTM существенно ниже купона и не подменяется купонной ставкой
+    assert 0.12 < float(to_offer.ytm) < 0.16
+    assert float(to_offer.duration_macaulay) < 0.2
+
+
+@pytest.mark.parametrize('offer', [None, date(2026, 10, 1), date(2030, 5, 1), date(2031, 1, 1)])
+def test_past_or_non_binding_offer_is_ignored(offer):
+    base = calculate_bond_cashflow_metrics(**_PUT_OFFER_CASE)
+    assert calculate_bond_cashflow_metrics(**_PUT_OFFER_CASE, offer_date=offer) == base

@@ -7,7 +7,7 @@ import logging
 import os
 import csv
 from decimal import Decimal
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List, TYPE_CHECKING
 from dataclasses import dataclass, asdict
 import argparse
@@ -32,6 +32,13 @@ def money_value_to_decimal(money_value: Optional[MoneyValue]) -> Decimal:
     if not money_value:
         return Decimal(0)
     return quotation_to_decimal(money_value)
+
+
+def _parse_moex_date(value: Optional[str]) -> Optional[date]:
+    """Дата ISS 'YYYY-MM-DD'; пусто/'0000-00-00' -> None."""
+    if not value or value.startswith('0000'):
+        return None
+    return date.fromisoformat(value[:10])
 
 
 def fetch_and_prepare_bond_details(bond: Bond) -> BondDTO:
@@ -206,6 +213,15 @@ class UpdateBondsCatalogUseCase(UseCase):
         """
         # Шаг 4: Обновляем данные из MOEX
         self.logger.info("--- Обновление данных с MOEX (листинг, купон) ---")
+        # issue #1: T-Bank не отдаёт оферту — без этого шага у фиксов offer_date
+        # пуст и YTM считается к погашению вместо оферты.
+        offers = {
+            isin: _parse_moex_date(sec.get('OFFERDATE'))
+            for isin, sec in self.moex_client.fetch_all_bonds_data().items()
+        }
+        changed = self.db.update_offer_dates(offers)
+        self.logger.info(f"Даты оферт MOEX: изменено {changed} из {len(offers)}.")
+
         bonds_to_update = self.db.get_bonds_for_moex_update()
         self.logger.info(f"Найдено {len(bonds_to_update)} облигаций для обновления.")
         

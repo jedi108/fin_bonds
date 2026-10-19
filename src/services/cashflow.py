@@ -51,12 +51,17 @@ def calculate_bond_cashflow_metrics(
     perpetual_flag: Optional[bool] = None,
     floating_coupon_flag: Optional[bool] = None,
     amortization_flag: Optional[bool] = None,
+    offer_date: Optional[Union[date, datetime, str]] = None,
 ) -> CashflowMetrics:
     """
     Чистая функция cashflow-решателя.
 
     Возвращает ytm (долей единицы), duration_macaulay и duration_modified (в годах),
     либо null_reason с одной из контрактных причин.
+
+    Горизонт (issue #1): при будущей put-оферте раньше погашения расчёт идёт
+    к оферте с выкупом по номиналу — купоны после оферты неизвестны, так
+    считают MOEX и брокер. Иначе — к погашению.
 
     Единицы ytm — внутренний контракт движка (005.4): хранение (bonds_catalog.ytm)
     и вывод CLI — в процентах годовых; конвертация ×100 выполняется на границах
@@ -82,6 +87,10 @@ def calculate_bond_cashflow_metrics(
     m_date = _parse_date(maturity_date)
     if m_date is None or m_date <= v_date:
         return CashflowMetrics(null_reason='maturity_missing_or_past')
+    o_date = _parse_date(offer_date)
+    if o_date is not None and v_date < o_date < m_date:
+        # shortcut: выкуп по 100% номинала; если появятся выпуски с BUYBACKPRICE≠100 — хранить цену выкупа
+        m_date = o_date
 
     # 4. Цена (clean-цена в рублях за бумагу)
     if market_price is None or float(market_price) <= 0:

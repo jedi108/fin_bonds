@@ -412,6 +412,7 @@ class CalculateYtmUseCase(UseCase):
                     perpetual_flag=bond.get('perpetual_flag'),
                     floating_coupon_flag=bond.get('floating_coupon_flag'),
                     amortization_flag=bond.get('amortization_flag'),
+                    offer_date=bond.get('offer_date'),
                 )
                 if metrics.ytm is not None:
                     # движок возвращает долю единицы — в выводе проценты

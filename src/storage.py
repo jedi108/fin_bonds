@@ -463,7 +463,8 @@ class PortfolioStorage:
                     currency = excluded.currency,
                     nominal = excluded.nominal,
                     maturity_date = excluded.maturity_date,
-                    offer_date = excluded.offer_date,
+                    -- T-Bank SDK не отдаёт оферту (issue #1): NULL источника не затирает дату MOEX
+                    offer_date = COALESCE(excluded.offer_date, bonds_catalog.offer_date),
                     coupon_quantity_per_year = excluded.coupon_quantity_per_year,
                     coupon_rate_percent = COALESCE(excluded.coupon_rate_percent, bonds_catalog.coupon_rate_percent),
                     coupon_type = COALESCE(excluded.coupon_type, bonds_catalog.coupon_type),
@@ -591,6 +592,33 @@ class PortfolioStorage:
         cursor.execute("SELECT COUNT(*) AS total, COUNT(company_id) AS linked FROM bonds_catalog")
         row = cursor.fetchone()
         return row['total'], row['linked']
+
+    def update_offer_dates(self, offers: Dict[str, Optional[date]]) -> int:
+        """Синхронизирует offer_date с MOEX (issue #1) и пересчитывает YTM изменённых.
+
+        offers — {isin: дата оферты или None}; ISIN вне словаря не трогаются.
+        """
+        if not offers:
+            return 0
+        cursor = self._cursor()
+        cursor.execute(
+            "SELECT isin, offer_date FROM bonds_catalog WHERE isin = ANY(%s)",
+            (list(offers),),
+        )
+        changed = [
+            (offers[r['isin']], r['isin'])
+            for r in cursor.fetchall()
+            if r['offer_date'] != offers[r['isin']]
+        ]
+        if not changed:
+            return 0
+        with self.conn:
+            cursor.executemany(
+                "UPDATE bonds_catalog SET offer_date = %s, updated_at = CURRENT_TIMESTAMP WHERE isin = %s",
+                changed,
+            )
+        self.update_bonds_derived_metrics([isin for _, isin in changed])
+        return len(changed)
 
     def get_bonds_for_moex_update(self) -> List[Bond]:
         """
@@ -1815,7 +1843,7 @@ class PortfolioStorage:
             cursor.execute("""
                 SELECT isin, nominal, maturity_date, coupon_quantity_per_year,
                        coupon_rate_percent, market_price, perpetual_flag,
-                       floating_coupon_flag, amortization_flag
+                       floating_coupon_flag, amortization_flag, offer_date
                 FROM bonds_catalog
                 WHERE isin = ANY(%s)
             """, (unique_isins,))
@@ -1823,7 +1851,7 @@ class PortfolioStorage:
             cursor.execute("""
                 SELECT isin, nominal, maturity_date, coupon_quantity_per_year,
                        coupon_rate_percent, market_price, perpetual_flag,
-                       floating_coupon_flag, amortization_flag
+                       floating_coupon_flag, amortization_flag, offer_date
                 FROM bonds_catalog
             """)
 
@@ -1843,6 +1871,7 @@ class PortfolioStorage:
                 perpetual_flag=r['perpetual_flag'],
                 floating_coupon_flag=r['floating_coupon_flag'],
                 amortization_flag=r['amortization_flag'],
+                offer_date=r['offer_date'],
             )
             update_data.append((
                 metrics.duration_macaulay,
