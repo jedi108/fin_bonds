@@ -4,7 +4,6 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from src.storage import PortfolioStorage
 from src.monitoring.plotter import filter_rating_changes
-from src.utils import load_isins_from_file
 from src.use_cases.base import UseCase
 
 # Предотвращаем циклический импорт для type hints
@@ -36,11 +35,14 @@ class CheckChangesUseCase(UseCase):
     def execute(self, args: argparse.Namespace):
         logger.info("Проверка изменений в рейтингах...")
         
-        isins_file_path = self.config.get('portfolio_isins_txt_file')
-        isins = load_isins_from_file(isins_file_path)
+        # Источник истины для риск-проверки — активные позиции PostgreSQL,
+        # а не устаревающий data/portfolio.txt.
+        portfolio_bonds = self.db.get_portfolio_bonds_for_monitoring()
+        isins = sorted({bond.isin for bond in portfolio_bonds if bond.isin})
         if not isins:
-            logger.warning("Список ISIN для обработки пуст. Проверка невозможна.")
+            logger.warning("Активные позиции в PostgreSQL не найдены. Проверка невозможна.")
             return
+        logger.info("Загружено %d ISIN-кодов из активного портфеля PostgreSQL.", len(isins))
 
         history = self.db.get_rating_history_for_bonds(isins)
         

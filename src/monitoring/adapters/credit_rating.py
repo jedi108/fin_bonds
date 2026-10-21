@@ -49,6 +49,11 @@ class CreditRatingAdapter(BaseAdapter):
             used_provider = None
             logger.info(f"Рейтинг не найден ни одним провайдером для {isin}. Сохраняем 'N/A'.")
 
+        # Снимаем предыдущий нормализованный балл до записи текущего.
+        # Это позволяет классифицировать downgrade в том же прогоне.
+        previous_history = self.db.get_rating_history_for_bonds([isin]).get(isin, [])
+        previous_score = previous_history[-1][1] if previous_history else None
+
         # Сохраняем результат в базу
         self.db.add_monitoring_check(isin, self.name, str(current_rating_value))
 
@@ -75,17 +80,32 @@ class CreditRatingAdapter(BaseAdapter):
                 "в rating_history не пишется (остался только в monitoring_checks)."
             )
 
-        # Формируем сообщение
+        # Формируем сообщение и классифицируем изменение до/после.
+        rating_changed = (
+            previous_score is not None
+            and rating_score is not None
+            and previous_score != rating_score
+        )
+        is_downgrade = rating_changed and rating_score < previous_score
+        is_upgrade = rating_changed and rating_score > previous_score
+        is_significant = is_downgrade or (
+            is_upgrade and self.config.get('send_alerts_for_upgrades', True)
+        )
         if current_rating_value == 'N/A':
-            message = f"Рейтинг не найден ни одним провайдером"
+            message = "Рейтинг не найден ни одним провайдером"
+        elif rating_changed:
+            message = (
+                f"Рейтинг изменился: {normalize_rating_code(current_rating_value)} "
+                f"({previous_score} -> {rating_score}, {used_provider})"
+            )
         else:
             message = f"Рейтинг: {current_rating_value} ({used_provider})"
 
         return MonitoringResult(
             adapter_name=self.name,
             isin=isin,
-            status='success',
+            status='changed' if rating_changed else 'success',
             message=message,
             value=current_rating_value,
-            is_significant=False
+            is_significant=is_significant
         )

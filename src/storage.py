@@ -333,7 +333,7 @@ class PortfolioStorage:
             SELECT r.isin, r.rating_date, r.rating_score
             FROM rating_history r
             WHERE r.isin = ANY(%s)
-            ORDER BY r.isin, r.rating_date
+            ORDER BY r.isin, r.rating_date, r.id
         """
         cursor.execute(query, (isins,))
         history_data = defaultdict(list)
