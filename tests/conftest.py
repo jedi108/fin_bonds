@@ -26,6 +26,7 @@ _TABLES = (
     'liquidity_history',
     'monitoring_checks',
     'portfolio_cash_balances',
+    'company_debt_snapshots',
 )
 
 

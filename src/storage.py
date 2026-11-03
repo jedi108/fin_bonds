@@ -593,6 +593,97 @@ class PortfolioStorage:
         row = cursor.fetchone()
         return row['total'], row['linked']
 
+    # Долговая нагрузка компаний (issue #4, миграция 017)
+
+    def find_companies_for_debt(self, inn: Optional[str], name: Optional[str]) -> List[Dict[str, Any]]:
+        """Ищет компании для импорта долга БЕЗ создания: сначала по ИНН, затем по имени.
+
+        Возвращает список совпадений (пустой — нет; >1 — неоднозначно). Имя
+        сравнивается целиком, без учёта регистра (ICU-коллация, как в upsert_company).
+        """
+        cursor = self._cursor()
+        if inn:
+            cursor.execute("SELECT id, name, inn FROM companies WHERE inn = %s", (inn,))
+            rows = cursor.fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+        if name:
+            cursor.execute(
+                "SELECT id, name, inn FROM companies "
+                "WHERE lower(name COLLATE \"und-x-icu\") = lower(%s COLLATE \"und-x-icu\")",
+                (name,)
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        return []
+
+    def upsert_company_debt_snapshot(self, company_id: int, snapshot: Dict[str, Any]) -> bool:
+        """Идемпотентный upsert снимка по (company_id, report_date, source).
+
+        Снимок заменяется целиком: отсутствующие метрики остаются NULL, не 0.
+        Возвращает True, если строка создана, False — если обновлена.
+        """
+        columns = (
+            'report_date', 'source', 'total_debt_rub', 'bond_debt_rub', 'bank_debt_rub',
+            'lease_debt_rub', 'cash_rub', 'net_debt_rub', 'revenue_rub', 'ebitda_rub',
+            'issued_bond_volume_rub', 'outstanding_bond_debt_rub', 'coverage_status',
+            'quality_status', 'source_ref', 'notes',
+        )
+        updatable = [c for c in columns if c not in ('report_date', 'source')]
+        sets = ', '.join(f"{c} = excluded.{c}" for c in updatable)
+        with self.conn:
+            cursor = self._cursor()
+            cursor.execute(
+                f"INSERT INTO company_debt_snapshots (company_id, {', '.join(columns)}) "
+                f"VALUES (%s, {', '.join(['%s'] * len(columns))}) "
+                f"ON CONFLICT (company_id, report_date, source) DO UPDATE SET "
+                f"{sets}, retrieved_at = now() "
+                f"RETURNING (xmax = 0) AS inserted",
+                (company_id, *[snapshot.get(c) for c in columns])
+            )
+            return bool(cursor.fetchone()['inserted'])
+
+    def get_company_bond_aggregates(self) -> List[Dict[str, Any]]:
+        """Компании-юрлица (entity_type='company') с агрегатами выпусков каталога.
+
+        issued_bond_volume_rub = SUM(issue_size * nominal) только по RUB-выпускам, где
+        известны оба множителя; nominal — ТЕКУЩИЙ номинал от брокера (после
+        амортизации), поэтому это оценка объёма размещения, не остаток долга.
+        Погашенные выпуски (maturity_date < CURRENT_DATE) не учитываются вовсе;
+        не-RUB выпуски входят в issues_count, но не в объём (issued_volume_partial).
+        """
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT c.id AS company_id, c.name, c.inn,
+                   COUNT(b.isin) AS issues_count,
+                   COUNT(b.isin) FILTER (
+                       WHERE b.issue_size IS NOT NULL AND b.nominal IS NOT NULL
+                         AND lower(b.currency) = 'rub'
+                   ) AS issues_with_volume_count,
+                   SUM(b.issue_size * b.nominal) FILTER (
+                       WHERE lower(b.currency) = 'rub'
+                   ) AS issued_bond_volume_rub
+            FROM companies c
+            JOIN bonds_catalog b ON b.company_id = c.id
+                 AND (b.maturity_date IS NULL OR b.maturity_date >= CURRENT_DATE)
+            WHERE c.entity_type = 'company'
+            GROUP BY c.id
+            ORDER BY c.id
+        """)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_latest_company_debt_snapshots(self) -> Dict[int, Dict[str, Any]]:
+        """Последний снимок долга по каждой компании: {company_id: строка}.
+
+        «Последний» — по report_date, при равенстве — по retrieved_at.
+        """
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (company_id) *
+            FROM company_debt_snapshots
+            ORDER BY company_id, report_date DESC, retrieved_at DESC, id DESC
+        """)
+        return {r['company_id']: dict(r) for r in cursor.fetchall()}
+
     def update_offer_dates(self, offers: Dict[str, Optional[date]]) -> int:
         """Синхронизирует offer_date с MOEX (issue #1) и пересчитывает YTM изменённых.
 
