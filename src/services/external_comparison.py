@@ -96,6 +96,22 @@ RATE_SCENARIO_SHIFTS_BPS = (-200, -100, 0, 100, 200)
 
 _YTM_TO_VALUES = ('offer', 'maturity')
 
+# P1.5 issue #5: поля контракта, добавляемые в плоские строки calculate-ytm /
+# rebalance-report / экспортов. Только добавление — прежние ключи не меняются.
+ROW_CONTRACT_KEYS = ('contract_version', 'rating_status', 'blockers', 'warnings')
+
+# Группы контракта → плоские ключи строки (публикуются в JSON как row_contract).
+ROW_CONTRACT_GROUPS = {
+    'identity': ('isin', 'name', 'ticker', 'issuer', 'ku'),
+    'market': ('price',),
+    'yield': ('coupon_kind', 'ytm_pct', 'ytm_reason', 'ytm_to', 'moex_yield_pct', 'ytm_check',
+              'coupon_pct', 'freq', 'maturity', 'offer', 'amort'),
+    'credit': ('credit_rating', 'rating_status', 'risk_level', 'list_level'),
+    'portfolio': ('qty', 'avg_price', 'price_change_pct', 'value', 'share_pct', 'issuer_pct',
+                  'held_badge', 'coupon_month_per_bond', 'coupon_month'),
+    'decision': ('blockers', 'warnings'),
+}
+
 
 # ---------------------------------------------------------------------------
 # Загрузка и нормализация внешнего списка
@@ -617,6 +633,41 @@ def _portfolio_group(isin, company_id, qty, planned_value, by_isin, issuer_total
         'planned_value_rub': round(planned_value, 2) if planned_value is not None else None,
         'same_issuer_existing_exposure': company_id in issuer_totals and (issuer_value is None or issuer_value > 0),
         'same_issuer_held_isins': other_held,
+    }
+
+
+def catalog_row_contract(row: Dict[str, Any], as_of_date: Optional[date] = None) -> Dict[str, Any]:
+    """Поля контракта (ROW_CONTRACT_KEYS) для строки каталога/позиции без внешних данных.
+
+    Те же правила, что у build_comparison_row: рейтинг без порога — warning,
+    FIX без YTM и отсутствующая цена каталога — blockers.
+    shortcut: возраст цены и ставки флоатера не проверяется (в строках нет
+    market_price_updated_at/даты ставки) — добавить, когда колонки попадут в выборки.
+    """
+    issues = _Issues()
+    credit = classify_rating(row, None, as_of_date or date.today(), None)
+    _rating_issues(credit, None, None, issues)
+    price = _to_float(row.get('market_price'))
+    if price is None or price <= 0:
+        issues.block(PRICE_STALE, "рыночная цена каталога отсутствует")
+    if not row.get('floating_coupon_flag') and row.get('ytm_percent') is None:
+        issues.block(YTM_MISSING, f"локальная YTM не определена ({row.get('ytm_reason') or 'not_applicable'})")
+    return {
+        'contract_version': CONTRACT_VERSION,
+        'rating_status': credit['rating_status'],
+        'blockers': issues.blockers,
+        'warnings': issues.warnings,
+    }
+
+
+def row_contract_meta(row_keys) -> Dict[str, Any]:
+    """Самодокументация контракта для JSON-вывода: версия + группы ключей строки."""
+    return {
+        'contract_version': CONTRACT_VERSION,
+        'groups': {
+            group: [key for key in keys if key in row_keys]
+            for group, keys in ROW_CONTRACT_GROUPS.items()
+        },
     }
 
 

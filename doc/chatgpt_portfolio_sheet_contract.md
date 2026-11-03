@@ -5,7 +5,7 @@
 портфеля и кандидатного контекста для ревью ребалансировки внешним агентом
 (ChatGPT). Документ не содержит данных портфеля — только формат.
 
-Рабочие листы (schema_version = 4): `CONTROL`, `SCHEMA`, `PORTFOLIO`,
+Рабочие листы (schema_version = 6): `CONTROL`, `SCHEMA`, `PORTFOLIO`,
 `CANDIDATES`. Других листов нет.
 
 Runtime source-of-truth для потребителя — сам лист `SCHEMA` в таблице: он
@@ -33,7 +33,7 @@ Runtime source-of-truth для потребителя — сам лист `SCHEM
    (sync ещё не выполнялся или последний sync не удался) — это НЕ ноль:
    не считать свободные деньги нулём и не предполагать их отсутствие.
 
-## CONTROL — ключи (schema_version = 4)
+## CONTROL — ключи (schema_version = 6)
 
 | Ключ | Смысл |
 |---|---|
@@ -72,7 +72,7 @@ Cash-поля (`cash_available_rub` / `investable_total_rub` / `cash_updated_at`
 - Семантика пустых значений: пустая ячейка значения — осознанный NULL из
   canonical-модели, причина лежит в соседней колонке `*_reason` (см. ниже).
 
-## PORTFOLIO — колонки (schema_version = 4)
+## PORTFOLIO — колонки (schema_version = 6)
 
 | Колонка | Единицы / формат | Смысл |
 |---|---|---|
@@ -102,8 +102,11 @@ Cash-поля (`cash_available_rub` / `investable_total_rub` / `cash_updated_at`
 | `modified_duration` | годы | Модифицированная дюрация; пусто — см. `duration_reason` |
 | `duration_reason` | строка или пусто | Причина пустых `duration`/`modified_duration` |
 | `liquidity_loss_pct` | % (0–100) | Оценка потерь при выходе из позиции по рынку (взвешенная по позиции); имя унаследовано, в БД колонка называется `liquidity_loss_ratio`, но хранит проценты |
+| `rating_status` | строка | Контракт строки (P1.5, issue #5): `confirmed` — валидный рейтинг выпуска из `rating_history` не старше 365 дней; иначе `stale` / `invalid` / `missing` / `proxy_only` (есть только `risk_level`/`list_level` — рейтинг они **не** подтверждают) |
+| `blockers` | коды через запятую или пусто | Reason codes, из-за которых строку нельзя использовать для решения (`YTM_MISSING`, `PRICE_STALE`) |
+| `warnings` | коды через запятую или пусто | Reason codes предупреждений (`RATING_MISSING`, `RATING_STALE`, …) |
 
-## CANDIDATES — колонки (schema_version = 4)
+## CANDIDATES — колонки (schema_version = 6)
 
 Кандидаты buy-выборки канонического скринера rebalance-report:
 `screener.fixed[]` и `screener.floater[]` идут в один набор на одном листе,
@@ -135,6 +138,9 @@ shrink не оставляет хвостов предыдущего снапш�
 | `ku` | TRUE/FALSE | Бумага доступна только квалифицированным инвесторам |
 | `issuer_pct_current` | % (доля × 100) | Текущая доля эмитента в портфеле **до** гипотетической покупки (сам кандидат в ней не учтён) |
 | `held_badge` | строка или пусто | Непустой, если кандидат уже держится в портфеле (контекст `include_held=True`); формат `held (N%)` |
+| `rating_status` | строка | Контракт строки (P1.5, issue #5): `confirmed` — валидный рейтинг выпуска из `rating_history` не старше 365 дней; иначе `stale` / `invalid` / `missing` / `proxy_only` (есть только `risk_level`/`list_level` — рейтинг они **не** подтверждают) |
+| `blockers` | коды через запятую или пусто | Reason codes, из-за которых строку нельзя использовать для решения (`YTM_MISSING`, `PRICE_STALE`) |
+| `warnings` | коды через запятую или пусто | Reason codes предупреждений (`RATING_MISSING`, `RATING_STALE`, …) |
 
 Кандидаты — не портфель: у них нет qty/value/duration/liquidity (покрытие вне
 портфеля неполное, этих полей нет в каноническом скринере); рейтинг с 025

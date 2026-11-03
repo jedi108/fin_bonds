@@ -102,6 +102,7 @@ from src.services.rebalance_engine import (
     value_mix,
 )
 from src.services.company_debt import build_debt_overlay
+from src.services.external_comparison import row_contract_meta
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.bond_filters import (
@@ -482,6 +483,8 @@ class RebalanceReportUseCase(UseCase):
             'concentrations': concentrations,
             'screener': screener,
             'redemptions_6m': redemptions,
+            # P1.5 issue #5: версия и группы контракта строк BOND_ROW_KEYS
+            'row_contract': row_contract_meta(SCENARIO_POSITION_KEYS),
         }
         if scenario is not None:
             report['scenario'] = scenario

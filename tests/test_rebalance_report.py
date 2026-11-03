@@ -272,7 +272,7 @@ class TestGoldenSchema:
     def test_top_level_keys_and_version(self):
         assert set(self.report.keys()) == {
             'schema_version', 'meta', 'portfolio', 'concentrations',
-            'screener', 'redemptions_6m', 'artifacts',
+            'screener', 'redemptions_6m', 'row_contract', 'artifacts',
         }
         assert self.report['schema_version'] == SCHEMA_VERSION == 2
 
@@ -468,7 +468,7 @@ class TestGoldenSchema:
         assert data['schema_version'] == 2
         assert set(data.keys()) == {
             'schema_version', 'meta', 'portfolio', 'concentrations',
-            'screener', 'redemptions_6m', 'artifacts',
+            'screener', 'redemptions_6m', 'row_contract', 'artifacts',
         }
 
 

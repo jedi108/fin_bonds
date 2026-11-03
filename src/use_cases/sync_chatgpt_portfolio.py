@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from src.services.cashflow import ytm_check_fields
+from src.services.external_comparison import catalog_row_contract
 from src.services.google_sheets import GoogleSheetsPortfolioPublisher
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
@@ -69,7 +70,9 @@ logger = logging.getLogger(__name__)
 # v4 (025): CONTROL + cash контекст (cash_available_rub/investable_total_rub/
 # cash_updated_at; unknown = пустая ячейка), CANDIDATES + credit_rating.
 # v5 (issues #2/#3): ytm_to (горизонт YTM) + moex_yield_pct/ytm_check (сверка с MOEX).
-SCHEMA_VERSION = 5
+# v6 (P1.5 issue #5): контракт строки — rating_status, blockers, warnings в
+# PORTFOLIO и CANDIDATES (колонки добавлены в конец, прежние не сдвигаются).
+SCHEMA_VERSION = 6
 PORTFOLIO_HEADERS = (
     "isin",
     "name",
@@ -100,6 +103,9 @@ PORTFOLIO_HEADERS = (
     "modified_duration",
     "duration_reason",
     "liquidity_loss_pct",
+    "rating_status",
+    "blockers",
+    "warnings",
 )
 
 # 020: versioned definition колонок PORTFOLIO для самодокументируемого листа
@@ -135,6 +141,9 @@ PORTFOLIO_SCHEMA = (
     ("modified_duration", "years or empty", "Modified duration"),
     ("duration_reason", "string or empty", "Reason for empty duration/modified_duration; empty when calculated"),
     ("liquidity_loss_pct", "percent", "Estimated loss when exiting the position at market, weighted by position (legacy name; the DB column is liquidity_loss_ratio but stores percent)"),
+    ("rating_status", "string", "Row contract (P1.5): confirmed = valid issue rating from rating_history not older than 365 days; stale / invalid / missing / proxy_only (only Tinkoff risk_level or MOEX list_level, which do NOT confirm a rating). Only confirmed is a confirmed rating"),
+    ("blockers", "codes or empty", "Row contract: comma-separated reason codes that make the row unusable for a decision (e.g. YTM_MISSING, PRICE_STALE); empty when none"),
+    ("warnings", "codes or empty", "Row contract: comma-separated warning reason codes (e.g. RATING_MISSING, RATING_STALE); empty when none"),
 )
 
 # 008: предупреждение только для веток, где value_rub не равен quantity*price_rub
@@ -152,6 +161,11 @@ def _float(value: Any) -> Optional[float]:
     if value is None:
         return None
     return float(value)
+
+
+def _codes(items: List[Dict[str, str]]) -> Optional[str]:
+    """blockers[]/warnings[] контракта -> ячейка 'CODE1,CODE2' (пусто, если нет)."""
+    return ",".join(item["code"] for item in items) or None
 
 
 def _iso(value: Any) -> Optional[str]:
@@ -190,6 +204,9 @@ CANDIDATE_HEADERS = (
     "ku",
     "issuer_pct_current",
     "held_badge",
+    "rating_status",
+    "blockers",
+    "warnings",
 )
 
 # 020: versioned definition колонок CANDIDATES для листа SCHEMA.
@@ -217,6 +234,9 @@ CANDIDATE_SCHEMA = (
     ("ku", "boolean", "TRUE when the bond is available only to qualified investors"),
     ("issuer_pct_current", "percent", "Current issuer share in the portfolio BEFORE the hypothetical purchase (the candidate itself is not counted in it)"),
     ("held_badge", "string or empty", "Non-empty when the candidate is already held in the portfolio (include_held export context); format: held (N%)"),
+    ("rating_status", "string", "Row contract (P1.5): confirmed = valid issue rating from rating_history not older than 365 days; stale / invalid / missing / proxy_only (only Tinkoff risk_level or MOEX list_level, which do NOT confirm a rating). Only confirmed is a confirmed rating"),
+    ("blockers", "codes or empty", "Row contract: comma-separated reason codes that make the row unusable for a decision (e.g. YTM_MISSING, PRICE_STALE); empty when none"),
+    ("warnings", "codes or empty", "Row contract: comma-separated warning reason codes (e.g. RATING_MISSING, RATING_STALE); empty when none"),
 )
 
 # 020: самодокументация контракта. SCHEMA описывает все поля CONTROL,
@@ -226,7 +246,7 @@ SCHEMA_HEADERS = ("sheet", "field", "type_or_unit", "description")
 
 CONTROL_SCHEMA = (
     ("sync_status", "string", "WRITING while data sheets are being written; READY only after PORTFOLIO and CANDIDATES are written and both row counts verified (commit-marker)"),
-    ("schema_version", "count", "Version of the sheet contract (4 = cash context in CONTROL and credit_rating in CANDIDATES)"),
+    ("schema_version", "count", "Version of the sheet contract (6 = row contract columns rating_status/blockers/warnings in PORTFOLIO and CANDIDATES)"),
     ("snapshot_id", "string", "UTC snapshot id (YYYYMMDDThhmmssZ) identifying one sync run"),
     ("generated_at", "ISO datetime", "UTC time when the snapshot was generated"),
     ("gate_status", "string", "Freshness gate result (OK/WARN/BLOCKED); exports with not-fresh data are not published"),
@@ -335,6 +355,9 @@ def build_candidates_payload(
                 "ku": row["ku"],
                 "issuer_pct_current": row["issuer_pct"],
                 "held_badge": row["held_badge"],
+                "rating_status": row["rating_status"],
+                "blockers": _codes(row["blockers"]),
+                "warnings": _codes(row["warnings"]),
             }
             rows.append([values[column] for column in CANDIDATE_HEADERS])
 
@@ -502,6 +525,10 @@ class SyncChatgptPortfolioUseCase(UseCase):
                 ),
                 "liquidity_loss_pct": _float(row.get("liquidity_loss_ratio")),
             }
+            contract = catalog_row_contract(row)
+            values["rating_status"] = contract["rating_status"]
+            values["blockers"] = _codes(contract["blockers"])
+            values["warnings"] = _codes(contract["warnings"])
             table_rows.append([values[column] for column in PORTFOLIO_HEADERS])
 
         # 020: кандидаты — только из канонического отчёта rebalance-report

@@ -211,14 +211,14 @@ def test_reason_columns_follow_value_columns():
         PORTFOLIO_HEADERS.index("duration_reason")
         == PORTFOLIO_HEADERS.index("modified_duration") + 1
     )
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
 
 
 def test_build_payload_row_values_match_headers_order():
     """Каждая ячейка строки лежит на позиции своего заголовка."""
     control, rows = build_payload(make_rows())
 
-    assert control["schema_version"] == 5
+    assert control["schema_version"] == 6
     assert len(rows[0]) == len(PORTFOLIO_HEADERS)
     expected = {
         "isin": "RU000A",
@@ -327,7 +327,7 @@ def test_valuation_columns_follow_value_column():
         PORTFOLIO_HEADERS.index("valuation_warning")
         == PORTFOLIO_HEADERS.index("valuation_source") + 1
     )
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
 
 
 def test_valuation_warning_by_source():
@@ -712,6 +712,10 @@ def screener_row(**overrides):
         "issuer_pct": None,
         "held_badge": None,
         "credit_rating": "AA-",
+        "contract_version": 1,
+        "rating_status": "confirmed",
+        "blockers": [],
+        "warnings": [],
     }
     row.update(overrides)
     return row
@@ -808,6 +812,9 @@ def test_candidate_projection_fields_match_source_screener():
         "ku": source["ku"],
         "issuer_pct_current": source["issuer_pct"],
         "held_badge": source["held_badge"],
+        "rating_status": source["rating_status"],
+        "blockers": None,  # пустой список кодов -> пустая ячейка
+        "warnings": None,
     }
     assert len(expected) == len(CANDIDATE_HEADERS)
     for column, value in expected.items():
@@ -844,7 +851,7 @@ def test_candidate_projection_carries_screener_metadata():
 def test_p0_portfolio_payload_not_touched_by_candidate_export():
     """P0 PORTFOLIO payload не меняется кандидатным экспортом: колонки те же
     (v3 поднимает только версию контракта), candidate_type/rank не протекают."""
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
     assert PORTFOLIO_HEADERS[0] == "isin"
     assert "candidate_type" not in PORTFOLIO_HEADERS
     assert "rank" not in PORTFOLIO_HEADERS
@@ -1034,7 +1041,7 @@ def test_build_payload_v3_control_fields_and_candidates():
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
 
-    assert control["schema_version"] == 5
+    assert control["schema_version"] == 6
     assert control["positions_count"] == len(rows)
     assert control["candidates_count"] == len(candidate_rows) == 3
     assert json.loads(control["candidate_meta"]) == {
@@ -1070,7 +1077,7 @@ def test_build_payload_v4_control_carries_known_cash():
         datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
     )
 
-    assert control["schema_version"] == 5
+    assert control["schema_version"] == 6
     assert control["portfolio_value_rub"] == 25000
     assert control["cash_available_rub"] == 1234.56
     assert control["investable_total_rub"] == 26234.56

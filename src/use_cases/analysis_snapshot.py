@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from src.services.cashflow import ytm_check_fields
 from src.services.context_store import EphemeralContextStore
+from src.services.external_comparison import catalog_row_contract
 from src.services.planning_context import (
     PlanningContext,
     PlanningContextBuilder,
@@ -508,6 +509,8 @@ class AnalysisSnapshotUseCase(UseCase):
             # Цена расчёта + basis движка (030.2) — релей, не пересчёт.
             'planning_price': _opt_float(planning_price.get('price')),
             'planning_price_basis': planning_price.get('basis'),
+            # P1.5 issue #5: единый контракт строки (rating_status, blockers, warnings)
+            **catalog_row_contract(row),
         }
 
     def _universe_row_payload(

@@ -83,6 +83,8 @@ BOND_ROW_KEYS = (
     'coupon_pct', 'freq',
     'coupon_kind', 'risk_level', 'list_level', 'maturity', 'offer',
     'amort', 'ku', 'issuer', 'issuer_pct', 'held_badge', 'credit_rating',
+    # P1.5 issue #5: единый контракт строки (ROW_CONTRACT_KEYS external_comparison)
+    'contract_version', 'rating_status', 'blockers', 'warnings',
 )
 
 # Ключи строк блока scenario.
@@ -198,6 +200,8 @@ def bond_to_json(
 ) -> Dict[str, Any]:
     """Строка бумаги в каноническом контракте (portfolio, screener и
     scenario.positions_after) — одна форма строки для всего тулкита."""
+    # локальный импорт: external_comparison сам импортирует rebalance_engine
+    from src.services.external_comparison import catalog_row_contract
     value = round(_to_float(row.get('value_rub')) or 0.0, 2)
     share_pct = round(value / total_value * 100, 2) if total_value > 0 else 0.0
 
@@ -242,6 +246,7 @@ def bond_to_json(
         'issuer': issuer,
         'issuer_pct': issuer_shares_map.get(issuer),
         'held_badge': badge,
+        **catalog_row_contract(row),
     }
 
 

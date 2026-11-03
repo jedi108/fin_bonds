@@ -57,6 +57,8 @@ _BOND_JSON_KEYS = (
     'ytm_to', 'moex_yield_pct', 'ytm_check',
     'coupon_pct', 'freq', 'coupon_kind', 'risk_level', 'list_level',
     'maturity', 'offer', 'amort', 'ku', 'issuer', 'coupon_month_per_bond', 'held_badge',
+    # P1.5 issue #5: единый контракт строки (ROW_CONTRACT_KEYS external_comparison)
+    'contract_version', 'rating_status', 'blockers', 'warnings',
 )
 # Дополнение для режима portfolio (позиция портфеля).
 _BOND_JSON_KEYS_PORTFOLIO = _BOND_JSON_KEYS + ('qty', 'avg_price', 'price_change_pct')
@@ -267,6 +269,8 @@ class CalculateYtmUseCase(UseCase):
         """Канонический JSON-ответ calculate-ytm (контракт согласован с
         rebalance-report: schema_version, единицы процентов, структура
         filters/excluded). Ключи строк — _BOND_JSON_KEYS (+_PORTFOLIO)."""
+        # локальный импорт: external_comparison → rebalance_engine → calculate_ytm
+        from src.services.external_comparison import row_contract_meta
         mode = args.mode
         return {
             'schema_version': SCHEMA_VERSION,
@@ -296,6 +300,9 @@ class CalculateYtmUseCase(UseCase):
             'excluded': funnel,
             'candidates_total': candidates_total,
             'count': len(bonds),
+            'row_contract': row_contract_meta(
+                _BOND_JSON_KEYS_PORTFOLIO if mode == 'portfolio' else _BOND_JSON_KEYS
+            ),
             'bonds': [self._bond_to_json(bond, mode) for bond in bonds],
         }
 
@@ -307,6 +314,7 @@ class CalculateYtmUseCase(UseCase):
         % от номинала, freq — раз/год, coupon_month_per_bond — ₽/мес на одну
         бумагу (у позиции портфеля SQL-колонка суммарная — нормируется на qty).
         """
+        from src.services.external_comparison import catalog_row_contract
         price_raw = bond.get('market_price') or bond.get('current_price')
         ytm = bond.get('ytm_percent')
         coupon_month = _to_float(bond.get('total_monthly_coupon_payment'))
@@ -336,6 +344,7 @@ class CalculateYtmUseCase(UseCase):
             'issuer': bond.get('issuer') or bond.get('name') or bond.get('isin'),
             'coupon_month_per_bond': coupon_month,
             'held_badge': bond.get('held_badge'),
+            **catalog_row_contract(bond),
         }
         if mode == 'portfolio':
             row['qty'] = round(_to_float(bond.get('quantity')) or 0.0, 4)

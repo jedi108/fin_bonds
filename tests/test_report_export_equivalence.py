@@ -81,6 +81,8 @@ _CANDIDATE_SOURCE_FIELDS = {
     'ku': 'ku',
     'issuer_pct_current': 'issuer_pct',
     'held_badge': 'held_badge',
+    # P1.5 issue #5: контракт строки (blockers/warnings — коды через запятую)
+    'rating_status': 'rating_status',
 }
 
 
@@ -298,7 +300,16 @@ def test_report_and_sync_candidates_equivalent(db):
         source = source_by_isin[_cand(row, 'isin')]
         for column, key in _CANDIDATE_SOURCE_FIELDS.items():
             assert _cand(row, column) == source[key], (row, column)
+        for column in ('blockers', 'warnings'):
+            codes = ','.join(item['code'] for item in source[column]) or None
+            assert _cand(row, column) == codes, (row, column)
     # Held-бумаги дошли до CANDIDATES с бейджем (include_held=true в обоих).
+    # Контракт строки: рейтинги свежие и в шкале — confirmed; у FIX есть
+    # YTM, у флоатера YTM не требуется — блокеров нет.
+    assert {row['rating_status'] for row in source_by_isin.values()} == {'confirmed'}
+    assert all(row['contract_version'] == 1 and row['blockers'] == []
+               for row in source_by_isin.values())
+    assert report['row_contract']['groups']['decision'] == ['blockers', 'warnings']
     held = {_cand(r, 'isin') for r in candidates
             if (_cand(r, 'held_badge') or '').startswith('held (')}
     assert held == {'RU000A0EQV1', 'RU000A0EQVA'}

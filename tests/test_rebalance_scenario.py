@@ -199,7 +199,7 @@ class TestScenarioTrades:
         # Аддитивность: блок scenario появился, остальные блоки ядра на месте.
         assert set(self.report.keys()) == {
             'schema_version', 'meta', 'portfolio', 'concentrations',
-            'screener', 'redemptions_6m', 'scenario', 'artifacts',
+            'screener', 'redemptions_6m', 'row_contract', 'scenario', 'artifacts',
         }
         assert self.scenario['valid'] is True
         assert self.scenario['errors'] == []

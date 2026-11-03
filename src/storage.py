@@ -63,7 +63,7 @@ _LATEST_FLOATER_RATE_JOIN = """
 _LATEST_RATING_JOIN = """
             LEFT JOIN (
                 SELECT DISTINCT ON (isin)
-                       isin, rating_code AS credit_rating, rating_score
+                       isin, rating_code AS credit_rating, rating_score, rating_date
                 FROM rating_history
                 WHERE rating_code IS NOT NULL
                 ORDER BY isin, rating_date DESC, id DESC
@@ -2888,6 +2888,7 @@ class PortfolioStorage:
                 -- risk_level остаётся отдельным фильтром.
                 lr.credit_rating,
                 lr.rating_score,
+                lr.rating_date,
                 -- 030.8: колонки structural buy gates (контракт raw-строки
                 -- buy_eligibility, 030.6): eligibility-гейт fitter'а
                 -- переоценивает gates строки построчно на frozen as_of —
@@ -3049,6 +3050,7 @@ class PortfolioStorage:
                 -- по целевому портфелю сценария. Тот же паттерн DISTINCT ON.
                 lr.credit_rating,
                 lr.rating_score,
+                lr.rating_date,
                 a.quantity,
                 a.value_rub,
                 a.valuation_source,
@@ -3080,7 +3082,7 @@ class PortfolioStorage:
         cursor.execute(f"""
             WITH latest_ratings AS (
                 SELECT DISTINCT ON (isin)
-                       isin, rating_code
+                       isin, rating_code, rating_score, rating_date
                 FROM rating_history
                 WHERE rating_code IS NOT NULL
                 ORDER BY isin, rating_date DESC, id DESC
@@ -3140,6 +3142,8 @@ class PortfolioStorage:
                 bc.duration_null_reason,
                 bc.duration_updated_at,
                 lr.rating_code AS credit_rating,
+                lr.rating_score,
+                lr.rating_date,
                 co.id AS company_id,
                 co.name AS issuer,
                 co.entity_type,
@@ -3211,6 +3215,7 @@ class PortfolioStorage:
                 -- 024: рейтинг кандидата на покупку для валидатора ограничений
                 lr.credit_rating,
                 lr.rating_score,
+                lr.rating_date,
                 0 AS quantity,
                 0 AS value_rub
             FROM bonds_catalog bc

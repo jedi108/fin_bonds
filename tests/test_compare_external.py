@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 
 from src.services.external_comparison import (
+    catalog_row_contract,
     CONTRACT_VERSION,
     aggregate_held,
     build_comparison_report,
@@ -487,3 +488,25 @@ def test_legacy_compare_is_reference_diff_without_verdict(db: PortfolioStorage, 
     out = capsys.readouterr().out
     assert 'ПОКУПАТЬ' not in out and 'BUY' not in out and 'РЕКОМЕНДУЕТСЯ' not in out
     assert 'maturity' in out  # ytm_to показан
+
+
+def test_catalog_row_contract_for_flat_rows():
+    """P1.5: контракт плоской строки (calculate-ytm/rebalance-report/экспорты)."""
+    today = date(2026, 11, 3)
+    fresh = {'credit_rating': 'AA-', 'rating_score': 10, 'rating_date': date(2026, 6, 1),
+             'market_price': 950, 'ytm_percent': 15.0}
+    ok = catalog_row_contract(fresh, today)
+    assert ok == {'contract_version': 1, 'rating_status': 'confirmed', 'blockers': [], 'warnings': []}
+
+    stale = catalog_row_contract({**fresh, 'rating_date': date(2024, 1, 1)}, today)
+    assert stale['rating_status'] == 'stale'
+    assert [w['code'] for w in stale['warnings']] == ['RATING_STALE']
+
+    # risk_level — proxy, рейтинг не подтверждает; FIX без YTM и без цены — blockers
+    bare = catalog_row_contract({'risk_level': 1, 'ytm_reason': 'perpetual'}, today)
+    assert bare['rating_status'] == 'proxy_only'
+    assert [b['code'] for b in bare['blockers']] == ['PRICE_STALE', 'YTM_MISSING']
+
+    # флоатер: ytm_pct=null не блокер
+    floater = catalog_row_contract({**fresh, 'ytm_percent': None, 'floating_coupon_flag': True}, today)
+    assert floater['blockers'] == []
