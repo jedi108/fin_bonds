@@ -540,7 +540,7 @@ class TestCliWiring:
         assert 'rebalance-report' in use_case_map
         assert 'rebalance-plan' in use_case_map
         assert 'rebalance-analysis-snapshot' in use_case_map
-        assert len(use_case_map) == 39
+        assert len(use_case_map) == 41
 
     def test_build_compare_ab(self, tmp_path):
         """A/B через CLI-флаги: один context, разные ограничения вариантов,

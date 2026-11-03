@@ -33,6 +33,8 @@ from src.use_cases.export_portfolio import ExportPortfolioUseCase
 from src.use_cases.generate_plots import GeneratePlotsUseCase
 from src.use_cases.import_from_sqlite import ImportFromSqliteUseCase
 from src.use_cases.link_companies import LinkCompaniesUseCase
+from src.use_cases.import_company_debt import ImportCompanyDebtUseCase
+from src.use_cases.company_debt_report import CompanyDebtReportUseCase
 from src.use_cases.migrate_db import MigrateDbUseCase
 from src.use_cases.seed_data import SeedDataUseCase
 from src.use_cases.set_spread import SetSpreadUseCase
@@ -173,6 +175,8 @@ class UseCaseFactory:
             'add-bond': AddBondToCatalogUseCase,
             'update-bonds': UpdateBondsCatalogUseCase,
             'link-companies': LinkCompaniesUseCase,
+            'import-company-debt': ImportCompanyDebtUseCase,
+            'company-debt-report': CompanyDebtReportUseCase,
             'update-ratings': UpdateRatingsUseCase,
             'seed-data': SeedDataUseCase,
             'clear-data': ClearDataUseCase,

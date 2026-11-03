@@ -139,6 +139,8 @@ python3 main.py check-changes
 | `update-ratings` | Обновление рейтингов и мониторинга | [📖](doc/commands/update-ratings.md) |
 | `sync-portfolio` | Синхронизация портфеля | [📖](doc/commands/sync-portfolio.md) |
 | `link-companies` | Привязка облигаций к компаниям-эмитентам (backfill и отчёт) | [📖](doc/commands/link-companies.md) |
+| `import-company-debt` | Импорт снимков долга компаний из CSV/JSON (`--file`; обязательны `source`, `report_date`, `source_ref`) | [📖](doc/company_debt_contract.md) |
+| `company-debt-report` | Read-only отчёт по долговой нагрузке эмитентов: объём выпусков, свежесть и покрытие снимков (`--format json\|table`, `--stale-days N`) | [📖](doc/company_debt_contract.md) |
 
 ### 📈 Команды экспорта
 
@@ -548,6 +550,8 @@ python3 main.py export-bonds filtered_bonds.csv --min-maturity 2027-01-01 --max-
 | `update-bonds`         | Обновляет каталог облигаций (основную информацию) в локальной БД из MOEX API. |
 | `update-market-prices` | Обновляет рыночные цены облигаций через TBank API.                        |
 | `link-companies`       | Привязывает облигации каталога к компаниям-эмитентам (юрлицам): backfill и отчёт по группировке. |
+| `import-company-debt`  | Импортирует снимки долга компаний из CSV/JSON (`--file`), идемпотентно; несопоставленные строки только отчитываются. Контракт: [doc/company_debt_contract.md](doc/company_debt_contract.md). |
+| `company-debt-report`  | Read-only отчёт: объём выпусков (`issue_size * nominal`, оценка, не остаток долга), последний снимок долга, свежесть/покрытие, концентрация. `rebalance-report --debt-overlay` добавляет advisory-блок `debt_overlay` (по умолчанию выключен). |
 | `export-bonds`         | Экспортирует отфильтрованный список облигаций в CSV.                          |
 | `add-bond`             | Добавляет одну облигацию в каталог по ISIN.                                 |
 | `update-ratings`       | Обновляет отслеживаемые метрики для облигаций в портфеле (рейтинг, уровень листинга и т.д.); скоупы `--scope missing/catalog` дозаполняют рейтинги по каталогу. |

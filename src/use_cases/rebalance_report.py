@@ -99,6 +99,7 @@ from src.services.rebalance_engine import (
     issuer_shares,
     value_mix,
 )
+from src.services.company_debt import build_debt_overlay
 from src.storage import PortfolioStorage
 from src.use_cases.base import UseCase
 from src.use_cases.bond_filters import (
@@ -344,6 +345,12 @@ class RebalanceReportUseCase(UseCase):
                  '(штуки). Добавляет блок scenario в ответ; при --csv-out CSV '
                  'содержит целевой портфель ПОСЛЕ сделок (005.2).'
         )
+        parser.add_argument(
+            '--debt-overlay', action='store_true',
+            help='Добавить advisory-блок debt_overlay (долговая нагрузка эмитентов '
+                 'портфеля, issue #4). По умолчанию выключен; валидность плана, '
+                 'лимиты и гейты не меняет.'
+        )
 
     @classmethod
     def create(cls, factory: 'UseCaseFactory') -> 'RebalanceReportUseCase':
@@ -476,6 +483,9 @@ class RebalanceReportUseCase(UseCase):
         }
         if scenario is not None:
             report['scenario'] = scenario
+        # issue #4: опциональный advisory-блок; без флага ответ не меняется
+        if getattr(args, 'debt_overlay', False):
+            report['debt_overlay'] = build_debt_overlay(self.db, now.date())
         report['artifacts'] = artifacts
         return report
 

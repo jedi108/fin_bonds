@@ -22,6 +22,8 @@
 | `update-floaters` | Обновление ставок для облигаций-флоатеров | [📖](update-floaters.md) |
 | `update-ratings` | Обновление рейтингов и мониторинга | [📖](update-ratings.md) |
 | `sync-portfolio` | Синхронизация портфеля | [📖](sync-portfolio.md) |
+| `import-company-debt` | Импорт снимков долга компаний из CSV/JSON | [📖](../company_debt_contract.md) |
+| `company-debt-report` | Read-only отчёт по долговой нагрузке эмитентов | [📖](../company_debt_contract.md) |
 
 ### 📈 Экспорт и отчеты
 

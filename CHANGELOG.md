@@ -2,6 +2,20 @@
 
 Все заметные изменения проекта. Стиль — по коммитам: `feat(scope): ... (task NNN)`.
 
+## 2026-11-03
+
+- feat(risk): долговая нагрузка эмитентов и опциональный debt-overlay (issue #4).
+  Миграция 017 `company_debt_snapshots` (ключ company_id+report_date+source,
+  NULL остаётся NULL); `import-company-debt --file <csv|json>` (INN-first, затем
+  имя; несопоставленные строки не вставляются; идемпотентный upsert);
+  `company-debt-report [--format json|table] [--stale-days N]` — объём выпусков
+  `issue_size * nominal` явно как оценка размещения (не остаток долга), свежесть,
+  покрытие, unknowns, концентрация; `rebalance-report --debt-overlay` (по
+  умолчанию выключен, ответ без флага не меняется; план/ограничения не затрагивает).
+  Алиасы идентичности — существующие `company_overrides` + `link-companies`
+  (тест на «ГК Самолет»/«Самолет», старые строки companies не удаляются).
+  Контракт для скиллов: doc/company_debt_contract.md.
+
 ## 2026-10-02
 
 - feat(planning): верхнеуровневый `context_id` в JSON-envelope
