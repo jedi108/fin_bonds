@@ -24,7 +24,7 @@ from src.services.external_comparison import (
 from src.services.planning_context import CashSnapshot, DataGateState, PlanningContext
 from src.storage import PortfolioStorage
 from src.use_cases.analyze_buy_candidates import AnalyzeBuyCandidatesUseCase
-from src.use_cases.compare_external import CompareExternalUseCase
+from src.use_cases.compare_external import CompareExternalUseCase, overlay_context_values
 from src.use_cases.factory import UseCaseFactory
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
@@ -52,7 +52,7 @@ def make_context(held_rows=(), fresh=True):
 def cat(**kw):
     """Строка каталога после enrich_with_ytm (синтетическая)."""
     row = {
-        'isin': 'RU000TEST001', 'ticker': 'TST1', 'name': 'Тест 01', 'nominal': 1000.0,
+        'isin': 'RU000TEST001', 'ticker': 'TST1', 'name': 'Тест 01', 'nominal': 1000.0, 'currency': 'rub',
         'market_price': 980.0, 'market_price_updated_at': NOW - timedelta(hours=1),
         'maturity_date': TODAY + timedelta(days=700), 'offer_date': None,
         'risk_level': 1, 'list_level': 1, 'floating_coupon_flag': False,
@@ -307,6 +307,71 @@ def test_load_external_rows_json_and_csv(tmp_path):
     bad.write_text('{"x": 1}', encoding='utf-8')
     with pytest.raises(ValueError):
         load_external_rows(bad)
+
+
+def test_issuer_limit_is_combined_across_series_and_duplicate_isins():
+    """Две серии эмитента по отдельности ниже лимита, вместе выше -> обе blocked."""
+    held = [_held('RU000TEST901', 2, 900000, 'Другой')]
+    cats = [cat(), cat(isin='RU000TEST002', ticker='TST2', name='Тест 02')]
+    one = run([ext(qty=100)], cats, make_context(held))['rows'][0]  # 98k из 998k ~ 9.8%
+    assert 'ISSUER_LIMIT' not in codes(one['decision']['blockers'])
+    both = run([ext(qty=100), ext(isin='RU000TEST002', qty=100)], cats, make_context(held))
+    assert all('ISSUER_LIMIT' in codes(r['decision']['blockers']) for r in both['rows'])
+    assert both['issuer_matrix'][0]['limit_exceeded'] is True
+    dup = run([ext(qty=100), ext(qty=100)], cats, make_context(held))  # тот же ISIN дважды
+    assert dup['issuer_matrix'][0]['exposure_after_pct'] == round(196000 / 1096000 * 100, 2)
+    assert all(r['decision']['eligibility'] == 'blocked' for r in dup['rows'])
+
+
+def test_external_rating_ru_prefix_is_not_conflict():
+    local = cat(credit_rating='A+', rating_score=16, rating_date=TODAY)
+    assert classify_rating(local, 'RUA+', TODAY, SCALE)['rating_status'] == 'confirmed'
+    assert classify_rating(local, 'ruA+', TODAY, SCALE)['rating_status'] == 'confirmed'
+    assert classify_rating(local, 'RUAA', TODAY, SCALE)['rating_status'] == 'conflicting'
+
+
+def test_local_ytm_date_skew_makes_not_comparable():
+    old = NOW - timedelta(days=10)
+    row = run([ext()], [cat(ytm_updated_at=old)])['rows'][0]
+    assert 'YTM_NOT_COMPARABLE' in codes(row['decision']['warnings'])
+    assert row['decision']['eligibility'] == 'not_comparable' and row['yield']['ytm_diff_pp'] is None
+
+
+def test_non_rub_currency_has_no_planned_value():
+    row = run([ext(qty=10)], [cat(currency='usd')])['rows'][0]
+    assert row['portfolio']['planned_value_rub'] is None
+    assert 'UNSUPPORTED_CURRENCY' in codes(row['decision']['warnings'])
+
+
+def test_unknown_held_value_is_not_zero_and_bad_qty_is_rejected():
+    held = [_held('RU000TEST900', 1, 100000), {**_held('RU000TEST900', 1, 0), 'value_rub': None}]
+    _, issuer_totals, _ = aggregate_held(held)
+    assert issuer_totals == {1: None}
+    row = run([ext()], [cat()], make_context(held))['rows'][0]
+    assert row['portfolio']['issuer_value_rub'] is None and row['portfolio']['issuer_share_before_pct'] is None
+    assert 'HELD_VALUE_UNKNOWN' in codes(row['decision']['warnings'])
+    for qty in ('0', '-5'):
+        bad = run([ext(qty=qty)], [cat()])['rows'][0]
+        assert 'EXTERNAL_VALUE_INVALID' in codes(bad['decision']['blockers'])
+        assert bad['decision']['eligibility'] == 'blocked'
+
+
+def test_identity_tolerates_name_variants_but_not_real_mismatch():
+    local = cat(name='ОФЗ-ПД 26238', ticker='SU26238RMFS4')
+    ok = run([ext(name='ОФЗ 26238')], [local])['rows'][0]
+    assert ok['identity']['match_status'] == 'MATCHED'
+    bad = run([ext(name='ОФЗ 26239')], [local])['rows'][0]
+    assert bad['identity']['match_status'] == 'IDENTITY_CONFLICT'
+
+
+def test_overlay_prefers_context_values_over_catalog():
+    ctx_row = {'isin': 'RU000TEST001', 'market_price': 970.0, 'ytm_percent': 17.0,
+               'market_price_updated_at': NOW, 'ytm_updated_at': NOW}
+    context = make_context()
+    context = PlanningContext(**{**context.__dict__, 'universe_rows': (ctx_row,)})
+    rows = overlay_context_values([cat(), cat(isin='RU000TEST002')], context)
+    assert rows[0]['market_price'] == 970.0 and rows[0]['ytm_percent'] == 17.0
+    assert rows[1]['market_price'] == 980.0  # ISIN вне среза — каталог
 
 
 def test_compare_external_registered_in_cli():

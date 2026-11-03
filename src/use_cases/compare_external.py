@@ -36,6 +36,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Поля цены/YTM, которые для ISIN среза берутся из PlanningContext (а не из повторного запроса).
+_CONTEXT_FIELDS = (
+    'market_price', 'market_price_updated_at', 'ytm', 'ytm_percent', 'ytm_reason',
+    'ytm_null_reason', 'ytm_updated_at',
+)
+
+
+def overlay_context_values(catalog, context):
+    """Цена и YTM из context.universe_rows/held_rows для ISIN среза поверх каталога."""
+    in_context = {row['isin']: row for row in context.universe_rows}
+    for row in context.held_rows:
+        in_context.setdefault(row['isin'], row)
+    for row in catalog:
+        source = in_context.get(row['isin'])
+        if source is not None:
+            row.update({k: source[k] for k in _CONTEXT_FIELDS if k in source})
+    return catalog
+
+
 class CompareExternalUseCase(UseCase):
     """Безопасное сравнение внешней подборки облигаций с портфелем (advisory-only)."""
 
@@ -91,10 +110,12 @@ class CompareExternalUseCase(UseCase):
             ext['isin'] for ext in (normalize_external_row(r, i) for i, r in enumerate(raw_rows, 1))
             if ext['isin']
         })
-        # shortcut: каталог читается отдельным запросом после сборки контекста
-        # (цену/время каждой строки несёт сам запрос); upgrade — читать в snapshot-транзакции.
+        # shortcut: каталог читается отдельным запросом после сборки контекста;
+        # цена/YTM ISIN из контекста берутся из него (покрыты context_fingerprint),
+        # каталожные значения — только для ISIN вне среза; upgrade — snapshot-транзакция.
         catalog = self._engine.enrich_with_ytm(
             self.db.get_comparison_catalog_rows(isins), as_of_date=context.as_of_date)
+        catalog = overlay_context_values(catalog, context)
         return build_comparison_report(
             raw_rows, {row['isin']: row for row in catalog}, context,
             rating_scale=self.rating_scale, min_credit_rating=min_rating,

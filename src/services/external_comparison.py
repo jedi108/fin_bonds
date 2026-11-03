@@ -80,6 +80,8 @@ ISIN_MISSING = 'ISIN_MISSING'
 ISSUER_LINK_MISSING = 'ISSUER_LINK_MISSING'
 IDENTITY_CONFLICT = 'IDENTITY_CONFLICT'
 HELD_SAME_ISSUER = 'HELD_SAME_ISSUER'
+HELD_VALUE_UNKNOWN = 'HELD_VALUE_UNKNOWN'
+UNSUPPORTED_CURRENCY = 'UNSUPPORTED_CURRENCY'
 DATA_GATE_BLOCKED = 'DATA_GATE_BLOCKED'
 ISSUER_LIMIT = CONSTRAINT_ISSUER_LIMIT
 CREDIT_RATING_BELOW_MIN = CONSTRAINT_CREDIT_RATING_BELOW_MIN
@@ -158,6 +160,10 @@ def normalize_external_row(raw: Dict[str, Any], row_no: int) -> Dict[str, Any]:
         invalid.append('ytm_to')
         ytm_to = None
     isin = _text(raw.get('isin'))
+    qty = _num(raw.get('qty'), 'qty', invalid)
+    if qty is not None and qty <= 0:  # нулевая/отрицательная qty — не покупка
+        invalid.append('qty')
+        qty = None
     return {
         'row_no': row_no,
         'isin': isin.upper() if isin else None,
@@ -172,7 +178,7 @@ def normalize_external_row(raw: Dict[str, Any], row_no: int) -> Dict[str, Any]:
         'ytm_to': ytm_to,
         'rating': normalize_rating_code(raw.get('rating')) or None,
         'maturity': _day(raw.get('maturity'), 'maturity', invalid),
-        'qty': _num(raw.get('qty'), 'qty', invalid),
+        'qty': qty,
         'invalid': invalid,
     }
 
@@ -193,6 +199,14 @@ def _as_day(value: Any) -> Optional[date]:
         except ValueError:
             return None
     return None
+
+
+def _ratings_differ(external_rating: str, code: str, score: Any, rating_scale) -> bool:
+    """Внешний рейтинг vs локальный: по баллу шкалы ('ruA+' == 'A+'); вне шкалы — по коду."""
+    ext_score = rating_code_to_score(external_rating, rating_scale)
+    if ext_score is None:
+        return external_rating != code
+    return ext_score != score
 
 
 def classify_rating(
@@ -221,7 +235,7 @@ def classify_rating(
             status = RATING_INVALID
         elif rating_date is None or (as_of_date - rating_date).days > RATING_STALE_DAYS:
             status = RATING_STALE_STATUS
-        elif external_rating and external_rating != code:
+        elif external_rating and _ratings_differ(external_rating, code, score, rating_scale):
             status = RATING_CONFLICTING
         else:
             status = RATING_CONFIRMED
@@ -254,20 +268,29 @@ def _norm_text(value: Any) -> str:
     return re.sub(r'[\W_]+', '', str(value or '').casefold())
 
 
+def _tokens(value: Any) -> set:
+    return set(re.findall(r'\w+', str(value or '').casefold()))
+
+
 def identity_conflicts(ext: Dict[str, Any], cat: Dict[str, Any]) -> List[str]:
     """Расхождения имени/серии/погашения с каталогом по тому же ISIN.
 
-    shortcut: сравнение по нормализованной подстроке (без fuzzy-скоринга);
-    оно лишь ловит явное несовпадение, ISIN остаётся единственным ключом.
+    shortcut: сравнение по нормализованной подстроке или по подмножеству токенов
+    ('ОФЗ 26238' vs 'ОФЗ-ПД 26238'; без fuzzy-скоринга); оно лишь ловит явное
+    несовпадение, ISIN остаётся единственным ключом.
     """
     problems: List[str] = []
     name_n, ticker_n = _norm_text(cat.get('name')), _norm_text(cat.get('ticker'))
     ext_name, ext_series = _norm_text(ext.get('name')), _norm_text(ext.get('series'))
+    ext_tok, cat_tok = _tokens(ext.get('name')), _tokens(cat.get('name'))
     if ext_name and not (
         ext_name == ticker_n or (name_n and (ext_name in name_n or name_n in ext_name))
+        or (cat_tok and (ext_tok <= cat_tok or cat_tok <= ext_tok))
     ):
         problems.append(f"название {ext['name']!r} не совпадает с каталогом {cat.get('name')!r}")
-    if ext_series and not (ext_series == ticker_n or ext_series in name_n):
+    if ext_series and not (
+        ext_series == ticker_n or ext_series in name_n or _tokens(ext.get('series')) <= cat_tok
+    ):
         problems.append(f"серия {ext['series']!r} не найдена в каталоге ({cat.get('name')!r})")
     cat_maturity = _as_day(cat.get('maturity_date'))
     if ext.get('maturity') and cat_maturity and ext['maturity'] != cat_maturity:
@@ -282,25 +305,28 @@ def identity_conflicts(ext: Dict[str, Any], cat: Dict[str, Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def aggregate_held(held_rows) -> Tuple[Dict[str, Dict[str, Any]], Dict[Any, float], float]:
+def aggregate_held(held_rows) -> Tuple[Dict[str, Dict[str, Any]], Dict[Any, Optional[float]], float]:
     """Позиции по ISIN (суммируются все счета) → (by_isin, issuer_totals, total).
 
     issuer_totals ключуется по company_id; позиции без эмитента-ссылки в
-    totals не попадают (их экспозицию к эмитенту отнести нельзя).
+    totals не попадают (их экспозицию к эмитенту отнести нельзя). Неизвестная
+    оценка (value_rub=None) не становится 0: value ISIN и итог эмитента = None,
+    в total такая позиция не входит.
     """
     by_isin: Dict[str, Dict[str, Any]] = {}
     for row in held_rows:
         item = by_isin.setdefault(
             row['isin'], {'value': 0.0, 'company_id': row.get('company_id')}
         )
-        item['value'] += _to_float(row.get('value_rub')) or 0.0
-    issuer_totals: Dict[Any, float] = {}
+        value = _to_float(row.get('value_rub'))
+        item['value'] = None if value is None or item['value'] is None else item['value'] + value
+    issuer_totals: Dict[Any, Optional[float]] = {}
     for item in by_isin.values():
-        if item['company_id'] is not None:
-            issuer_totals[item['company_id']] = (
-                issuer_totals.get(item['company_id'], 0.0) + item['value']
-            )
-    return by_isin, issuer_totals, sum(item['value'] for item in by_isin.values())
+        cid = item['company_id']
+        if cid is not None:
+            known = issuer_totals.get(cid, 0.0)
+            issuer_totals[cid] = None if known is None or item['value'] is None else known + item['value']
+    return by_isin, issuer_totals, sum(i['value'] for i in by_isin.values() if i['value'] is not None)
 
 
 def _pct(part: float, total: float) -> Optional[float]:
@@ -390,7 +416,10 @@ def build_comparison_row(
 
     # --- внешние данные: обязательные поля и разбор ---------------------
     for field in ext['invalid']:
-        issues.warn(EXTERNAL_VALUE_INVALID, f"внешнее поле {field!r} не разобрано — игнорируется")
+        if field == 'qty':  # qty не разобрана/<=0: гипотетическая покупка не определена
+            issues.block(EXTERNAL_VALUE_INVALID, "qty не разобрана или <= 0 — строка отклонена")
+        else:
+            issues.warn(EXTERNAL_VALUE_INVALID, f"внешнее поле {field!r} не разобрано — игнорируется")
     if not ext['source']:
         issues.block(EXTERNAL_SOURCE_MISSING, "не указан source внешнего списка")
     src_date = ext['source_as_of']
@@ -501,6 +530,12 @@ def build_comparison_row(
             why.append(f"горизонт YTM различается: внешний {ext['ytm_to']}, локальный {ygroup['ytm_to']}")
         if match_status == MATCH_STALE_CROSS_SOURCE:
             why.append(f"даты источников расходятся более чем на {max_skew_days} дн.")
+        ytm_day = _as_day(cat.get('ytm_updated_at'))
+        for ref in (src_date, price_as_of.date() if price_as_of else None):
+            if ytm_day and ref and abs((ytm_day - ref).days) > max_skew_days:
+                why.append(f"локальная YTM от {ytm_day.isoformat()} расходится с {ref.isoformat()} "
+                           f"более чем на {max_skew_days} дн.")
+                break
         nominal = _to_float(cat.get('nominal'))
         if ext['price'] is None:
             issues.warn(EXTERNAL_PRICE_UNKNOWN, "нет внешней цены — база цены внешней YTM не проверена")
@@ -521,6 +556,10 @@ def build_comparison_row(
 
     # --- portfolio ----------------------------------------------------------
     planned = (ext['qty'] * price) if (ext['qty'] is not None and price) else None
+    if planned is not None and str(cat.get('currency') or '').lower() != 'rub':
+        planned = None  # нерублёвая бумага не смешивается с RUB-итогами
+        issues.warn(UNSUPPORTED_CURRENCY,
+                    f"валюта {cat.get('currency')!r} ≠ rub — planned_value не считается")
     portfolio = _portfolio_group(
         ext['isin'], cat.get('company_id'), ext['qty'], planned, by_isin, issuer_totals, total_value
     )
@@ -530,9 +569,10 @@ def build_comparison_row(
         issues.warn(HELD_SAME_ISSUER,
                     "same_issuer_existing_exposure: у эмитента уже есть позиции "
                     f"({portfolio['issuer_share_before_pct']}% портфеля) — замена серии не диверсификация")
-    after = portfolio['issuer_share_after_pct']
-    if after is not None and after > ISSUER_CONCENTRATION_LIMIT_PCT:
-        issues.block(ISSUER_LIMIT, f"доля эмитента после {after}% > лимита {ISSUER_CONCENTRATION_LIMIT_PCT}%")
+    if cat.get('company_id') is not None and portfolio['issuer_value_rub'] is None:
+        issues.warn(HELD_VALUE_UNKNOWN,
+                    "оценка позиции эмитента неизвестна — экспозиция эмитента не считается")
+    # ISSUER_LIMIT ставится после матрицы эмитентов (_apply_issuer_limit): лимит общий для серий
 
     return _finish_row(identity, external, market, ygroup, credit, portfolio, issues)
 
@@ -575,7 +615,7 @@ def _portfolio_group(isin, company_id, qty, planned_value, by_isin, issuer_total
         'issuer_share_after_pct': after,
         'planned_qty': qty,
         'planned_value_rub': round(planned_value, 2) if planned_value is not None else None,
-        'same_issuer_existing_exposure': bool(issuer_value and issuer_value > 0),
+        'same_issuer_existing_exposure': company_id in issuer_totals and (issuer_value is None or issuer_value > 0),
         'same_issuer_held_isins': other_held,
     }
 
@@ -630,6 +670,9 @@ def build_comparison_report(
         for ext in exts
     ]
 
+    matrix = _issuer_matrix(rows, held)
+    _apply_issuer_limit(rows, matrix)
+
     live = [r for r in rows if r['decision']['eligibility'] != ELIGIBILITY_BLOCKED]
     fix = sorted(
         (r for r in live if r['yield']['coupon_kind'] == 'fix' and r['yield']['ytm_pct'] is not None),
@@ -669,7 +712,7 @@ def build_comparison_report(
         },
         'rows': rows,
         'rankings': rankings,
-        'issuer_matrix': _issuer_matrix(rows, held),
+        'issuer_matrix': matrix,
     }
 
 
@@ -688,18 +731,40 @@ def _issuer_matrix(rows: List[Dict[str, Any]], held) -> List[Dict[str, Any]]:
         })
         if r['identity']['isin'] not in group['external_isins']:
             group['external_isins'].append(r['identity']['isin'])
-            group['planned_value_rub'] += r['portfolio']['planned_value_rub'] or 0.0
+        # дубликаты ISIN во внешнем файле тоже суммируются: каждая строка — отдельная покупка
+        group['planned_value_rub'] += r['portfolio']['planned_value_rub'] or 0.0
     matrix = []
     for company_id, group in sorted(groups.items(), key=lambda kv: str(kv[1]['issuer'])):
         value = issuer_totals.get(company_id, 0.0)
         planned = group.pop('planned_value_rub')
-        after = _pct(value + planned, total + planned)
+        after = _pct(value + planned, total + planned) if value is not None else None
         matrix.append({
             **group,
             'held_isins': sorted(i for i, it in by_isin.items() if it['company_id'] == company_id),
-            'exposure_before_pct': _pct(value, total),
+            'exposure_before_pct': _pct(value, total) if value is not None else None,
             'exposure_after_pct': after,
             'limit_pct': ISSUER_CONCENTRATION_LIMIT_PCT,
             'limit_exceeded': after is not None and after > ISSUER_CONCENTRATION_LIMIT_PCT,
         })
     return matrix
+
+
+def _apply_issuer_limit(rows: List[Dict[str, Any]], matrix: List[Dict[str, Any]]) -> None:
+    """ISSUER_LIMIT на каждую строку эмитента, чья совокупная доля после > лимита.
+
+    Лимит общий для всех серий эмитента во внешнем списке: две серии, по
+    отдельности проходящие лимит, вместе его превышают.
+    """
+    exceeded = {m['issuer_id']: m['exposure_after_pct'] for m in matrix if m['limit_exceeded']}
+    for row in rows:
+        company_id = row['identity']['issuer_id']
+        if company_id not in exceeded or row['identity']['match_status'] == MATCH_UNMATCHED_EXTERNAL:
+            continue
+        decision = row['decision']
+        decision['blockers'].append({
+            'code': ISSUER_LIMIT,
+            'message': f"совокупная доля эмитента после {exceeded[company_id]}% > лимита "
+                       f"{ISSUER_CONCENTRATION_LIMIT_PCT}%",
+        })
+        decision['eligibility'] = ELIGIBILITY_BLOCKED
+        decision['plan_input_allowed'] = False

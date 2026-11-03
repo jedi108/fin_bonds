@@ -547,76 +547,9 @@ LIMIT 20;
 
 ### 10. Сравнение с текущим портфелем
 
-```sql
-WITH portfolio_avg_yield AS (
-    SELECT 
-        AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
-    FROM bonds_catalog bc
-    JOIN portfolio_positions pp ON bc.isin = pp.isin
-    LEFT JOIN (
-        SELECT isin, metric_value
-        FROM monitoring_checks 
-        WHERE metric_name = 'floater_coupon_calculator' 
-        AND check_date = (
-            SELECT MAX(check_date) 
-            FROM monitoring_checks 
-            WHERE isin = monitoring_checks.isin 
-            AND metric_name = 'floater_coupon_calculator'
-        )
-    ) mc_floater ON bc.isin = mc_floater.isin
-    WHERE bc.currency = 'rub'
-        AND pp.current_price > 0
-        AND pp.quantity > 0
-)
-SELECT 
-    bc.isin,
-    bc.ticker,
-    bc.name,
-    COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) as coupon_rate_percent,
-    bc.risk_level,
-    
-    -- Потенциальная годовая доходность (если купить по номиналу)
-    ROUND(
-        (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.nominal * 100, 
-        2
-    ) as potential_yield_percent,
-    
-    -- Сравнение с портфелем
-    ROUND(
-        ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.nominal * 100) - pavg.avg_portfolio_yield, 
-        2
-    ) as yield_vs_portfolio,
-    
-    -- Рекомендация
-    CASE 
-        WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.nominal * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
-        WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) * bc.nominal / 100) / bc.nominal * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
-        ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
-    END as recommendation
-    
-FROM bonds_catalog bc
-LEFT JOIN portfolio_positions pp ON bc.isin = pp.isin
-LEFT JOIN (
-    SELECT isin, metric_value
-    FROM monitoring_checks 
-    WHERE metric_name = 'floater_coupon_calculator' 
-    AND check_date = (
-        SELECT MAX(check_date) 
-        FROM monitoring_checks 
-        WHERE isin = monitoring_checks.isin 
-        AND metric_name = 'floater_coupon_calculator'
-    )
-) mc_floater ON bc.isin = mc_floater.isin
-CROSS JOIN portfolio_avg_yield pavg
-WHERE bc.currency = 'rub'
-    AND (bc.is_trade_available = 1 OR bc.is_trade_available IS NULL)
-    AND bc.perpetual_flag = 0
-    AND pp.isin IS NULL  -- Нет в портфеле
-    AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value) IS NOT NULL
-    AND bc.risk_level <= 2  -- Только низкорисковые
-ORDER BY yield_vs_portfolio DESC
-LIMIT 25;
-```
+Прежний coupon-based запрос с вердиктом `ПОКУПАТЬ` удалён. `analyze-buy-candidates compare` теперь —
+справочная разница канонической YTM (`ytm_vs_portfolio`, с указанием `ytm_to`) без рекомендаций;
+сравнение внешних подборок — `compare-external` (issue #5, advisory-only).
 
 ## Важные замечания
 
