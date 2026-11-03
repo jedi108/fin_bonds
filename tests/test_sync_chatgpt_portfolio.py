@@ -38,6 +38,8 @@ class FakeDb:
         }
         # 029-T08: exporter не должен читать cash сам — счётчик для guard-теста.
         self.cash_reads = 0
+        # Свежесть относительно реального now: execute() гейтит по текущему времени.
+        synced = datetime.now(timezone.utc) - timedelta(hours=1)
         self.freshness = freshness or {
             "bonds_with_market_price": 100,
             "bonds_tradeable_count": 100,
@@ -46,9 +48,9 @@ class FakeDb:
             "portfolio_zero_value_positions": 0,
             "portfolio_zero_rows_suspicious": 0,
             "portfolio_zero_value_isins": "",
-            "last_sync_time": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
-            "portfolio_max_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
-            "market_price_max_updated_at": datetime(2026, 9, 30, 8, 55, tzinfo=timezone.utc),
+            "last_sync_time": synced,
+            "portfolio_max_updated_at": synced,
+            "market_price_max_updated_at": synced - timedelta(minutes=5),
         }
 
     def get_db_freshness(self):
@@ -1399,11 +1401,9 @@ class FakeReportDb:
             "portfolio_zero_value_positions": 0,
             "portfolio_zero_rows_suspicious": 0,
             "portfolio_zero_value_isins": "",
-            "last_sync_time": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
-            "portfolio_max_updated_at": datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc),
-            "market_price_max_updated_at": datetime(
-                2026, 9, 30, 8, 55, tzinfo=timezone.utc
-            ),
+            "last_sync_time": datetime.now(timezone.utc) - timedelta(hours=1),
+            "portfolio_max_updated_at": datetime.now(timezone.utc) - timedelta(hours=1),
+            "market_price_max_updated_at": datetime.now(timezone.utc) - timedelta(hours=1),
         }
 
     def get_db_freshness(self):
