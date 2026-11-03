@@ -8,6 +8,9 @@ company-debt-report, override-слой идентичности, rebalance-repor
 import argparse
 import csv
 import json
+import os
+import subprocess
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -95,6 +98,15 @@ class TestPureLogic:
         assert 'bad_cash_rub' in parse_snapshot_row(_row(cash_rub='abc'))[1]
         assert 'bad_report_date' in parse_snapshot_row(_row(report_date='30.06.2026'))[1]
         assert 'bad_coverage_status' in parse_snapshot_row(_row(coverage_status='great'))[1]
+        # '250,000' неоднозначно (250 тыс. или 250.000) и смесь разделителей — отклоняем
+        for bad in ('250,000', '1,234.5', '1,234,567'):
+            assert 'bad_total_debt_rub' in parse_snapshot_row(_row(total_debt_rub=bad))[1], bad
+        assert parse_snapshot_row(_row(total_debt_rub='250.000'))[0]['total_debt_rub'] == Decimal('250.000')
+        assert parse_snapshot_row(_row(total_debt_rub='2,5'))[0]['total_debt_rub'] == Decimal('2.5')
+        # будущая report_date не может считаться «свежей»
+        future = (date.today() + timedelta(days=1)).isoformat()
+        assert 'bad_report_date' in parse_snapshot_row(_row(report_date=future))[1]
+        assert parse_snapshot_row(_row(report_date=date.today().isoformat()))[1] == []
         # net_debt и ebitda могут быть отрицательными
         assert parse_snapshot_row(_row(net_debt_rub='-5', ebitda_rub='-1'))[1] == []
 
@@ -105,8 +117,9 @@ class TestPureLogic:
 
 class TestIdentityOverride:
     def test_samolet_override_maps_both_names_to_one_company_non_destructive(self, db):
-        # Исторические дубли: две строки companies с разными ИНН (синтетические)
-        old_gk = _company(db, 'ГК Самолет', '7700000101')
+        # Исторические дубли одного юрлица: у одной строки ИНН пуст (по имени сливаем
+        # только одинаковые/пустые ИНН; разные ИНН по имени не сливаются)
+        old_gk = _company(db, 'ГК Самолет', None)
         old_short = _company(db, 'Самолет', '7700000102')
         _insert_bond(db, isin='RU000TEST001', name='ГК Самолет БО-П01', company_id=old_gk)
         _insert_bond(db, isin='RU000TEST002', name='Самолет 001Р-02', company_id=old_short)
@@ -162,6 +175,13 @@ class TestImport:
         _company(db, 'дубль')
         summary = import_company_debt(db, [_row(company_inn='', company_name='Дубль')])
         assert summary['unmatched'][0]['reason'] == 'ambiguous'
+
+    def test_name_matching_other_inn_and_null_inn_is_not_ambiguous(self, db):
+        _company(db, 'Гамма', '7700000009')   # другой ИНН — не та же компания
+        null_inn = _company(db, 'гамма')      # ИНН пуст — единственный кандидат
+        summary = import_company_debt(db, [_row(company_inn='7700000001', company_name='Гамма')])
+        assert (summary['inserted'], summary['unmatched']) == (1, [])
+        assert set(db.get_latest_company_debt_snapshots()) == {null_inn}
 
     def test_idempotent_upsert_and_null_stays_null(self, db):
         cid = _company(db, 'Альфа Пром', '7700000001')
@@ -268,6 +288,19 @@ class TestDebtReport:
         assert report['concentration']['top1_pct'] == pytest.approx(92.59, abs=0.01)
         json.dumps(report)  # сериализуемо
 
+    def test_non_rub_and_matured_issues_excluded_from_volume(self, db):
+        big, _, _ = _seed_report(db)
+        # USD-выпуск: не в сумме, но выпуск учтён => volume_partial; погашенный — вне отчёта
+        _insert_bond(db, isin='RU000TEST006', company_id=big, currency='usd',
+                     issue_size=1000000, nominal=Decimal('1000'))
+        _insert_bond(db, isin='RU000TEST007', company_id=big, issue_size=1000000,
+                     nominal=Decimal('1000'), maturity_date=date.today() - timedelta(days=1))
+        db.conn.commit()
+        b = {r['name']: r for r in build_debt_report(db, TODAY)['companies']}['Большая Компания']
+        assert b['issued_bond_volume_rub'] == 1250000000.0
+        assert (b['issues_count'], b['issues_with_volume_count']) == (3, 2)
+        assert 'issued_volume_partial' in b['unknowns']
+
     def test_portfolio_exposure_share(self, db):
         big, _, _ = _seed_report(db)
         _insert_bond(db, isin='RU000TEST005', company_id=big, market_price=Decimal('1000'))
@@ -336,6 +369,15 @@ class TestDebtOverlay:
         assert all(i['net_debt_to_ebitda'] is None and 'no_debt_snapshot' in i['unknowns']
                    for i in overlay['issuers'])
 
+    def test_overlay_without_migration_017_returns_error_block(self, db):
+        _seed_base(db)
+        db._cursor().execute("DROP TABLE company_debt_snapshots")  # откатывается в обработчике
+        use_case = RebalanceReportUseCase(db=db)
+        report = use_case.build_report(_make_args(debt_overlay=True))
+        assert 'error' in report['debt_overlay'] and 'issuers' not in report['debt_overlay']
+        assert report['portfolio']['positions']  # остальной отчёт цел
+        assert _snapshot_count(db) == 0  # таблица на месте (DROP откатан)
+
     def test_overlay_uses_fresh_snapshot(self, db):
         _seed_base(db)
         cur = db._cursor()
@@ -352,3 +394,30 @@ class TestDebtOverlay:
         assert by_name['Бета Финанс']['freshness']['status'] == 'missing'
         # Альфа 10000 из 15000 портфеля
         assert overlay['coverage']['portfolio_share_with_fresh_debt_data_pct'] == pytest.approx(66.67, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# CLI end-to-end (main.py subprocess на тестовой БД)
+# ---------------------------------------------------------------------------
+
+def test_cli_import_then_report_json(db, tmp_path):
+    cid = _company(db, 'Альфа Пром', '7700000001')
+    _insert_bond(db, isin='RU000TEST001', company_id=cid, issue_size=1000, nominal=Decimal('1000'))
+    db.conn.commit()  # видимость в subprocess-CLI (отдельное соединение)
+    csv_path = tmp_path / 'debt.csv'
+    csv_path.write_text(
+        'company_inn,source,report_date,source_ref,total_debt_rub,cash_rub\n'
+        '7700000001,test-src,2026-06-30,ref-1,100,30\n', encoding='utf-8')
+    env = {**os.environ, 'PYTHONPATH': '.', 'POSTGRES_DSN': os.environ['POSTGRES_DSN_TEST']}
+
+    def run(*cmd):
+        res = subprocess.run([sys.executable, 'main.py', *cmd], capture_output=True, text=True, env=env)
+        assert res.returncode == 0, res.stderr
+        return json.loads(res.stdout)  # stdout — чистый JSON
+
+    assert run('import-company-debt', '--file', str(csv_path))['inserted'] == 1
+    report = run('company-debt-report', '--format', 'json')
+    assert report['schema_version'] == 1
+    row = report['companies'][0]
+    assert row['name'] == 'Альфа Пром' and row['net_debt_rub'] == 70.0
+    assert row['issued_bond_volume_rub'] == 1000000.0

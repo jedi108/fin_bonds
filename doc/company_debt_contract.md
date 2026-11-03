@@ -8,7 +8,7 @@
 
 | Поле | Что это | Чем НЕ является |
 |------|---------|-----------------|
-| `issued_bond_volume_rub` (в отчёте) | `SUM(issue_size * nominal)` по выпускам каталога компании; `nominal` — **текущий** номинал от брокера (после амортизации) | не остаток долга, не леверидж |
+| `issued_bond_volume_rub` (в отчёте) | `SUM(issue_size * nominal)` по **RUB**-выпускам каталога компании (не-RUB выпуск входит в `issues_count`, но не в объём → `issued_volume_partial`; погашенные, `maturity_date < CURRENT_DATE`, не учитываются вовсе); `nominal` — **текущий** номинал от брокера (после амортизации) | не остаток долга, не леверидж |
 | снимок `company_debt_snapshots` | долг из отчётности: `total/bond/bank/lease_debt_rub`, `cash_rub`, `net_debt_rub`, `revenue_rub`, `ebitda_rub`, `outstanding_bond_debt_rub` | — |
 
 Скилл не должен выдавать `issued_bond_volume_rub` за долговую нагрузку и не должен
@@ -16,7 +16,12 @@
 
 ## Хранилище
 
-Таблица `company_debt_snapshots` (миграция 017), ключ `(company_id, report_date, source)`.
+Таблица `company_debt_snapshots` (миграция 017). Ключ версии снимка —
+`(company_id, report_date, source)`: повторный импорт с тем же ключом **перезаписывает**
+снимок целиком (last write wins, `retrieved_at` обновляется); другой `source` или
+другая `report_date` — отдельная строка, история сохраняется. «Последний» снимок
+компании — по `report_date`, затем `retrieved_at`. `report_date` в будущем отклоняется
+(`bad_report_date`).
 Все суммы в рублях; отсутствующая метрика = `NULL` (не 0). `net_debt_to_ebitda` не
 хранится — считается в отчёте при известных `net_debt` и `ebitda > 0`.
 `net_debt` берётся заявленный (`net_debt_source: "reported"`), иначе
@@ -32,8 +37,9 @@
 `cash_rub`, `net_debt_rub`, `revenue_rub`, `ebitda_rub`, `issued_bond_volume_rub`,
 `outstanding_bond_debt_rub`, `coverage_status` (`full|partial|unknown`),
 `quality_status` (`verified|unverified|estimated`), `notes`.
+Числа: десятичный разделитель `.` или `,`; значения с запятой и тремя цифрами после неё (`250,000`) и со смесью `,`/`.` отклоняются как неоднозначные (`bad_<поле>`).
 JSON: список объектов или `{"snapshots": [...]}`. Компания: ИНН, затем точное имя
-(без регистра); несопоставленные/неоднозначные строки не вставляются. Печатает в stdout:
+(без регистра; имя с другим ИНН не сопоставляется); несопоставленные/неоднозначные строки не вставляются. Печатает в stdout:
 
 ```json
 {"rows": 3, "inserted": 1, "updated": 1,

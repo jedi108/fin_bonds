@@ -22,9 +22,9 @@ FRESHNESS_STALE = 'stale'
 FRESHNESS_MISSING = 'missing'
 
 ISSUED_VOLUME_NOTE = (
-    "issued_bond_volume_rub = SUM(issue_size * nominal) по выпускам каталога, "
-    "nominal — текущий номинал от брокера: оценка объёма размещения, "
-    "НЕ остаток долга и НЕ леверидж."
+    "issued_bond_volume_rub = SUM(issue_size * nominal) по RUB-выпускам каталога "
+    "(не-RUB и погашенные выпуски не учитываются), nominal — текущий номинал от брокера: "
+    "оценка объёма размещения, НЕ остаток долга и НЕ леверидж."
 )
 
 _SNAPSHOT_MONEY_FIELDS = (

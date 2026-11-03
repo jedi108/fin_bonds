@@ -70,6 +70,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import psycopg2
+
 from src.services.rebalance_engine import (
     BOND_ROW_KEYS,
     CONSTRAINT_COUPON_FREQUENCY_ABOVE_MAX,
@@ -485,7 +487,11 @@ class RebalanceReportUseCase(UseCase):
             report['scenario'] = scenario
         # issue #4: опциональный advisory-блок; без флага ответ не меняется
         if getattr(args, 'debt_overlay', False):
-            report['debt_overlay'] = build_debt_overlay(self.db, now.date())
+            try:
+                report['debt_overlay'] = build_debt_overlay(self.db, now.date())
+            except psycopg2.Error as e:  # напр. миграция 017 не применена: advisory-блок не валит отчёт
+                self.db.conn.rollback()
+                report['debt_overlay'] = {'error': f'debt_overlay unavailable: {e.__class__.__name__}'}
         report['artifacts'] = artifacts
         return report
 

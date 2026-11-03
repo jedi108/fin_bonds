@@ -645,9 +645,11 @@ class PortfolioStorage:
     def get_company_bond_aggregates(self) -> List[Dict[str, Any]]:
         """Компании-юрлица (entity_type='company') с агрегатами выпусков каталога.
 
-        issued_bond_volume_rub = SUM(issue_size * nominal) только по выпускам, где
+        issued_bond_volume_rub = SUM(issue_size * nominal) только по RUB-выпускам, где
         известны оба множителя; nominal — ТЕКУЩИЙ номинал от брокера (после
         амортизации), поэтому это оценка объёма размещения, не остаток долга.
+        Погашенные выпуски (maturity_date < CURRENT_DATE) не учитываются вовсе;
+        не-RUB выпуски входят в issues_count, но не в объём (issued_volume_partial).
         """
         cursor = self._cursor()
         cursor.execute("""
@@ -655,10 +657,14 @@ class PortfolioStorage:
                    COUNT(b.isin) AS issues_count,
                    COUNT(b.isin) FILTER (
                        WHERE b.issue_size IS NOT NULL AND b.nominal IS NOT NULL
+                         AND lower(b.currency) = 'rub'
                    ) AS issues_with_volume_count,
-                   SUM(b.issue_size * b.nominal) AS issued_bond_volume_rub
+                   SUM(b.issue_size * b.nominal) FILTER (
+                       WHERE lower(b.currency) = 'rub'
+                   ) AS issued_bond_volume_rub
             FROM companies c
             JOIN bonds_catalog b ON b.company_id = c.id
+                 AND (b.maturity_date IS NULL OR b.maturity_date >= CURRENT_DATE)
             WHERE c.entity_type = 'company'
             GROUP BY c.id
             ORDER BY c.id

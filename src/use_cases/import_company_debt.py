@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import logging
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -52,6 +53,8 @@ def parse_snapshot_row(raw: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], L
     if 'report_date' in snap:
         try:
             snap['report_date'] = date.fromisoformat(snap['report_date'])
+            if snap['report_date'] > date.today():
+                raise ValueError  # будущая дата выдала бы снимок за «свежий»
         except ValueError:
             errors.append('bad_report_date')
     for key in _NON_NEGATIVE + _SIGNED:
@@ -60,7 +63,11 @@ def parse_snapshot_row(raw: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], L
             snap[key] = None  # NULL остаётся NULL
             continue
         try:
-            number = Decimal(str(value).strip().replace(' ', '').replace(',', '.'))
+            text = str(value).strip().replace(' ', '')
+            # '250,000' (тысячи или дробь?) и '1,234.5' неоднозначны — отклоняем, не угадываем
+            if (',' in text and '.' in text) or re.search(r',\d{3}$', text):
+                raise InvalidOperation
+            number = Decimal(text.replace(',', '.'))
         except InvalidOperation:
             errors.append(f"bad_{key}")
             continue
@@ -104,8 +111,8 @@ def import_company_debt(db: PortfolioStorage, rows: List[Dict[str, Any]]) -> Dic
             summary['invalid'].append({**ident, 'errors': errors})
             continue
         found = db.find_companies_for_debt(inn, name)
-        if inn and any(c['inn'] and c['inn'] != inn for c in found):
-            found = []  # ИНН не найден, имя совпало с компанией с ДРУГИМ ИНН — не та же компания
+        if inn:  # совпавшие по имени компании с ДРУГИМ ИНН — не та же компания
+            found = [c for c in found if not c['inn'] or c['inn'] == inn]
         if len(found) != 1:
             summary['unmatched'].append(
                 {**ident, 'reason': 'ambiguous' if len(found) > 1 else 'not_found'}
