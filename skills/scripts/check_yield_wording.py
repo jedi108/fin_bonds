@@ -2,12 +2,12 @@
 """issue #3: ответ агента не должен называть купонную ставку «доходностью».
 
 Проверка ответа живого агента:
-  ./venv/bin/python skills_hermes/scripts/check_yield_wording.py \
+  ./venv/bin/python skills/scripts/check_yield_wording.py \
       --coupon 19 --ytm 13.71 --reply "купон 19%, доходность к оферте 23.11.2026 ≈13.7%"
 Exit 0 — ок, 1 — нарушения (печатаются в stdout).
 
 Тесты (сеть/агент не нужны):
-  ./venv/bin/python -m pytest skills_hermes/scripts/check_yield_wording.py -v
+  ./venv/bin/python -m pytest skills/scripts/check_yield_wording.py -v
 """
 import argparse
 import pathlib

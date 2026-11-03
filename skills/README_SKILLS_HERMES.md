@@ -15,7 +15,7 @@
 | Данные Hermes (в контейнере) | `/opt/data` (= `<стек>/data/hermes` на хосте, общий rw) |
 | Профиль агента проекта | `/opt/data/profiles/<profile>/` |
 | Каталог скиллов профиля (в контейнере) | `/opt/data/profiles/<profile>/skills/<категория>/` |
-| Каноническое дерево скиллов (git) | репозиторий проекта, `<repo>/skills_hermes/<категория>/` |
+| Каноническое дерево скиллов (git) | репозиторий проекта, `<repo>/skills/<категория>/` |
 | Манифест | `skills_manifest.yaml` рядом с деревом |
 | Враппер доступа к данным из скиллов | `/opt/data/profiles/<profile>/bin/<tool>.sh` |
 | Команды | `make deploy-skills` / `make check-skills-profile` |
@@ -202,7 +202,7 @@ file or directory».
 ## 10. Внедрение в новом проекте (чек-лист с нуля)
 
 1. Заполнить карту окружения (§0).
-2. Создать дерево `skills_hermes/<категория>/` + манифест
+2. Создать дерево `skills/<категория>/` + манифест
    (`canonical.skills`), валидатор frontmatter + pre-commit hook.
 3. Deploy-скрипт: rsync дерева на хост → копия compose-override → гигиена (§5) →
    `compose up -d` → диагностика (§7) → синк профиля → check.

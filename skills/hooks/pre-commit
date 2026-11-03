@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-commit hook: валидация frontmatter скиллов skills.
+# Установка — `make hooks-install` (git config core.hooksPath skills/hooks).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+git diff --cached --name-only | grep -q '^skills/' || exit 0
+
+PY=python3
+[ -x "$ROOT/venv/bin/python" ] && PY="$ROOT/venv/bin/python"
+exec "$PY" "$ROOT/skills/scripts/validate_skills.py"

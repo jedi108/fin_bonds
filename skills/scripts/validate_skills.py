@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Валидация скиллов HERMES (fin_bonds).
 
-Проверяет каждый SKILL.md в дереве skills_hermes:
+Проверяет каждый SKILL.md в дереве skills:
 - frontmatter: обязательные ключи name/description/version/author/license/
   platforms, description не длиннее 60 символов и заканчивается точкой;
 - все scripts/*.sql скилла: файл не пуст, psql-блоки \\if/\\endif сбалансированы,

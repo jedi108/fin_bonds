@@ -3,7 +3,7 @@
 stdout/stderr/exit codes, snapshot как artifact.
 
 Запуск (из корня core-репозитория):
-  ./venv/bin/python -m pytest skills_hermes/scripts/test_rebalance_adapter.py -v
+  ./venv/bin/python -m pytest skills/scripts/test_rebalance_adapter.py -v
 
 Adapter вызывается как процесс (subprocess) против stub `main.py` в tmp
 app-dir (local transport) — проверяется реальный CLI-контракт: stdout —

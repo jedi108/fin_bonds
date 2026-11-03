@@ -2,7 +2,7 @@
 """Синк скиллов профиля агента Hermes с каноническим манифестом fin_bonds (005.6).
 
 Профиль агента (`/opt/data/profiles/fin_bonds/skills/`) наполняется отдельно
-от канонического дерева skills_hermes и разъезжается с ним: часть SOP-скиллов
+от канонического дерева skills и разъезжается с ним: часть SOP-скиллов
 в профиле отсутствует, часть — устаревшие черновики. Скрипт приводит профиль
 в соответствие манифесту `skills_manifest.yaml` и проверяет целостность.
 
@@ -19,8 +19,8 @@
   (каталог профиля принадлежит uid контейнера, напрямую недоступен).
 
 Источник канонического контента:
-  локально — дерево skills_hermes рядом с манифестом (или --source-dir);
-  по сети  — копия skills_hermes на хосте (canonical.host_source_dir),
+  локально — дерево skills рядом с манифестом (или --source-dir);
+  по сети  — копия skills на хосте (canonical.host_source_dir),
   обновляемая rsync в приватном деплой-скрипте (политика: деплой по git,
   не ручными копиями).
 
@@ -88,7 +88,7 @@ class Manifest:
 
     @property
     def local_source_root(self) -> pathlib.Path:
-        """Каноническое дерево рядом с манифестом (skills_hermes/<source_dir>)."""
+        """Каноническое дерево рядом с манифестом (skills/<source_dir>)."""
         return self.path.parent / self.source_dir
 
     @property
@@ -188,7 +188,7 @@ class LocalSource:
 
 
 class RemoteSource:
-    """Копия skills_hermes на Hermes-хосте (обновляется rsync)."""
+    """Копия skills на Hermes-хосте (обновляется rsync)."""
 
     def __init__(self, host: str, root: str):
         self.host = host
@@ -305,7 +305,7 @@ class RemoteProfile:
         return out if rc == 0 else None
 
     def write_tree(self, source: 'RemoteSource', name: str) -> None:
-        """Копия скилла с хоста (копия skills_hermes) в контейнер через tar.
+        """Копия скилла с хоста (копия skills) в контейнер через tar.
 
         tar читает файлы на хосте и по stdin отдаёт их docker exec —
         одна ssh-сессия; права владельца выравниваются по каталогу профиля
@@ -503,7 +503,7 @@ def build_check(manifest: Manifest,
 
 
 def check_tree_vs_manifest(manifest: Manifest, source_names: List[str]) -> List[str]:
-    """Дерево skills_hermes и манифест должны описывать один набор."""
+    """Дерево skills и манифест должны описывать один набор."""
     errors = []
     tree = set(source_names)
     for name in sorted(tree - set(manifest.skills)):
@@ -576,7 +576,7 @@ def _pick(args, manifest: Manifest):
     else:
         if args.source_dir:
             raise SystemExit('--source-dir допустим только вместе с --profile-dir '
-                             '(по сети источник — копия skills_hermes на хосте)')
+                             '(по сети источник — копия skills на хосте)')
         source = RemoteSource(manifest.host,
                               manifest.host_source_dir + '/' + manifest.source_dir)
         profile = RemoteProfile(manifest.host, manifest.container,
@@ -669,7 +669,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             'ssh+docker по манифесту)')
         p.add_argument('--source-dir', default=None,
                        help='локальный канонический каталог '
-                            '(по умолчанию — skills_hermes/finance рядом с '
+                            '(по умолчанию — skills/finance рядом с '
                             'манифестом; только с --profile-dir)')
         p.add_argument('--dry-run', action='store_true',
                        help='(sync) только показать план')

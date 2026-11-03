@@ -13,12 +13,12 @@ DEPLOY_ENC_FILE ?= $(ENV_DIR)/.env.prod.enc
 # задаётся в .env.deploy, пусто — шаг пропускается)
 DEPLOY_GIT_SAFE_DIR ?=
 DEPLOY_CONF_DIR ?= ./workspace/fin_bonds/deploy
-SKILLS_DIR ?= ./skills_hermes
+SKILLS_DIR ?= ./skills
 # Hermes-хост и копия скиллов на нём — по умолчанию из .env.deploy
 # (скиллы rsync-ятся в рабочий экземпляр, как и `make deploy`).
 HERMES_HOST ?= $(DEPLOY_USER)@$(DEPLOY_HOST)
 FIN_BONDS_DIR ?= $(DEPLOY_DIR)
-HERMES_SKILLS_SRC ?= $(FIN_BONDS_DIR)/skills_hermes
+HERMES_SKILLS_SRC ?= $(FIN_BONDS_DIR)/skills
 export HERMES_HOST FIN_BONDS_DIR HERMES_SKILLS_SRC SKILLS_DIR
 VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
@@ -47,10 +47,10 @@ help:
 	@echo "  make migrate        - Применить миграции БД локально (PostgreSQL; идемпотентно)"
 	@echo "  make migrate-remote - Применить миграции БД на сервере (PostgreSQL; идемпотентно)"
 	@echo "  make test           - Запустить тесты (pytest; нужна тестовая БД POSTGRES_DSN_TEST)"
-	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills_hermes)"
+	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills)"
 	@echo "  make deploy-skills  - Синхронизация скиллов на хост Hermes + синк профиля + проверка"
 	@echo "  make check-skills-profile - Проверка профиля Hermes против манифеста скиллов (005.6)"
-	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов (skills_hermes/hooks)"
+	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов (skills/hooks)"
 
 # Первичная инициализация на сервере
 deploy-init:
@@ -162,7 +162,7 @@ check-skills-profile:
 
 # Однократная установка pre-commit hook валидации скиллов
 hooks-install:
-	git config core.hooksPath skills_hermes/hooks
+	git config core.hooksPath skills/hooks
 	-@git -C workspace config --unset core.hooksPath 2>/dev/null
 	@echo "==> pre-commit hook установлен (git config core.hooksPath)"
 

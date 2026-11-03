@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Тесты sync_profile_skills.py (005.6): план синка, сверка, идемпотентность.
 
-Запуск: ./venv/bin/python -m pytest skills_hermes/scripts/test_sync_profile_skills.py -v
+Запуск: ./venv/bin/python -m pytest skills/scripts/test_sync_profile_skills.py -v
 Только локальный режим (--profile-dir) — без сети и docker.
 """
 import pathlib
@@ -98,7 +98,7 @@ def test_load_manifest_real():
 
 
 def test_real_tree_matches_manifest():
-    """Каноническое дерево skills_hermes/finance и манифест согласованы."""
+    """Каноническое дерево skills/finance и манифест согласованы."""
     manifest = sps.load_manifest(SKILLS_HERMES / 'skills_manifest.yaml')
     source = sps.LocalSource(manifest.local_source_root)
     assert sps.check_tree_vs_manifest(manifest, source.list_skills()) == []
