@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""finbonds-rebalance-tool — stable Hermes adapter (задача 030.11).
+"""finbonds-rebalance-tool — stable agent adapter (задача 030.11).
 
 Единая точка вызова доменных команд ребалансировки core fin_bonds для
-агента Hermes: report / plan / compare / analysis-snapshot. Adapter
+агента: report / plan / compare / analysis-snapshot. Adapter
 скрывает transport-детали (ssh-хост, app-dir, venv), принимает ТОЛЬКО
 typed whitelist аргументов и приводит ответ к одному контракту:
 

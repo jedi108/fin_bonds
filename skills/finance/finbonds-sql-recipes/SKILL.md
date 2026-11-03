@@ -1,14 +1,13 @@
 ---
 name: finbonds-sql-recipes
-description: "Ad-hoc SQL к БД fin_bonds: pg.sh, рецепты, карта схемы."
-version: 0.2.0
-author: jedi (jedi108), Hermes Agent
+description: "Ad-hoc SQL к БД fin_bonds: psql, рецепты, карта схемы."
+version: 0.2.1
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Bonds, SQL, PostgreSQL, Reference]
-    related_skills: [finbonds-ops]
+  tags: "FinBonds, Bonds, SQL, PostgreSQL, Reference"
+  related_skills: "finbonds-ops"
 ---
 
 # FinBonds SQL Recipes
@@ -46,49 +45,50 @@ metadata:
   «Рецепты»; типы/колонки — «Карта схемы».
 - Готовый сценарий (свежесть, скрининг, ребалансировка, риск) — взять скрипт
   из «Каталога готовых `-f` скриптов», а не писать запрос с нуля.
-- Первый SQL-запрос в сессии — начать с «Нулевого рецепта» (pg.sh).
+- Первый SQL-запрос в сессии — начать с «Нулевого рецепта» (`$FIN_BONDS_PSQL`).
 
 Don't use for: запуск команд CLI fin_bonds (finbonds-ops) — для чтения и
 аналитики канонический путь это CLI на хосте, SQL не нужен вовсе.
 
-## Нулевой рецепт — точка входа: pg.sh
+## Нулевой рецепт — точка входа: `$FIN_BONDS_PSQL`
 
-- БД доступна ТОЛЬКО через враппер
-  `/opt/data/profiles/fin_bonds/bin/pg.sh` (контейнер hermes-ai). Враппер сам
-  делает `set -a; . /opt/data/profiles/fin_bonds/.env; set +a` и зовёт psql —
-  `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` подхватывает libpq.
-- `POSTGRES_DSN` в окружении контейнера НЕТ (из compose снят) — голый
-  `psql` падает (socket-фолбэк `/var/run/postgresql`, роль не существует).
-  В python-kernel `os.environ["POSTGRES_DSN"]` падает `KeyError`; psql-вызовы
-  в python-kernel не переносить.
+- БД доступна через `"${FIN_BONDS_PSQL:-psql}"`. По умолчанию это обычный
+  `psql` с подключением из libpq-окружения (`PGHOST`/`PGPORT`/`PGUSER`/
+  `PGPASSWORD`/`PGDATABASE` или `PGSERVICE`); развёртывание может указать
+  `FIN_BONDS_PSQL` на враппер, который сам подгружает креды. DSN в команду
+  не вставлять.
+- Без кредов в окружении голый `psql` падает (socket-фолбэк
+  `/var/run/postgresql`, роль не существует). В песочнице кода агента
+  `os.environ["POSTGRES_DSN"]` может падать `KeyError`; psql-вызовы в
+  песочницу кода не переносить.
 
 Канонические формы вызова:
 
 1. Машинное чтение — `--csv` + `-f` (файл скрипта):
 
-   `terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /tmp/q_issuer.sql")`
+   `"${FIN_BONDS_PSQL:-psql}" --csv -f /tmp/q_issuer.sql`
 
    `--csv` печатает строку заголовков — вывод читается без исходного SQL.
    Длинный SQL и любой SQL с кириллическими литералами — только файлом
    (`-f`), не inline `-c` (триггерит security-сканер терминала и ломается на
    вложенных кавычках). Параметры запроса — psql-переменные:
-   `pg.sh -v isin='RU000A10XYD1' -f /tmp/q.sql`, в скрипте — `:'isin'`.
+   `"${FIN_BONDS_PSQL:-psql}" -v isin='RU000A10XYD1' -f /tmp/q.sql`, в скрипте — `:'isin'`.
 
 2. Короткий однострочный SELECT без кириллических литералов — inline `-c`:
 
-   `terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -c 'SELECT isin, ticker FROM bonds_catalog LIMIT 3;'")`
+   `"${FIN_BONDS_PSQL:-psql}" --csv -c 'SELECT isin, ticker FROM bonds_catalog LIMIT 3;'`
 
-Свои черновые скрипты класть в `/tmp` контейнера; готовые `-f`-скрипты всех
-finbonds-скиллов лежат в профиле:
-`/opt/data/profiles/fin_bonds/skills/finance/<скилл>/scripts/<файл>`
+Свои черновые скрипты класть во временный каталог (`/tmp`); готовые
+`-f`-скрипты всех finbonds-скиллов лежат в `FIN_BONDS_SKILLS_DIR`:
+`"$FIN_BONDS_SKILLS_DIR/<скилл>/scripts/<файл>"`
 (полный каталог — в разделе «Каталог готовых `-f` скриптов» ниже).
 
 ## Рецепты
 
-Каждый рецепт этого раздела выполнен на живой БД через `pg.sh --csv` без
+Каждый рецепт этого раздела выполнен на живой БД через `"${FIN_BONDS_PSQL:-psql}" --csv` без
 ошибок (2026-09-30, см. Verification). Скрипты-шаблоны живут в `scripts/`
-скилла; после деплоя путь в контейнере:
-`/opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/`.
+скилла; после установки путь:
+`"$FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/"`.
 
 ### Рецепт 1 — найти эмитента/бумагу (scripts/issuer_lookup.sql)
 
@@ -97,7 +97,7 @@ finbonds-скиллов лежат в профиле:
 бумаги с эмитентом; блок 2 — найденные эмитенты (`companies`) со счётчиками
 бумаг каталога (всего/живых).
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -v q='RU000A10XYD1' -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/issuer_lookup.sql")`
+`"${FIN_BONDS_PSQL:-psql}" --csv -v q='RU000A10XYD1' -f "$FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/issuer_lookup.sql"`
 
 Параметры: `q` — обязательная подстрока для `ILIKE '%...%'`; `limit` —
 максимум строк на блок (default 30). Кириллические значения `q` — ТОЛЬКО
@@ -106,10 +106,13 @@ finbonds-скиллов лежат в профиле:
 
 ```
 \set q 'Система'
-\ir /opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/issuer_lookup.sql
+\ir <абсолютный путь: $FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/issuer_lookup.sql>
 ```
 
-и выполнить `pg.sh --csv -f /tmp/q.sql`. Если по имени не находится —
+(psql не раскрывает переменные окружения в `\ir` — при записи файла
+подставь абсолютный путь.)
+
+и выполнить `"${FIN_BONDS_PSQL:-psql}" --csv -f /tmp/q.sql`. Если по имени не находится —
 искать часть слова без падежного окончания («Система», не «Системы»):
 совпадение регистронезависимое, но морфологии нет.
 
@@ -122,7 +125,7 @@ finbonds-скиллов лежат в профиле:
 по найденным эмитентам (живая оценка, доля портфеля); блок 2 — позиции
 (брокер/счёт/статус/valuation_source).
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -v q='Глобал' -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/positions_by_issuer.sql")`
+`"${FIN_BONDS_PSQL:-psql}" --csv -v q='Глобал' -f "$FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/positions_by_issuer.sql"`
 
 Фильтр `position_status` — ОБЯЗАТЕЛЬНЫЙ пункт рецепта (миграция 010):
 по умолчанию скрипт показывает только `position_status = 'active'`; без
@@ -170,13 +173,13 @@ ORDER BY isin, metric_name, check_date DESC;
 (`OK` / `WARN_ZOMBIE_ROWS` / `CRITICAL_*` / `STALE_*` / `EMPTY_PORTFOLIO`,
 задача 002.1) — в SKILL.md `finbonds-data-refresh`. Запуск:
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-data-refresh/scripts/freshness_check.sql")`
+`"${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-data-refresh/scripts/freshness_check.sql"`
 
 ## Каталог готовых `-f` скриптов
 
 Все 8 SQL-скриптов finbonds-скиллов. Общая форма запуска:
-`pg.sh --csv [-v name=value ...] -f /opt/data/profiles/fin_bonds/skills/finance/<скилл>/scripts/<файл>`
-(в таблице путь от `/opt/data/profiles/fin_bonds/skills/finance/`).
+`"${FIN_BONDS_PSQL:-psql}" --csv [-v name=value ...] -f "$FIN_BONDS_SKILLS_DIR/<скилл>/scripts/<файл>"`
+(в таблице путь от `"$FIN_BONDS_SKILLS_DIR/`").
 
 | Скилл | Скрипт | Параметры `-v` | Что возвращает |
 |---|---|---|---|
@@ -196,14 +199,13 @@ ORDER BY isin, metric_name, check_date DESC;
 
 «Так делать нельзя» + чем заменить:
 
-1. **Голый `psql` без враппера.** Контейнерное окружение кредов fin_bonds
-   не содержит: падение на socket-fallback `/var/run/postgresql` (локально)
-   или `FATAL: role ... does not exist` (на хосте). Замена: только
-   `/opt/data/profiles/fin_bonds/bin/pg.sh` — он сам source-ит профильный
-   `.env`, `PG*` подхватывает libpq.
+1. **Голый `psql` без кредов.** Без `PG*`/`PGSERVICE` в окружении: падение
+   на socket-fallback `/var/run/postgresql` (локально) или
+   `FATAL: role ... does not exist` (на хосте). Замена: только
+   `"${FIN_BONDS_PSQL:-psql}"` с настроенным окружением или враппером.
 2. **Inline `-c` с кириллицей.** Триггерит security-сканер терминала
    (гомоглифы/юникод в кириллице) и ломается на вложенных кавычках.
-   Замена: SQL целиком в файл + `pg.sh --csv -f file.sql`; параметры —
+   Замена: SQL целиком в файл + `"${FIN_BONDS_PSQL:-psql}" --csv -f file.sql`; параметры —
    psql-переменные `-v`; кириллические значения параметров — файл-обёртка
    с `\set` (рецепт 1).
 3. **Деление цен/сумм в рублях на 100.** Номинал и цены уже в рублях
@@ -229,7 +231,7 @@ ORDER BY isin, metric_name, check_date DESC;
 
 Самопроверка карты (подставить нужное table_name):
 
-`pg.sh --csv -c "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='bonds_catalog' ORDER BY ordinal_position;"`
+`"${FIN_BONDS_PSQL:-psql}" --csv -c "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='bonds_catalog' ORDER BY ordinal_position;"`
 
 ### bonds_catalog — каталог облигаций, 33 колонки
 
@@ -469,7 +471,7 @@ CREATE OR REPLACE VIEW дописывает колонки только в ко�
 ## Verification
 
 - `make validate-skills` (корень репозитория fin_bonds) — зелёный.
-- Рецепты проверены на живой БД через `pg.sh --csv` без ошибок (2026-09-30):
+- Рецепты проверены на живой БД через `"${FIN_BONDS_PSQL:-psql}" --csv` без ошибок (2026-09-30):
   `issuer_lookup.sql` (латиница `-v q=RU000A10XYD1` и кириллица через
   файл-обёртку `\set q 'Система'`), `positions_by_issuer.sql` (кириллица
   `\set q 'Глобал'` и аудит `-v status=all` — зомби-позиция matured/zero

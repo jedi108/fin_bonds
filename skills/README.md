@@ -1,151 +1,127 @@
-# skills — скиллы HERMES AI для fin_bonds
+# skills — Agent Skills для fin_bonds
 
-> Переносимая конвенция скиллов/синка (для копирования в другие проекты):
-> [README_SKILLS_HERMES.md](README_SKILLS_HERMES.md). Этот README —
-> проектная конкретика; конвенция — общие правила и грабли.
+Набор из 14 скиллов `finbonds-*` (`finance/<name>/SKILL.md`: YAML-frontmatter,
+инструкции, SQL- и Python-скрипты) для работы с портфелем облигаций
+[fin_bonds](../README.md): контроль рисков, свежесть данных, ребалансировка.
+Скиллы не привязаны к конкретному агенту: подходят Claude Code, Codex,
+OpenCode и любому агенту, который читает `SKILL.md`.
 
-Канонический каталог скиллов HERMES AI поверх проекта fin_bonds (контроль
-рисков и ребалансировка портфеля облигаций). Скиллы публичны вместе с
-проектом; приватная часть (деплой-скрипт с хостом и путями, env, личные
-таргеты и составы портфеля) живёт отдельно и в репозиторий не попадает.
-
-## Политика разработки
-
-- Разработка ведётся здесь, в дереве `skills/` основного репозитория.
-  Никаких `~/.hermes/skills` как основного lifecycle (правило из H01).
-- В скиллах — только обезличенные примеры: никаких реальных ISIN/сумм
-  портфеля, хостов, пользователей и путей машины (только переменные
-  `FIN_BONDS_HOST`, `FIN_BONDS_APP_DIR` и т.п.).
-- Канонический экземпляр каждого скилла — один, в дереве `skills/`;
-  в профиль агента его доставляет синк (`scripts/sync_profile_skills.py`),
-  профиль — единственный каталог скиллов. Маунт дерева в контейнер удалён
-  (2026-09-30, изоляция fin_bonds от других профилей): SQL-скрипты скиллов
-  лежат в профиле и зовутся через `/opt/data/profiles/fin_bonds/bin/pg.sh`.
-  Правки — только в дереве, дальше синк.
-- Изменения: правка → валидация frontmatter (см. «Валидация») → commit/push
-  в main → `make deploy-skills` (rsync на Hermes-хост + синк профиля).
-- Секретов в скиллах нет: ключи/токены — только `.env` на хосте и SOPS.
-
-## Состав (finance/)
+## Состав
 
 | Скилл | Роль |
 |---|---|
 | `finbonds-ops` | карта проекта: команды, классы безопасности, границы записи |
 | `finbonds-data-refresh` | свежесть данных перед любой аналитикой |
 | `finbonds-risk-monitoring` | события риска: рейтинги, купоны, листинг, оферты |
-| `finbonds-company-debt` | долговая нагрузка эмитентов: снимки долга, `company-debt-report` (read-only, issue #4) |
+| `finbonds-company-debt` | долговая нагрузка эмитентов: снимки долга, `company-debt-report` (read-only) |
 | `finbonds-risk-assessment` | сводный риск-профиль (SQL-снапшот портфеля) |
 | `finbonds-event-calendar` | купоны/оферты/амортизации/погашения, денежный поток |
 | `finbonds-rebalance-advisor` | отклонения от лимитов + сценарий ребалансировки |
-| `finbonds-rebalance-tool` | stable adapter доменных команд ребалансировки: report/plan/compare/snapshot, typed whitelist, snapshot как artifact (030.11) |
+| `finbonds-rebalance-tool` | adapter доменных команд ребалансировки: report/plan/compare/snapshot, typed whitelist, snapshot как artifact |
 | `finbonds-buy-candidates` | скринер кандидатов на покупку + инкремент купонного потока |
-| `finbonds-chatgpt-portfolio-export` | P0 transport: текущий портфель → фиксированная Google Sheet для ChatGPT |
-| `finbonds-portfolio-export` | список портфеля (цены, стоимость, YTM) в MD для выгрузки |
+| `finbonds-chatgpt-portfolio-export` | текущий портфель → фиксированная Google Sheet для ChatGPT |
+| `finbonds-portfolio-export` | список портфеля (цены, стоимость, YTM) в Markdown |
 | `finbonds-portfolio-summary` | сводка по портфелям: вложено, текущая стоимость, PnL по счетам |
 | `finbonds-ratings` | кредитные рейтинги: гейт свежести, скоупы `update-ratings`, интерпретация шкал |
-| `finbonds-sql-recipes` | ad-hoc SQL к БД: враппер pg.sh, рецепты (эмитент/позиции/метрики), каталог `-f`-скриптов, анти-паттерны, карта схемы |
+| `finbonds-sql-recipes` | ad-hoc SQL: рецепты, каталог `-f`-скриптов, анти-паттерны, карта схемы |
 
-Доработки кода fin_bonds под скиллы — цепочка задач
-`../task/task_skills/` (индекс: `000_start.md`).
+## Требования
 
-Формат — стандарт HERMES (`hermes-agent-skill-authoring`): frontmatter
-`name/description(≤60 симв.)/version/author/license/platforms/metadata`,
-секции When to Use / Prerequisites / How to Run / Procedure / Pitfalls /
-Verification, без машинных путей (только `FIN_BONDS_ROOT`, `POSTGRES_DSN`,
-`FIN_BONDS_HOST`, `FIN_BONDS_APP_DIR`).
+- Развёрнутый fin_bonds: checkout с venv и `.env` (`POSTGRES_DSN`) —
+  установка в [корневом README](../README.md). Скиллы вызывают
+  `python3 main.py <command>` и читают PostgreSQL.
+- `psql` там, где агент выполняет SQL-скрипты.
+- Опционально `ssh`, если приложение живёт на другой машине, чем агент.
 
-## Рантайм-топология (Docker на Hermes-хосте)
+## Установка
 
-Hermes работает в docker-контейнере `hermes-ai` (данные `/opt/data`) на
-Hermes-хосте. Рабочий экземпляр fin_bonds (venv, `.env`, systemd-таймер,
-целевой каталог `make deploy`) смонтирован в контейнер read-only как
-`/opt/fin_bonds` (`FIN_BONDS_ROOT`); env-переменных `POSTGRES_*`/`PG*` в
-контейнере нет. Каталог скиллов — только профиль агента
-(`/opt/data/profiles/fin_bonds/skills`); `skills.external_dirs` не
-регистрировать — регистрация задваивала скиллы. psql в скиллах — через
-враппер профиля `/opt/data/profiles/fin_bonds/bin/pg.sh` (source-ит
-`.env` профиля, `PG*` подхватывает libpq).
-
-Изоляция: профили всех агентов Hermes живут в одном контейнере (общий uid
-`hermes`), поэтому finbonds-доступ (креды БД, SQL скиллов) существует только
-внутри профиля fin_bonds. Границу записи обеспечивает `:ro` на маунте кода;
-`.env` хоста из контейнера недоступен.
-
-## Синхронизация на хост
-
-`make deploy-skills` → приватный деплой-скрипт (хост, пути, compose-override
-лежат в приватном env/сабмодуле, не здесь): rsync `skills/` в рабочий
-экземпляр на хосте → гигиена внутри контейнера (external_dirs, враппер
-`pg.sh`, миграция cron-промптов) → `docker compose up -d` → диагностика →
-`sync_profile_skills.py sync` + `check`.
-
-Политика деплоя (обновлена 2026-09-29): деплой — штатная часть процесса
-изменений, а не отдельное «ручное» действие. Как только изменения скиллов
-пролиты в main (commit/push), следующим шагом выполняется
-`make deploy-skills`; откладывать деплой не нужно. Скрипты синка запускает
-человек или сессия кодинг-агента, работающая над репозиторием; HERMES (агент
-в профиле) сам эти скрипты не запускает и прав доступа к своим скиллам не
-имеет.
-
-## Манифест и синк профиля агента (005.6)
-
-Профиль агента (`/opt/data/profiles/fin_bonds/skills/`, в контейнере)
-наполняется отдельно от канонического дерева и разъезжается с ним: агент
-видит не все скиллы, SOP физически невыполним. Единый источник правды —
-манифест **`skills_manifest.yaml`**: канонический набор скиллов
-(`canonical.skills`), цель синка (`profile`), разрешённые черновики профиля
-(`profile_only_allowed` — синк их не трогает) и скиллы к удалению
-(`retired` — синк удаляет, перед этим перенесите уникальный контент в дерево).
-
-Скрипт — `scripts/sync_profile_skills.py`, две подкоманды:
-
-- `check` — только чтение: сверяет профиль с манифестом и каноническим
-  деревом; перечисляет MISSING/STALE/RETIRED (exit 1 при любом расхождении),
-  черновики (ALLOWED), посторонние каталоги (EXTRA) и «висячие» упоминания
-  `finbonds-*` в `SOUL.md` профиля;
-- `sync` — приводит профиль к манифесту: ставит отсутствующие скиллы,
-  обновляет расхожие, удаляет retired. **Идемпотентен**: повторный запуск
-  без изменений в дереве — no-op (только SKIP); после записи сам себя
-  перепроверяет. `--dry-run` показывает план без записи.
-
-Режимы: по умолчанию — по сети (ssh на Hermes-хост: контент берётся из
-копии skills на хосте, в контейнер ставится через `docker exec` +
-tar, владелец выравнивается по каталогу профиля); `--profile-dir DIR` —
-локальный каталог профиля (тесты/отладка). Хост/контейнер/пути — из
-манифеста (в манифесте — заглушки; реальные host и путь задаются
-`HERMES_HOST` / `HERMES_SKILLS_SRC`, make выводит их из приватного env). Тесты:
-`./venv/bin/python -m pytest skills/scripts/test_sync_profile_skills.py`.
-
-Полный деплой — одной командой из основного репозитория:
+Агенты ожидают плоскую раскладку `<dir>/<name>/SKILL.md`, а в репозитории
+дерево `skills/finance/<name>/`. Поэтому каждый каталог `finbonds-*` нужно
+положить (symlink или копия) прямо в каталог скиллов агента:
 
 ```bash
-make deploy-skills        # validate-skills -> rsync + гигиена хоста -> sync профиля -> check
-make check-skills-profile # только проверка профиля против манифеста (без записи)
+SRC="$PWD/skills/finance"          # из корня checkout fin_bonds
+DST="$HOME/.claude/skills"         # см. таблицу ниже
+mkdir -p "$DST"
+for d in "$SRC"/finbonds-*; do ln -sfn "$d" "$DST/$(basename "$d")"; done
+# если агент не следует symlink'ам:
+# for d in "$SRC"/finbonds-*; do cp -R "$d" "$DST/"; done
 ```
 
-Порядок изменений скилла: правка в дереве → `make validate-skills` →
-commit/push → `make deploy-skills` (rsync обновит копию на хосте, синк перенесёт его в профиль, check подтвердит целостность).
+| Агент | Глобально | В проекте |
+|---|---|---|
+| Claude Code | `~/.claude/skills/` | `<project>/.claude/skills/` |
+| Codex | `~/.agents/skills/` | `<repo>/.agents/skills/` |
+| OpenCode | `~/.config/opencode/skills/` | `.opencode/skills/` (читает также `.claude/skills` и `.agents/skills`) |
 
-Канал `skills.external_dirs` (регистрация внешнего каталога в конфиге) и
-маунт `/opt/skills/fin_bonds` удалены 2026-09-30: регистрация дублировала
-канонические скиллы (агент видел каждый и из профиля, и из внешнего
-каталога, на чём спотыкался сам агент), а маунт делал дерево скиллов и
-SQL-скрипты читаемыми всем профилям контейнера. Единственный канал доставки
-скиллов — синк профиля; SQL-скрипты скиллов лежат в профиле, psql — через
-`/opt/data/profiles/fin_bonds/bin/pg.sh`. Синк профиля работает независимо
-от compose-override.
+Поддержка symlink'ов зависит от агента и версии; если скиллы не видны —
+используйте `cp -R` (и повторяйте копирование после обновления репозитория).
 
-## Валидация скиллов перед коммитом
+После установки задайте `FIN_BONDS_SKILLS_DIR` = каталог-цель (абсолютный путь):
+скрипты в `SKILL.md` вызываются как
+`"$FIN_BONDS_SKILLS_DIR/<skill>/scripts/x.sql"`, в том числе между скиллами.
+В Claude Code переменные можно задать в `settings.json` в блоке `env`
+(только абсолютные пути, без `~` и `$HOME`).
 
-Автоматически — pre-commit hook (после клона один раз: `make hooks-install`;
-ставит `core.hooksPath` на `skills/hooks`). Вручную или в CI:
+## Переменные окружения
 
-```bash
-make validate-skills   # из корня основного репозитория
-```
+| Переменная | Назначение |
+|---|---|
+| `FIN_BONDS_SKILLS_DIR` | каталог, куда установлены папки `finbonds-*` |
+| `FIN_BONDS_PSQL` | исполняемый файл вместо `psql` (`"${FIN_BONDS_PSQL:-psql}"`). По умолчанию — обычный `psql` с libpq-переменными (`PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` или `PGSERVICE`), либо ваш враппер, подгружающий креды. DSN в команду не передавать |
+| `FIN_BONDS_ROOT` | необязательно: локальный read-only checkout fin_bonds |
+| `FIN_BONDS_HOST` | ssh-алиас машины, где запущено приложение (venv + `.env`) |
+| `FIN_BONDS_APP_DIR` | каталог приложения на этой машине (default `$HOME/work/bonds`) |
+| `FIN_BONDS_TRANSPORT` | только adapter ребалансировки: `auto` (default: `ssh`, если задан `FIN_BONDS_HOST`, иначе `local`) / `ssh` / `local` |
+| `FIN_BONDS_HOST_PY` | только adapter: интерпретатор core (default `venv/bin/python`) |
+| `FIN_BONDS_REBALANCE_TIMEOUT_SEC`, `FIN_BONDS_ARTIFACT_DIR` | только adapter: таймаут core (default 300) и каталог snapshot-артефактов |
 
-Валидатор — `scripts/validate_skills.py`: обязательные ключи frontmatter
-`name/description/version/author/license/platforms`, description ≤ 60 символов
-и заканчивается точкой; согласованность дерева `finance/` с манифестом
-`skills_manifest.yaml` (скилл без записи в манифесте синк профиля не
-развернёт). Ненулевой код выхода при любой ошибке.
+Подробности по adapter — в `finance/finbonds-rebalance-tool/SKILL.md`.
+
+**Локально или удалённо.** Команды в скиллах записаны как
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && ...'`.
+Если агент запущен на той же машине, что и приложение, ssh-обёртку
+отбросьте и выполняйте часть после `&&` в каталоге приложения.
+
+## Безопасность
+
+- По умолчанию всё read-only. Мутирующие команды (обновление данных,
+  запись в БД) — только по явной просьбе пользователя; классы команд и
+  границы записи описаны в `finbonds-ops`.
+- DSN и пароли — секрет: только `.env` приложения или libpq-окружение,
+  никогда в тексте команды, скилла или ответа агента.
+- В скиллах нет реальных ISIN, составов портфеля, хостов и путей машины:
+  примеры синтетические, всё конкретное задаётся переменными окружения.
+
+## Разработка скиллов
+
+**Frontmatter** (обязательны `name`, `description`, `version`, `author`,
+`license`, `platforms`):
+
+- `name` совпадает с именем каталога;
+- `description` — не длиннее 60 символов, заканчивается точкой;
+- значения в `metadata` — строки (например `tags: "FinBonds, CLI"`).
+
+**Структура тела** — как в существующих скиллах: `When to Use`,
+`Prerequisites`, `How to Run`, `Procedure`, `Pitfalls`, `Verification`
+(не все разделы нужны каждому скиллу).
+
+**Валидация** — `make validate-skills`
+(`./venv/bin/python skills/scripts/validate_skills.py`). Проверяет:
+
+- frontmatter: обязательные ключи, длина и точка в `description`;
+- SQL в `scripts/*.sql`: файл не пуст, `\if`/`\endif` и скобки сбалансированы;
+- все `scripts/<file>.sql`, упомянутые в `SKILL.md`, существуют;
+- агент-нейтральность: в `SKILL.md` и `scripts/*` нет привязки к
+  конкретному рантайму (пути контейнера, имя рантайма, его tool-синтаксис);
+- WARN (не влияет на код выхода): таблицы в `FROM/JOIN/UPDATE/INTO`
+  из текста `SKILL.md`, которых нет в миграциях.
+
+**Pre-commit hook** — `make hooks-install` (валидация при коммитах,
+затрагивающих `skills/`).
+
+**Тесты** — `./venv/bin/python -m pytest skills/scripts`.
+
+## Лицензия
+
+MIT.

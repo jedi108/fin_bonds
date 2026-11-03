@@ -1,14 +1,13 @@
 ---
 name: finbonds-ratings
 description: "Кредитные рейтинги: обновление, свежесть, интерпретация."
-version: 1.0.0
-author: jedi (jedi108), Hermes Agent
+version: 1.0.1
+author: jedi (jedi108)
 license: MIT
 platforms: [linux]
 metadata:
-  hermes:
-    tags: [FinBonds, Ratings, Credit, AKRA, ExpertRA, NKR]
-    related_skills: [finbonds-risk-monitoring, finbonds-risk-assessment, finbonds-ops, finbonds-data-refresh]
+  tags: "FinBonds, Ratings, Credit, AKRA, ExpertRA, NKR"
+  related_skills: "finbonds-risk-monitoring, finbonds-risk-assessment, finbonds-ops, finbonds-data-refresh"
 ---
 
 # FinBonds Ratings Skill
@@ -32,11 +31,10 @@ Don't use for: risk_level Т-Банка сам по себе (это поле Б
 
 ## Prerequisites
 
-- Контракт путей и хоста — см. `finbonds-ops` (CLI на хосте, psql в
-  контейнере через враппер `pg.sh`).
+- Контракт путей и хоста — см. `finbonds-ops` (CLI на хосте, psql через
+  `"${FIN_BONDS_PSQL:-psql}"`).
 - Гейт свежести — скрипт этого скилла `scripts/ratings_freshness.sql`
-  (в контейнере:
-  `/opt/data/profiles/fin_bonds/skills/finance/finbonds-ratings/scripts/ratings_freshness.sql`).
+  (`"$FIN_BONDS_SKILLS_DIR/finbonds-ratings/scripts/ratings_freshness.sql"`).
 - Ночная автоматизация: шаг 4 `run_update.sh` = `update-ratings` без
   флагов (скоуп `portfolio`). Ручной запуск безопасен: запись в
   `rating_history` идемпотентна за день (уникальный индекс
@@ -44,15 +42,15 @@ Don't use for: risk_level Т-Банка сам по себе (это поле Б
 
 ## How to Run
 
-Гейт свежести (контейнер, миллисекунды):
+Гейт свежести (миллисекунды):
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-ratings/scripts/ratings_freshness.sql")`
+`"${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-ratings/scripts/ratings_freshness.sql"`
 
 Колонки (CSV, одна строка): `rating_history_rows|max_rating_date|na_tail|never_checked|alive_catalog`, где `na_tail` — живые бумаги каталога с последней проверкой `'N/A'`, `never_checked` — живые без проверок вовсе.
 
 Запуск обновления (хост):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py update-ratings --scope portfolio'", timeout=900)`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py update-ratings --scope portfolio'`
 
 ## Procedure
 

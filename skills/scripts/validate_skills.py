@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Валидация скиллов HERMES (fin_bonds).
+"""Валидация скиллов агентов fin_bonds (skills/).
 
 Проверяет каждый SKILL.md в дереве skills:
 - frontmatter: обязательные ключи name/description/version/author/license/
@@ -7,7 +7,9 @@
 - все scripts/*.sql скилла: файл не пуст, psql-блоки \\if/\\endif сбалансированы,
   скобки сбалансированы (после вырезания комментариев и строковых литералов);
 - все scripts/*.sql, упомянутые в SKILL.md, существуют на диске в дереве
-  скиллов (ссылки вида `scripts/<file>.sql` и полные in-container пути);
+  скиллов (ссылки вида `scripts/<file>.sql`, в т.ч. через $FIN_BONDS_SKILLS_DIR);
+- агент-нейтральность: в SKILL.md и scripts/* нет привязки к конкретному
+  рантайму агента (FORBIDDEN_RE — пути контейнера, имя рантайма, его tool-синтаксис);
 - doc-drift guard (015, предупреждение): имена таблиц в SQL-упоминаниях
   SKILL.md (позиции FROM/JOIN/UPDATE/INTO) сверяются с фиксированным
   списком таблиц/вью из миграций 001-017 (+ служебная schema_migrations).
@@ -18,6 +20,7 @@
 Выход с ненулевым кодом при любой ошибке. Используется в make validate-skills
 (основной репозиторий) и в pre-commit hook репозитория.
 """
+import os
 import pathlib
 import re
 import sys
@@ -25,6 +28,12 @@ import sys
 MAX_DESCRIPTION = 60
 REQUIRED_KEYS = ('name', 'description', 'version', 'author', 'license', 'platforms')
 SQL_REF_RE = re.compile(r'scripts/[A-Za-z0-9_.-]+\.sql')
+# Скиллы публичны и работают в любом агенте: пути/рантайм конкретного
+# деплоя задаются env (FIN_BONDS_PSQL, FIN_BONDS_SKILLS_DIR), не текстом.
+# SKILLS_FORBIDDEN_RE — доп. запрещённые слова приватного деплоя (из его env).
+FORBIDDEN_RE = re.compile('|'.join(filter(None, [
+    r'/opt/\w+', r'terminal\(command=', r'docker exec',
+    os.environ.get('SKILLS_FORBIDDEN_RE')])), re.I)
 
 # Таблицы/вью из миграций migrations/postgres/001-017 + служебная
 # schema_migrations (журнал ранера). Канон карты — скилл
@@ -145,6 +154,14 @@ def validate(path: pathlib.Path, root: pathlib.Path, sql_index: dict) -> tuple:
     elif description and not description.endswith('.'):
         errors.append(f'{rel}: description должен заканчиваться точкой')
 
+    for f in [path, *sorted((path.parent / 'scripts').glob('*'))]:
+        if not f.is_file() or f.suffix == '.pyc':
+            continue
+        for n, line in enumerate(f.read_text(encoding='utf-8').splitlines(), 1):
+            if FORBIDDEN_RE.search(line):
+                errors.append(f'{f.relative_to(root)}:{n}: привязка к рантайму '
+                              f'агента: {line.strip()[:80]}')
+
     # Синтаксическая проверка всех SQL-скриптов скилла.
     for sql_path in sorted((path.parent / 'scripts').glob('*.sql')):
         for e in validate_sql(sql_path):
@@ -174,41 +191,6 @@ def validate(path: pathlib.Path, root: pathlib.Path, sql_index: dict) -> tuple:
     return errors, warnings
 
 
-def check_manifest(root: pathlib.Path, skill_dirs: set) -> list:
-    """Манифест skills_manifest.yaml покрывает все каталоги скиллов (005.6).
-
-    Манифест — источник правды канонического набора для синка профиля
-    (scripts/sync_profile_skills.py); скилл без записи в манифесте не будет
-    развёрнут в профиль агента.
-    """
-    path = root / 'skills_manifest.yaml'
-    if not path.is_file():
-        return ['нет skills_manifest.yaml — манифест канонического набора '
-                'обязателен (см. 005.6)']
-    try:
-        import yaml
-        data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-    except ImportError:
-        # PyYAML нет — согласованность манифеста проверит sync_profile_skills.py
-        return []
-    except Exception as e:
-        return [f'skills_manifest.yaml не читается: {e}']
-    canonical = data.get('canonical') or {}
-    listed = [str(s) for s in (canonical.get('skills') or [])]
-    source_dir = str(canonical.get('source_dir') or 'finance')
-    if not listed:
-        return ['skills_manifest.yaml: canonical.skills пуст']
-    errors = []
-    for name in sorted(skill_dirs - set(listed)):
-        errors.append(f'скилл "{name}" есть в дереве, но отсутствует в '
-                      f'skills_manifest.yaml (canonical.skills) — синк профиля '
-                      f'его не развернёт')
-    for name in sorted(set(listed) - skill_dirs):
-        errors.append(f'скилл "{name}" есть в skills_manifest.yaml, но нет '
-                      f'{source_dir}/{name}/SKILL.md')
-    return errors
-
-
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
     skills = sorted(root.rglob('SKILL.md'))
@@ -235,14 +217,7 @@ def main() -> int:
         summary += f' ({warned} предупрежд.)'
     print(summary)
 
-    manifest_errors = check_manifest(root, {p.parent.name for p in skills})
-    for error in manifest_errors:
-        print(f'FAIL {error}', file=sys.stderr)
-    if not manifest_errors:
-        print(f'Манифест: OK '
-              f'({len({p.parent.name for p in skills})} скиллов покрыты)')
-    return 1 if (failed or manifest_errors) else 0
-
+    return 1 if failed else 0
 
 if __name__ == '__main__':
     sys.exit(main())

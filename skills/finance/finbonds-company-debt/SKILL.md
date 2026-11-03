@@ -1,14 +1,13 @@
 ---
 name: finbonds-company-debt
 description: "Долговая нагрузка эмитентов: снимки долга, отчёт."
-version: 0.1.0
-author: jedi (jedi108), Hermes Agent
+version: 0.1.1
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Debt, Issuer, Risk, Advisory]
-    related_skills: [finbonds-ops, finbonds-risk-assessment, finbonds-rebalance-advisor, finbonds-sql-recipes]
+  tags: "FinBonds, Debt, Issuer, Risk, Advisory"
+  related_skills: "finbonds-ops, finbonds-risk-assessment, finbonds-rebalance-advisor, finbonds-sql-recipes"
 ---
 
 # FinBonds Company Debt Skill
@@ -38,7 +37,7 @@ Don't use for: событий по бумагам (`finbonds-risk-monitoring`); 
 
 Отчёт (JSON по умолчанию для агента, stdout — чистый JSON):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py company-debt-report --format json --stale-days 180'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py company-debt-report --format json --stale-days 180'`
 
 Для человека — `--format table`. Импорт снимков (только по просьбе, пишет в БД):
 `main.py import-company-debt --file <csv|json>` — вывод: `rows/inserted/updated`,

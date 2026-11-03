@@ -14,15 +14,9 @@ DEPLOY_ENC_FILE ?= $(ENV_DIR)/.env.prod.enc
 DEPLOY_GIT_SAFE_DIR ?=
 DEPLOY_CONF_DIR ?= ./workspace/fin_bonds/deploy
 SKILLS_DIR ?= ./skills
-# Hermes-хост и копия скиллов на нём — по умолчанию из .env.deploy
-# (скиллы rsync-ятся в рабочий экземпляр, как и `make deploy`).
-HERMES_HOST ?= $(DEPLOY_USER)@$(DEPLOY_HOST)
-FIN_BONDS_DIR ?= $(DEPLOY_DIR)
-HERMES_SKILLS_SRC ?= $(FIN_BONDS_DIR)/skills
-export HERMES_HOST FIN_BONDS_DIR HERMES_SKILLS_SRC SKILLS_DIR
 VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
-.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills deploy-skills check-skills-profile hooks-install migrate-remote migrate test
+.PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills hooks-install migrate-remote migrate test
 
 check-deploy-env:
 	@if [ "$(DEPLOY_HOST)" = "your-server" ] || [ -z "$(DEPLOY_HOST)" ]; then \
@@ -47,9 +41,7 @@ help:
 	@echo "  make migrate        - Применить миграции БД локально (PostgreSQL; идемпотентно)"
 	@echo "  make migrate-remote - Применить миграции БД на сервере (PostgreSQL; идемпотентно)"
 	@echo "  make test           - Запустить тесты (pytest; нужна тестовая БД POSTGRES_DSN_TEST)"
-	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills)"
-	@echo "  make deploy-skills  - Синхронизация скиллов на хост Hermes + синк профиля + проверка"
-	@echo "  make check-skills-profile - Проверка профиля Hermes против манифеста скиллов (005.6)"
+	@echo "  make validate-skills - Валидация скиллов агентов (skills/)"
 	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов (skills/hooks)"
 
 # Первичная инициализация на сервере
@@ -140,25 +132,10 @@ migrate:
 test:
 	$(VENV_PY) -m pytest tests/
 
-# Валидация frontmatter скиллов HERMES перед коммитом/деплоем
+# Валидация скиллов агентов (frontmatter, SQL-ссылки) перед коммитом
 validate-skills:
 	@test -d $(SKILLS_DIR) || { echo "Ошибка: нет $(SKILLS_DIR)"; exit 1; }
 	$(VENV_PY) $(SKILLS_DIR)/scripts/validate_skills.py
-
-# Синхронизация скиллов на хост Hermes + синк профиля агента + проверка
-# целостности (005.6). Синк профиля идемпотентен: без изменений в
-# каноническом дереве повторный запуск — no-op. Скиллы — публичный
-# $(SKILLS_DIR); деплой-скрипт (хост, пути, compose) — приватный $(DEPLOY_CONF_DIR).
-deploy-skills: validate-skills
-	@test -f $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh || { echo "Ошибка: нет $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh (инициализируйте сабмодуль: git submodule update --init workspace)"; exit 1; }
-	@test -f $(SKILLS_DIR)/scripts/sync_profile_skills.py || { echo "Ошибка: нет $(SKILLS_DIR)/scripts/sync_profile_skills.py"; exit 1; }
-	bash $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh
-	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py sync
-	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py check
-
-# Проверка целостности: профиль агента Hermes против манифеста (только чтение)
-check-skills-profile:
-	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py check
 
 # Однократная установка pre-commit hook валидации скиллов
 hooks-install:
@@ -193,3 +170,6 @@ timer-install:
 
 timer-status:
 	ssh $(DEPLOY_USER)@$(DEPLOY_HOST) "systemctl status $(DEPLOY_SERVICE).timer"
+
+# Приватные цели (деплой скиллов и т.п.), если сабмодуль workspace инициализирован
+-include $(DEPLOY_CONF_DIR)/skills.mk

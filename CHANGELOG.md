@@ -4,6 +4,14 @@
 
 ## 2026-11-03
 
+- refactor(skills): скиллы агентов — публичный агент-нейтральный каталог
+  `skills/` (Claude Code, Codex, OpenCode и др.). Пути рантайма заменены
+  env-контрактом `FIN_BONDS_PSQL` / `FIN_BONDS_SKILLS_DIR` / `FIN_BONDS_ROOT`,
+  `metadata` во frontmatter — строки; README с установкой под разные агенты;
+  `validate_skills.py` проверяет отсутствие привязки к рантайму. Деплой
+  скиллов конкретного агента (синк профиля, манифест, `deploy-skills`) —
+  в приватном сабмодуле, подключается через `-include`.
+
 - feat(compare): безопасное сравнение внешних подборок с портфелем (issue #5,
   P0+P1). Новая команда `compare-external --file <json|csv> [--format
   json|table] [--min-credit-rating A+] [--max-source-skew-days 3]`: ключ —

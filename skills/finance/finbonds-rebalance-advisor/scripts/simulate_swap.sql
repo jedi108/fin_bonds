@@ -1,10 +1,10 @@
 -- FinBonds Swap Simulator & Financial Increment Calculator
--- Usage: /opt/data/profiles/fin_bonds/bin/pg.sh -v sell_isin='RU000A...' -v sell_qty=50 -v buy_isin='RU000B...' -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-advisor/scripts/simulate_swap.sql
+-- Usage: "${FIN_BONDS_PSQL:-psql}" -v sell_isin='RU000A...' -v sell_qty=50 -v buy_isin='RU000B...' -f "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-advisor/scripts/simulate_swap.sql"
 -- Двухногая покупка (опционально, 002.4/P6.3): вторая нога — buy_isin_2 с ЯВНОЙ
 -- суммой buy_amount_2 (руб.); нога 1 покупает на остаток выручки. Итоговый
 -- портфель и лимиты цепочки свопов всё равно проверяет scenario_summary.sql.
--- Usage 2: /opt/data/profiles/fin_bonds/bin/pg.sh -v sell_isin='RU000A...' -v sell_qty=50 \
---              -v buy_isin='RU000B...' -v buy_isin_2='RU000C...' -v buy_amount_2=100000 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-advisor/scripts/simulate_swap.sql
+-- Usage 2: "${FIN_BONDS_PSQL:-psql}" -v sell_isin='RU000A...' -v sell_qty=50 \
+--              -v buy_isin='RU000B...' -v buy_isin_2='RU000C...' -v buy_amount_2=100000 -f "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-advisor/scripts/simulate_swap.sql"
 
 \if :{?sell_isin} \else \echo 'Error: sell_isin is required' \q \endif
 \if :{?sell_qty}  \else \echo 'Error: sell_qty is required'  \q \endif

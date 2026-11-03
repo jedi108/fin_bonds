@@ -1,14 +1,13 @@
 ---
 name: finbonds-risk-monitoring
 description: "Ежедневный контроль событий риска по портфелю облигаций."
-version: 0.1.1
-author: jedi (jedi108), Hermes Agent
+version: 0.1.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Risk, Monitoring, Alerts]
-    related_skills: [finbonds-ops, finbonds-data-refresh, finbonds-event-calendar]
+  tags: "FinBonds, Risk, Monitoring, Alerts"
+  related_skills: "finbonds-ops, finbonds-data-refresh, finbonds-event-calendar"
 ---
 
 # FinBonds Risk Monitoring Skill
@@ -40,11 +39,11 @@ Don't use for: сводного риск-профиля портфеля (это
 
 На хосте:
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-changes && venv/bin/python main.py check-offers'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-changes && venv/bin/python main.py check-offers'`
 
-Быстрая сверка истории в контейнере:
+Быстрая сверка истории:
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -c \"SELECT * FROM risk_history ORDER BY id DESC LIMIT 20;\"")`
+`"${FIN_BONDS_PSQL:-psql}" -c "SELECT * FROM risk_history ORDER BY id DESC LIMIT 20;"`
 
 ## Procedure
 

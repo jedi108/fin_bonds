@@ -1,12 +1,12 @@
 -- FinBonds Scenario Summary — целевой портфель после набора сделок (P6).
 -- Все доли, концентрации, поток и дюрация считаются в БД (нулевой ментальный счёт).
 -- Usage (2 файла в ОДНОЙ psql-сессии):
---   1) write_file /tmp/planned_trades.sql:
+--   1) запиши файл /tmp/planned_trades.sql:
 --        CREATE TEMP TABLE planned(isin text, qty_delta numeric);
 --        INSERT INTO planned VALUES ('RU000A10XXXX', -530), ('RU000A10YYYY', 532);
 --      qty_delta: продажа — отрицательное, покупка — положительное, в штуках.
---   2) /opt/data/profiles/fin_bonds/bin/pg.sh -f /tmp/planned_trades.sql \
---        -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-advisor/scripts/scenario_summary.sql
+--   2) "${FIN_BONDS_PSQL:-psql}" -f /tmp/planned_trades.sql \
+--        -f "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-advisor/scripts/scenario_summary.sql"
 --   CSV целевого портфеля: те же файлы + флаг --csv (psql печатает подряд и
 --   служебные теги CREATE TABLE / INSERT n / CREATE VIEW, и result set'ы;
 --   целевой портфель — блок 2, т.е. третий CSV-заголовок после блоков 0–1).

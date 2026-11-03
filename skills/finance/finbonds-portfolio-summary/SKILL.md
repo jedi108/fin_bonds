@@ -1,21 +1,20 @@
 ---
 name: finbonds-portfolio-summary
 description: "Сводка по счетам и портфелям: вложено, оценка и PnL."
-version: 0.1.1
-author: jedi (jedi108), Hermes Agent
+version: 0.1.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Portfolio, Balances, Summary]
-    related_skills: [finbonds-ops, finbonds-data-refresh, finbonds-portfolio-export]
+  tags: "FinBonds, Portfolio, Balances, Summary"
+  related_skills: "finbonds-ops, finbonds-data-refresh, finbonds-portfolio-export"
 ---
 
 # FinBonds Portfolio Summary Skill
 
 Сводка по портфелям и счетам из PostgreSQL: сколько денег вложено всего,
 текущая рыночная оценка, нереализованный PnL и распределение по брокерам
-и счетам. Чистое чтение — работает прямо в контейнере через psql.
+и счетам. Чистое чтение — работает через psql.
 
 ## When to Use
 
@@ -32,18 +31,17 @@ Don't use for: детального списка бумаг с ценами и Y
 - Контракт путей и хоста — см. `finbonds-ops`.
 - Свежесть позиций — см. `finbonds-data-refresh` (портфель синхронизирован
   не позже 3 дней назад).
-- Скрипт лежит в этом скилле: `scripts/portfolio_summary.sql` (в контейнере:
-  `/opt/data/profiles/fin_bonds/skills/finance/finbonds-portfolio-summary/scripts/portfolio_summary.sql`).
+- Скрипт лежит в этом скилле: `scripts/portfolio_summary.sql` (`"$FIN_BONDS_SKILLS_DIR/finbonds-portfolio-summary/scripts/portfolio_summary.sql"`).
 
 ## How to Run
 
-Вызов через файл скрипта в контейнере (read-only):
+Вызов через файл скрипта (read-only):
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-portfolio-summary/scripts/portfolio_summary.sql")`
+`"${FIN_BONDS_PSQL:-psql}" -f "$FIN_BONDS_SKILLS_DIR/finbonds-portfolio-summary/scripts/portfolio_summary.sql"`
 
 Или прямой SQL-запрос сводки:
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -c \"SELECT broker_name, COALESCE(NULLIF(account_id, ''), 'основной') AS account_id, COUNT(*) AS positions_count, ROUND(SUM(quantity * average_price)::numeric, 0) AS invested_rub, ROUND(SUM(current_value)::numeric, 0) AS current_value_rub, ROUND(SUM(current_value - (quantity * average_price))::numeric, 0) AS pnl_rub, ROUND(100.0 * SUM(current_value)::numeric / NULLIF((SELECT SUM(current_value) FROM portfolio_positions), 0)::numeric, 1) AS share_pct FROM portfolio_positions GROUP BY broker_name, account_id ORDER BY current_value_rub DESC;\"")`
+`"${FIN_BONDS_PSQL:-psql}" -c "SELECT broker_name, COALESCE(NULLIF(account_id, ''), 'основной') AS account_id, COUNT(*) AS positions_count, ROUND(SUM(quantity * average_price)::numeric, 0) AS invested_rub, ROUND(SUM(current_value)::numeric, 0) AS current_value_rub, ROUND(SUM(current_value - (quantity * average_price))::numeric, 0) AS pnl_rub, ROUND(100.0 * SUM(current_value)::numeric / NULLIF((SELECT SUM(current_value) FROM portfolio_positions), 0)::numeric, 1) AS share_pct FROM portfolio_positions GROUP BY broker_name, account_id ORDER BY current_value_rub DESC;"`
 
 ## Procedure
 

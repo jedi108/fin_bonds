@@ -1,14 +1,13 @@
 ---
 name: finbonds-event-calendar
 description: "Календарь купонов, оферт, амортизаций и погашений портфеля."
-version: 0.1.1
-author: jedi (jedi108), Hermes Agent
+version: 0.1.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Calendar, Cashflow, Offers]
-    related_skills: [finbonds-ops, finbonds-risk-monitoring, finbonds-rebalance-advisor]
+  tags: "FinBonds, Calendar, Cashflow, Offers"
+  related_skills: "finbonds-ops, finbonds-risk-monitoring, finbonds-rebalance-advisor"
 ---
 
 # FinBonds Event Calendar Skill
@@ -36,13 +35,13 @@ Don't use for: классификации событий как рисков (`f
 
 ## How to Run
 
-Ближайшие события (в контейнере):
+Ближайшие события:
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -c \"SELECT p.isin, p.name, c.offer_date, c.maturity_date FROM portfolio_positions p JOIN bonds_catalog c ON c.isin=p.isin WHERE c.offer_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '60 days') OR c.maturity_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '60 days') ORDER BY COALESCE(c.offer_date, c.maturity_date);\"")`
+`"${FIN_BONDS_PSQL:-psql}" -c "SELECT p.isin, p.name, c.offer_date, c.maturity_date FROM portfolio_positions p JOIN bonds_catalog c ON c.isin=p.isin WHERE c.offer_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '60 days') OR c.maturity_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '60 days') ORDER BY COALESCE(c.offer_date, c.maturity_date);"`
 
 Денежный поток по месяцам (на хосте):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py calculate-monthly-profit'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py calculate-monthly-profit'`
 
 ## Procedure
 

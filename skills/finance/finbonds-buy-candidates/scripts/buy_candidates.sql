@@ -1,8 +1,8 @@
--- FinBonds buy candidates screener for LLM / Hermes Agent (read-only).
+-- FinBonds buy candidates screener for LLM-агента (read-only).
 -- Finds top bond candidates outside current portfolio with low risk and fresh prices.
 -- By default (include_held=false) portfolio ISINs are excluded; with include_held=true
 -- held bonds stay in the output with a "held (share N%)" badge (task 002.2).
--- Usage: /opt/data/profiles/fin_bonds/bin/pg.sh -v max_risk=1 -v coupon_freq=12 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-buy-candidates/scripts/buy_candidates.sql
+-- Usage: "${FIN_BONDS_PSQL:-psql}" -v max_risk=1 -v coupon_freq=12 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f "$FIN_BONDS_SKILLS_DIR/finbonds-buy-candidates/scripts/buy_candidates.sql"
 -- Usage (rebalance SOP, with held bonds): add -v include_held=true
 
 \if :{?max_risk}

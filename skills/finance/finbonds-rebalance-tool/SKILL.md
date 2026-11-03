@@ -1,14 +1,13 @@
 ---
 name: finbonds-rebalance-tool
 description: "Стабильный adapter доменных команд ребалансировки."
-version: 0.1.3
-author: jedi (jedi108), Hermes Agent
+version: 0.1.4
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Bonds, Rebalance, CLI, Safety]
-    related_skills: [finbonds-ops, finbonds-rebalance-advisor, finbonds-data-refresh]
+  tags: "FinBonds, Bonds, Rebalance, CLI, Safety"
+  related_skills: "finbonds-ops, finbonds-rebalance-advisor, finbonds-data-refresh"
 ---
 
 # FinBonds Rebalance Tool (stable adapter)
@@ -44,7 +43,7 @@ machine-readable JSON. Обычная ребалансировка = `report` �
   | Где запущен adapter | `FIN_BONDS_APP_DIR` |
   |---|---|
   | Хост / машина владельца (HOME=/home/<user>) | `~` ок: дефолт `~/work/bonds` → `/home/<user>/work/bonds` |
-  | hermes-контейнер (docker exec, HOME=/opt/data) | только явный абсолютный путь из карты `finbonds-ops` (`/home/<user>/work/bonds`); иначе `/opt/data/work/bonds` → typed-отказ |
+  | Песочница/контейнер агента с другим HOME | только явный абсолютный путь на хосте (`/home/<user>/work/bonds`); иначе `~` развернётся в HOME песочницы → typed-отказ |
 
   Явный абсолютный путь работает отовсюду как раньше.
 - DSN/секреты adapter'у не нужны: слой хранения core читает `.env` на хосте
@@ -52,9 +51,9 @@ machine-readable JSON. Обычная ребалансировка = `report` �
 
 ## How to Run
 
-Скрипт: `/opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py`
+Скрипт: `"$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py"`
 
-`terminal(command="python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py report --freq-max 12")`
+`python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" report --freq-max 12`
 
 Контракт ответа: **stdout — machine-readable JSON, stderr — diagnostics,
 exit code сохраняется от core** (ожидаемые отказы core — `CONTEXT_*`,
@@ -78,9 +77,9 @@ exit 2), не traceback.
 
 Обычная ребалансировка (baseline):
 
-`terminal(command="python3 .../rebalance_adapter.py report --include-held --max-position-value 350000")`
+`python3 .../rebalance_adapter.py report --include-held --max-position-value 350000`
 
-`terminal(command="python3 .../rebalance_adapter.py plan --sell-all RU000A0ZZZ01 --target-value RU000B0YYYY2=350000 --target-value RU000C0XXXX3=200000")`
+`python3 .../rebalance_adapter.py plan --sell-all RU000A0ZZZ01 --target-value RU000B0YYYY2=350000 --target-value RU000C0XXXX3=200000`
 
 Порядок повторений `--target-value` = allocation priority (первый — самый
 приоритетный) — adapter сохраняет его как есть.
@@ -90,18 +89,18 @@ Candidate-policy покупки (031.1/031.2): политика подбирае
 (max-risk 1, KU исключены); `--freq-in` взаимоисключим с
 `--freq-min/--freq-max` (конфликт ловит core):
 
-`terminal(command="python3 .../rebalance_adapter.py plan --target-value RU000B0YYYY2=350000 --max-risk 3 --max-ytm 30 --include-ku --min-maturity 2026-01-01 --freq-in 4,12")`
+`python3 .../rebalance_adapter.py plan --target-value RU000B0YYYY2=350000 --max-risk 3 --max-ytm 30 --include-ku --min-maturity 2026-01-01 --freq-in 4,12`
 
 A/B альтернативы на одном контексте (030.9): варианты отличаются только
 префиксом `--a-`/`--b-`; оба считаются по одному `--context-id` (или по
 свежей сборке) — сравнение разных `context_fingerprint` core отвергает
 сам (`CONTEXT_MISMATCH`):
 
-`terminal(command="python3 .../rebalance_adapter.py compare --a-target-value RU000B0YYYY2=350000 --b-target-value RU000B0YYYY2=500000 --b-exclude-sovereign --context-id abcdef0123456789abcdef0123456789")`
+`python3 .../rebalance_adapter.py compare --a-target-value RU000B0YYYY2=350000 --b-target-value RU000B0YYYY2=500000 --b-exclude-sovereign --context-id abcdef0123456789abcdef0123456789`
 
 Анализ по frozen-контексту (sandbox escape hatch, 030.10/030.12):
 
-`terminal(command="python3 .../rebalance_adapter.py analysis-snapshot --requires ytm,credit_rating")`
+`python3 .../rebalance_adapter.py analysis-snapshot --requires ytm,credit_rating`
 
 ## Ответ adapter'а на analysis-snapshot
 
@@ -159,10 +158,10 @@ JSON как есть и сохраняет exit code (второй envelope не
 - `plan` без `--context-id` собирает свежий контекст: два вызова в разное
   время = разные `context_fingerprint` — сравнивать их напрямую нельзя.
 - Артефакт snapshot'а приватный: не отправлять наружу и не публиковать.
-- `cd: /opt/data/work/bonds: No such file or directory` +
-  `ADAPTER_COMMAND_FAILED` при запуске adapter из hermes-контейнера —
+- `cd: <HOME песочницы>/work/bonds: No such file or directory` +
+  `ADAPTER_COMMAND_FAILED` при запуске adapter из песочницы агента —
   неявный (дефолтный `~`) или неверный app_dir: tilde развернулся против
-  HOME контейнера (`/opt/data`), на хосте такого пути нет. Это не
+  HOME песочницы агента, на хосте такого пути нет. Это не
   дефект adapter/core; чинится явным абсолютным `FIN_BONDS_APP_DIR`
   (таблица — Prerequisites, карта окружения — `finbonds-ops`).
 - `DEBUG: Parsed arguments:` в stderr core — норма, не ошибка.

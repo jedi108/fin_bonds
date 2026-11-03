@@ -1,21 +1,20 @@
 ---
 name: finbonds-risk-assessment
 description: "Риск-профиль портфеля: концентрации, дюрация, ликвидность."
-version: 0.1.1
-author: jedi (jedi108), Hermes Agent
+version: 0.1.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Risk, Portfolio, SQL]
-    related_skills: [finbonds-ops, finbonds-data-refresh, finbonds-rebalance-advisor]
+  tags: "FinBonds, Risk, Portfolio, SQL"
+  related_skills: "finbonds-ops, finbonds-data-refresh, finbonds-rebalance-advisor"
 ---
 
 # FinBonds Risk Assessment Skill
 
 Сводный риск-профиль портфеля из PostgreSQL: концентрация по эмитентам,
 распределение по уровням риска, корзины до погашения (прокси дюрации),
-потери при выходе. Чистое чтение — работает прямо в контейнере через
+потери при выходе. Чистое чтение — работает через psql и
 `scripts/risk_snapshot.sql`.
 
 ## When to Use
@@ -32,13 +31,12 @@ Don't use for: событий по конкретным бумагам (`finbond
 ## Prerequisites
 
 - Контракт путей — см. `finbonds-ops`; скрипт лежит в этом скилле:
-  `scripts/risk_snapshot.sql` относительно каталога скилла (в контейнере:
-  `/opt/data/profiles/fin_bonds/skills/finance/finbonds-risk-assessment/scripts/risk_snapshot.sql`).
+  `scripts/risk_snapshot.sql` относительно каталога скилла (`"$FIN_BONDS_SKILLS_DIR/finbonds-risk-assessment/scripts/risk_snapshot.sql"`).
 - Перед отчётом — свежесть данных по `finbonds-data-refresh` (пороги там же).
 
 ## How to Run
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-risk-assessment/scripts/risk_snapshot.sql")`
+`"${FIN_BONDS_PSQL:-psql}" -f "$FIN_BONDS_SKILLS_DIR/finbonds-risk-assessment/scripts/risk_snapshot.sql"`
 
 ## Procedure
 

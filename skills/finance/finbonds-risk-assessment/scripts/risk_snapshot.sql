@@ -1,5 +1,5 @@
 -- FinBonds portfolio risk snapshot (read-only).
--- Usage: /opt/data/profiles/fin_bonds/bin/pg.sh -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-risk-assessment/scripts/risk_snapshot.sql
+-- Usage: "${FIN_BONDS_PSQL:-psql}" -f "$FIN_BONDS_SKILLS_DIR/finbonds-risk-assessment/scripts/risk_snapshot.sql"
 -- Все оценки позиций берутся из канонического view v_portfolio_positions_valuation
 -- (position_value_rub в рублях за позицию); деления на итоговую стоимость
 -- защищены NULLIF(SUM(position_value_rub), 0).

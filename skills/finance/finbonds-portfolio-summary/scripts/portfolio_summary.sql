@@ -1,5 +1,5 @@
 -- FinBonds portfolio balance and allocation summary (read-only).
--- Usage: /opt/data/profiles/fin_bonds/bin/pg.sh -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-portfolio-summary/scripts/portfolio_summary.sql
+-- Usage: "${FIN_BONDS_PSQL:-psql}" -f "$FIN_BONDS_SKILLS_DIR/finbonds-portfolio-summary/scripts/portfolio_summary.sql"
 
 -- 1) Portfolio breakdown by broker and account
 SELECT 

@@ -1,14 +1,13 @@
 ---
 name: finbonds-data-refresh
 description: "Свежесть рыночных данных fin_bonds и запуск обновления."
-version: 0.5.0
-author: jedi (jedi108), Hermes Agent
+version: 0.5.1
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Data, Freshness]
-    related_skills: [finbonds-ops, finbonds-rebalance-advisor]
+  tags: "FinBonds, Data, Freshness"
+  related_skills: "finbonds-ops, finbonds-rebalance-advisor"
 ---
 
 # FinBonds Data Refresh Skill
@@ -32,8 +31,7 @@ Don't use for: ручного обновления ради обновления
 
 - Контракт путей и хоста — см. `finbonds-ops`.
 - Скрипт гейта лежит в этом скилле: `scripts/freshness_check.sql` относительно
-  каталога скилла (в контейнере:
-  `/opt/data/profiles/fin_bonds/skills/finance/finbonds-data-refresh/scripts/freshness_check.sql`).
+  каталога скилла (`"$FIN_BONDS_SKILLS_DIR/finbonds-data-refresh/scripts/freshness_check.sql"`).
 - Дополнительно: понимание пайплайна `run_update.sh` на хосте
   (update-bonds --update-prices → calculate-spread → update-ratings →
   check-offers; шаг update-ratings по умолчанию — портфель, скоупы
@@ -43,7 +41,7 @@ Don't use for: ручного обновления ради обновления
 
 Быстрый in-container гейт свежести (миллисекунды, без SSH) — основной способ:
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-data-refresh/scripts/freshness_check.sql")`
+`"${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-data-refresh/scripts/freshness_check.sql"`
 
 Скрипт (v2) возвращает строку с заголовком (CSV) колонок:
 `status|is_fresh|portfolio_rows|portfolio_total_val|portfolio_zero_rows|zero_rows_isins|bonds_with_price|tradeable_stale_or_missing_prices|market_time|sync_time`.
@@ -67,7 +65,7 @@ Don't use for: ручного обновления ради обновления
 `systemctl`: системный unit требует интерактивной аутентификации и агенту
 недоступен), и только если данные несвежие:
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && bash run_update.sh'", timeout=900)`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && bash run_update.sh'`
 
 **Правило: если `is_fresh == true` — обновление НЕ запускать** (статус
 `WARN_ZOMBIE_ROWS` этому не исключение: зомби-строки не делают данные
@@ -93,7 +91,7 @@ TTL для cash snapshot не вводится.
 точка того же гейта, статусы согласованы с SQL (поле `gate_status` — канонический
 статус v2; `portfolio_zero_rows_isins` — список виновников):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db --freshness --json'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db --freshness --json'`
 
 **В SOP ребалансировки отдельный вызов гейта не нужен:** `rebalance-report`
 (скилл `finbonds-rebalance-advisor`) несёт тот же контракт гейта в блоке
@@ -103,7 +101,7 @@ TTL для cash snapshot не вводится.
 
 ## Procedure
 
-1. Сними гейт свежести `freshness_check.sql` в контейнере. Критерий: одна
+1. Сними гейт свежести `freshness_check.sql`. Критерий: одна
    строка результата со статусом и `is_fresh`.
 2. Если `is_fresh == true` (в т.ч. статус `WARN_ZOMBIE_ROWS`) — обновление НЕ
    запускать, сообщи пользователю, что данные свежие (при WARN — упомяни

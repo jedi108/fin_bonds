@@ -5,12 +5,12 @@
 -- Параметры:
 --   q     - обязательный, подстрока для ILIKE '%...%' (имя/тикер/ISIN);
 --   limit - необязательный, максимум строк на блок (default 30).
--- Латиницу можно передавать инлайном: pg.sh --csv -v q='RU000A10XYD1' -f <этот файл>
+-- Латиницу можно передавать инлайном: "${FIN_BONDS_PSQL:-psql}" --csv -v q='RU000A10XYD1' -f <этот файл>
 -- Кириллические значения q - только через файл-обёртку (inline -c с кириллицей
 -- запрещён, см. SKILL.md «Анти-паттерны»): в /tmp/q_issuer.sql написать
 --   \set q 'Система'
---   \ir /opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/issuer_lookup.sql
--- и выполнить: pg.sh --csv -f /tmp/q_issuer.sql
+--   \ir <абсолютный путь: $FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/issuer_lookup.sql>
+-- и выполнить: "${FIN_BONDS_PSQL:-psql}" --csv -f /tmp/q_issuer.sql
 -- Вывод: блок 1 - найденные бумаги (с эмитентом), блок 2 - найденные эмитенты
 -- (companies) со счётчиками бумаг каталога. Строка CREATE VIEW в stdout -
 -- служебный тег psql, блоки различаются по CSV-заголовкам.

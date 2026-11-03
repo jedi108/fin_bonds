@@ -1,7 +1,7 @@
 """
 Use case: rebalance-plan — high-level CLI планирования (задача 030.8).
 
-Одна команда standard Hermes workflow вместо цикла «создать scenario.json →
+Одна команда standard agent workflow вместо цикла «создать scenario.json →
 прогнать → вручную уменьшить qty → повторить» (baseline проекта: обычная
 ребалансировка = report → plan, 2 domain-вызова, 0 ad-hoc кода). Use case —
 тонкая композиция canonical домена (правило 030 №1), собственной арифметики

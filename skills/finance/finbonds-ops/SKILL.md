@@ -1,14 +1,13 @@
 ---
 name: finbonds-ops
 description: "Карта CLI fin_bonds: команды, права, границы записи."
-version: 0.5.6
-author: jedi (jedi108), Hermes Agent
+version: 0.5.7
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Bonds, CLI, Safety]
-    related_skills: [finbonds-data-refresh, finbonds-risk-monitoring, finbonds-rebalance-advisor, finbonds-rebalance-tool, finbonds-sql-recipes]
+  tags: "FinBonds, Bonds, CLI, Safety"
+  related_skills: "finbonds-data-refresh, finbonds-risk-monitoring, finbonds-rebalance-advisor, finbonds-rebalance-tool, finbonds-sql-recipes"
 ---
 
 # FinBonds Ops Skill
@@ -28,28 +27,31 @@ Don't use for: задач fin-ml (другой контур, скиллы S*); �
 
 ## Prerequisites
 
-- `FIN_BONDS_ROOT` — корень checkout fin_bonds (default `/opt/fin_bonds`,
-  read-only mount в контейнере Hermes).
-- `POSTGRES_DSN` — DSN подключения к PostgreSQL. Хранится в `.env` на хосте
-  (`~/work/bonds/.env`) и в профильном `.env` агента
-  (`/opt/data/profiles/fin_bonds/.env`); в контейнерное окружение НЕ
-  прокидывается. В команды не вставлять дословно (секрет) и по возможности
-  не использовать вовсе: psql в контейнере звать через враппер
-  `/opt/data/profiles/fin_bonds/bin/pg.sh` — он сам делает `. .env` профиля,
-  `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` подхватывает libpq.
-- `FIN_BONDS_HOST` — ssh-alias хоста, где проект запущен с venv и `.env`
-  (на Hermes-хосте). Всё, что требует записи или интернета, выполняется там.
-- `FIN_BONDS_APP_DIR` — каталог приложения на хосте (default
-  `$HOME/work/bonds`); подставляется в ssh-командах вида
-  `cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds}`. Семантики разворачивания
-  РАЗЛИЧАЮТСЯ (032.1): в прямых ssh-командах этот ops-паттерн разворачивает
-  УДАЛЁННЫЙ shell (HOME=/home/<user>) — home-relative формы (`$HOME/work/bonds`,
-  `~/work/bonds`) работают; adapter (`finbonds-rebalance-tool`) разворачивает
-  переменную САМ (`expanduser`) ДО отправки — против HOME своего процесса,
-  поэтому из hermes-контейнера (HOME=/opt/data) adapter'у нужен только явный
-  абсолютный путь (`/home/<user>/work/bonds`). Таблица и pitfall —
-  `finbonds-rebalance-tool` (Prerequisites).
-- В контейнере: `psql`, `python3`; на хосте: `venv/bin/python`, `psql`.
+Окружение (все переменные задаёт развёртывание, скилл их не создаёт):
+
+| Переменная | Назначение |
+|---|---|
+| `FIN_BONDS_PSQL` | исполняемый файл вместо `psql`; в командах `"${FIN_BONDS_PSQL:-psql}"`. По умолчанию — обычный `psql` с подключением из libpq-окружения (`PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` или `PGSERVICE`); развёртывание может указать на враппер, который сам подгружает креды. DSN в команду не вставлять |
+| `FIN_BONDS_SKILLS_DIR` | каталог с установленными папками `finbonds-*`; пути скриптов — `"$FIN_BONDS_SKILLS_DIR/<скилл>/scripts/<файл>"` (в кавычках) |
+| `FIN_BONDS_ROOT` | необязательный локальный read-only checkout fin_bonds |
+| `FIN_BONDS_HOST` | ssh-alias хоста, где запущено приложение (venv и `.env`). Всё, что требует записи или интернета, выполняется там |
+| `FIN_BONDS_APP_DIR` | каталог приложения на хосте (default `$HOME/work/bonds`); подставляется в ssh-командах `cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds}` |
+| `FIN_BONDS_TRANSPORT`, `FIN_BONDS_HOST_PY` | транспорт и python adapter'а — см. `finbonds-rebalance-tool` |
+
+- Команды ниже написаны для приложения на удалённом хосте: `ssh ${FIN_BONDS_HOST} '...'`.
+  Если агент работает на той же машине, что и fin_bonds, убери ssh-обёртку и
+  выполняй внутреннюю команду в `FIN_BONDS_APP_DIR`.
+- `POSTGRES_DSN` — секрет; хранится в `.env` приложения на хосте. В команды не
+  вставлять дословно и по возможности не использовать вовсе (psql — через
+  `"${FIN_BONDS_PSQL:-psql}"`).
+- Семантики разворачивания `FIN_BONDS_APP_DIR` РАЗЛИЧАЮТСЯ (032.1): в прямых
+  ssh-командах ops-паттерн разворачивает УДАЛЁННЫЙ shell (HOME=/home/<user>) —
+  home-relative формы (`$HOME/work/bonds`, `~/work/bonds`) работают; adapter
+  (`finbonds-rebalance-tool`) разворачивает переменную САМ (`expanduser`) ДО
+  отправки — против HOME своего процесса, поэтому агенту в песочнице с другим
+  HOME нужен явный абсолютный путь (`/home/<user>/work/bonds`). Таблица и
+  pitfall — `finbonds-rebalance-tool` (Prerequisites).
+- Нужны: `psql`, `python3` у агента; на хосте — `venv/bin/python`, `psql`.
 
 ## How to Run
 
@@ -64,21 +66,21 @@ capability ladder — `finbonds-rebalance-advisor` (030.12). Прямой
 ssh-вызов ниже — общий случай для остальных read-only команд
 (НЕ ребалансировочных):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db --freshness --json'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db --freshness --json'`
 
 Машинные форматы для агента (stdout — чистый JSON, логи — только в stderr):
 `rebalance-report --format json` (тулкит ребалансировки, 005.1),
 `calculate-ytm --mode buy --format json`, `check-db --freshness --json`
 (гейт свежести).
 
-psql-путь — **fallback** для ad-hoc SQL вне SOP тулкита (в контейнере, через
-враппер `pg.sh`, который подтягивает `PG*` из профильного `.env`; карта — ниже):
+psql-путь — **fallback** для ad-hoc SQL вне SOP тулкита (через
+`"${FIN_BONDS_PSQL:-psql}"`; карта — ниже):
 
-`terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -c 'SELECT COUNT(*) FROM bonds_catalog;'")`
+`"${FIN_BONDS_PSQL:-psql}" -c 'SELECT COUNT(*) FROM bonds_catalog;'`
 
 CLI-команды, пишущие файлы (`export-*`, `generate-plots`), — на хосте:
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db'`
 
 ## Карта DSN: где берётся DSN (P-A, 005.1)
 
@@ -88,17 +90,16 @@ CLI-команды, пишущие файлы (`export-*`, `generate-plots`), �
   (`~/work/bonds/.env`). Агенту не нужны ни psql, ни переменная в командной
   строке.
 - **psql-фолбэк:** на хосте сначала `source ~/work/bonds/.env` (или
-  `set -a; . ~/work/bonds/.env; set +a`), в контейнере — враппер
-  `/opt/data/profiles/fin_bonds/bin/pg.sh`: он source-ит профильное `.env`
-  и зовёт psql, `PG*` подхватываются libpq. **Голый `psql` без source
-  `.env` не работает**: контейнерное окружение кредов не содержит, в свежей
-  shell переменные пусты (локально — сокет-ошибка `/var/run/postgresql`,
-  на хосте — `FATAL: role "<user>" does not exist`).
+  `set -a; . ~/work/bonds/.env; set +a`); у агента — `"${FIN_BONDS_PSQL:-psql}"`
+  с `PG*` из libpq-окружения или враппером развёртывания. **Голый `psql` без
+  кредов не работает**: в свежей shell переменные пусты (локально —
+  сокет-ошибка `/var/run/postgresql`, на хосте — `FATAL: role "<user>" does
+  not exist`).
 - `POSTGRES_DSN` — секрет: не вставлять в команды дословно, не логировать,
   не публиковать.
 - **Локальный CLI против прод-БД не поддерживается — решение 017
   (2026-09-30): «только через хост».** С dev-машины прод-БД недоступна по
-  сети: postgres слушает только loopback и docker-bridge'и хоста, порт 5432
+  сети: postgres слушает только loopback и внутренние bridge-сети хоста, порт 5432
   снаружи закрыт (ufw). Локальный `.env` dev-машины — теневая копия
   SOPS-мастера (`make sops-decrypt` / `make env-push` доставляет его на
   хост), поэтому его `POSTGRES_DSN` валиден с хоста, не локально: локальный
@@ -115,7 +116,7 @@ CLI-команды, пишущие файлы (`export-*`, `generate-plots`), �
 ## Как агенту выполнять SQL
 
 Точка входа ad-hoc SQL — скилл `finbonds-sql-recipes`: «нулевой рецепт»
-(pg.sh), готовые рецепты, карта актуальных колонок таблиц/вью и каталог
+(`$FIN_BONDS_PSQL`), готовые рецепты, карта актуальных колонок таблиц/вью и каталог
 готовых `-f`-скриптов; карту схемы этот скилл не дублирует. Ниже — правила
 среды, применяются вместе с ним.
 
@@ -124,12 +125,11 @@ psql-путь — fallback (см. «Карта DSN»); в SOP ребаланси
 Три правила среды (002.7, P9.1–P9.3) — применять до первого ad-hoc запроса,
 не переоткрывать опытным путём:
 
-1. **psql — только через terminal, через враппер `pg.sh`.** Контейнерное
-   окружение кредов fin_bonds не содержит (`POSTGRES_*`/`PG*` из compose
-   сняты); `PG*` подтягивает `/opt/data/profiles/fin_bonds/bin/pg.sh`
-   source'ом профильного `.env`. В python-kernel (`execute_code`) чтение
-   `os.environ["POSTGRES_DSN"]` падает `KeyError`. psql-вызовы в
-   python-kernel не переносить.
+1. **psql — только через shell-команду, через `"${FIN_BONDS_PSQL:-psql}"`.**
+   Окружение агента может не содержать кредов fin_bonds; `PG*` берёт libpq
+   или враппер развёртывания. В песочнице кода агента чтение
+   `os.environ["POSTGRES_DSN"]` может падать `KeyError`. psql-вызовы в
+   песочницу кода не переносить.
 2. **Длинный SQL с кириллическими литералами — через `-f` файл, не inline
    `-c`.** Длинный `psql -c "SELECT ... WHERE name LIKE '%АФК Система%'"`
    триггерит security-сканер терминала (гомоглифы/юникод в кириллице) и
@@ -138,7 +138,7 @@ psql-путь — fallback (см. «Карта DSN»); в SOP ребаланси
    через psql-переменные `-v` (рабочий пример — `simulate_swap.sql` с
    `:'buy_isin'`):
 
-   `terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh -v isin='RU000A...' -f /tmp/q_issuer.sql")`
+   `"${FIN_BONDS_PSQL:-psql}" -v isin='RU000A...' -f /tmp/q_issuer.sql`
 
    Короткий однострочный SELECT без кириллических литералов допустимо звать
    inline `-c`.
@@ -148,7 +148,7 @@ psql-путь — fallback (см. «Карта DSN»); в SOP ребаланси
    вызывается только так — контракт статусов v2 в `finbonds-data-refresh`
    (002.1):
 
-   `terminal(command="/opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-data-refresh/scripts/freshness_check.sql")`
+   `"${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-data-refresh/scripts/freshness_check.sql"`
 
 ## Quick Reference
 
@@ -304,7 +304,7 @@ ad-hoc SQL:
    «мутирующих» и `clear-data` без явного запроса пользователя в текущем
    диалоге.
 2. Для чтения и аналитики используй CLI на хосте через ssh (DSN не нужен;
-   машинные форматы — «How to Run»); psql в контейнере — только для ad-hoc
+   машинные форматы — «How to Run»); psql — только для ad-hoc
    SQL вне SOP тулкита. Критерий: команда выполнена там, где есть её
    зависимости, и не упала по правам на read-only mount.
 3. При ошибке: `main.py` печатает `DEBUG: Parsed arguments:` в stderr — это
@@ -312,8 +312,8 @@ ad-hoc SQL:
 
 ## Pitfalls
 
-- Read-only mount `/opt/fin_bonds`: команды, пишущие файлы (`export-*`,
-  `generate-plots`), из контейнера упадут — запускай их на хосте.
+- Read-only checkout (`FIN_BONDS_ROOT`): команды, пишущие файлы (`export-*`,
+  `generate-plots`), на нём упадут — запускай их на хосте.
 - Основная база данных — PostgreSQL (`fin_bonds`). Все числовые поля типизированы (numeric/double precision/int), кроме `monitoring_checks.metric_value` — TEXT, в арифметике только через `::numeric` (см. одноимённый раздел).
 - Длинный ad-hoc SQL с кириллическими литералами в `psql -c` ломается на security-сканере и кавычках — писать в файл и звать `psql -f` (см. «Как агенту выполнять SQL»).
 - YTM в старых логах, выгрузках и заметках (до миграции 013, 2026-09-29) может быть в долях (`0.24` = 24%) — не смешивать с текущими процентами; сомнение разрешает `doc/units_conventions.md`.
@@ -324,7 +324,7 @@ ad-hoc SQL:
 
 ## Verification
 
-- `terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db'")` завершается без ошибок.
+- `ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py check-db'` завершается без ошибок.
 - `main.py rebalance-report --help` и `main.py calculate-ytm --help`
   показывают флаги, как в скиллах (расхождение = проект обновился — сверься
   с `src/use_cases/factory.py`).

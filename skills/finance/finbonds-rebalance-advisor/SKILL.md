@@ -1,14 +1,13 @@
 ---
 name: finbonds-rebalance-advisor
 description: "SOP ребалансировки: adapter report/plan/compare/snapshot."
-version: 0.14.1
-author: jedi (jedi108), Hermes Agent
+version: 0.14.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Rebalance, Advisory, Domain Engine]
-    related_skills: [finbonds-rebalance-tool, finbonds-ops, finbonds-data-refresh, finbonds-buy-candidates, finbonds-risk-assessment, finbonds-event-calendar, finbonds-chatgpt-portfolio-export]
+  tags: "FinBonds, Rebalance, Advisory, Domain Engine"
+  related_skills: "finbonds-rebalance-tool, finbonds-ops, finbonds-data-refresh, finbonds-buy-candidates, finbonds-risk-assessment, finbonds-event-calendar, finbonds-chatgpt-portfolio-export"
 ---
 
 # FinBonds Rebalance Advisor Skill
@@ -29,7 +28,7 @@ core; SQL, psql и `POSTGRES_DSN` агенту не нужны. Только с�
 
 Разделение ответственности, на которое опирается SOP:
 
-- **LLM/Hermes**: интерпретация пользовательских ограничений (нормализация
+- **LLM-агент**: интерпретация пользовательских ограничений (нормализация
   intent, semantic mapping фильтров); выбор финансовой гипотезы; выбор ISIN
   только из canonical candidate output; явный выбор приоритета между целями
   покупки; решение, какую позицию продать/сократить; запрос альтернативного
@@ -329,7 +328,7 @@ canonical owner правил; `finbonds-chatgpt-portfolio-export` переисп
 - AMBIGUOUS — порог не придумывать: «высокий рейтинг», «хороший рейтинг»,
   «надёжные бумаги», «качественные эмитенты», «без мусора», «не ВДО».
   Фильтр не ставить, смотреть `credit_rating` в строках (правило 023:
-  Hermes не придумывает AA-).
+  агент не придумывает AA-).
 
 ### Sovereign
 
@@ -345,7 +344,7 @@ canonical owner правил; `finbonds-chatgpt-portfolio-export` переисп
   «государственные не брать» (может означать запрет бумаг госкомпаний),
   «только корпоративные облигации» (задаёт corporate-only множество).
   Если пользователь требует именно corporate-only, а canonical filter этого
-  не выражает — Hermes не подменяет его `--exclude-sovereign` молча:
+  не выражает — агент не подменяет его `--exclude-sovereign` молча:
   уточни либо явно оговори фактическую семантику применённого фильтра.
 
 ### Max position value
@@ -626,7 +625,7 @@ snapshot. Это не второй planner и не лазейка в данны�
 
 ### Где выполняется
 
-Существующий isolated `execute_code` / Python sandbox Hermes: нет prod DSN
+Изолированная песочница кода агента (Python sandbox): нет prod DSN
 и broker credentials; network-disabled режим — если доступен. Писать
 Python-файлы на prod host и запускать agent-generated Python через SSH на
 host запрещено (см. ниже).
@@ -934,7 +933,7 @@ Skill-level policy — различай provenance limit: `USER_EXPLICIT` /
 ## Канонические команды (только через adapter, 030.11)
 
 Скрипт adapter'а:
-`/opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py`
+`"$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py"`
 (stdout — machine-readable JSON, stderr — diagnostics, exit code
 сохраняется от core; полная карта — `finbonds-rebalance-tool`).
 
@@ -942,21 +941,21 @@ Skill-level policy — различай provenance limit: `USER_EXPLICIT` /
 вызовом; `--include-held` в ребалансировке обязателен):
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py report --freq-max 4 --exclude-sovereign --include-held --min-maturity 2026-12-01 --max-risk 1
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" report --freq-max 4 --exclude-sovereign --include-held --min-maturity 2026-12-01 --max-risk 1
 ```
 
 Диапазон частот + порог рейтинга + лимит выпуска (023/024; порог и лимит —
 только явные от пользователя):
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py report --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --max-position-value 150000 --screener-limit 30
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" report --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --max-position-value 150000 --screener-limit 30
 ```
 
 План по intents (порядок `--target-value` = priority; exploratory —
 обычно `--view full` или дефолт; компактные проекции — `--view summary|targets|trades|positions-after|violations`):
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py plan --sell-all RU000A0ZZZ01 --target-value RU000B0YYYY2=350000 --target-value RU000C0XXXX3=200000 --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --max-position-value 150000
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" plan --sell-all RU000A0ZZZ01 --target-value RU000B0YYYY2=350000 --target-value RU000C0XXXX3=200000 --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --max-position-value 150000
 ```
 
 Candidate-policy покупки (031.1/031.2): политика, использованная при
@@ -964,19 +963,19 @@ Candidate-policy покупки (031.1/031.2): политика, использ�
 `--freq-in`, взаимоисключим с `--freq-min/--freq-max`):
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py plan --target-value RU000B0YYYY2=350000 --max-risk 3 --include-ku --max-ytm 30 --min-maturity 2026-01-01 --freq-in 4,12
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" plan --target-value RU000B0YYYY2=350000 --max-risk 3 --include-ku --max-ytm 30 --min-maturity 2026-01-01 --freq-in 4,12
 ```
 
 A/B альтернативы на одном PlanningContext:
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py compare --a-target-value RU000B0YYYY2=350000 --b-target-value RU000B0YYYY2=500000 --b-exclude-sovereign
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" compare --a-target-value RU000B0YYYY2=350000 --b-target-value RU000B0YYYY2=500000 --b-exclude-sovereign
 ```
 
 Нестандартная аналитика (escape hatch, раздел «Sandbox fallback»):
 
 ```bash
-python3 /opt/data/profiles/fin_bonds/skills/finance/finbonds-rebalance-tool/scripts/rebalance_adapter.py analysis-snapshot --requires ytm,credit_rating
+python3 "$FIN_BONDS_SKILLS_DIR/finbonds-rebalance-tool/scripts/rebalance_adapter.py" analysis-snapshot --requires ytm,credit_rating
 ```
 
 Затем `plan --context-id <id из snapshot>` — canonical план по тому же

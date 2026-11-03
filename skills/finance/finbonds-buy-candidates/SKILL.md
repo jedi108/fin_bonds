@@ -1,14 +1,13 @@
 ---
 name: finbonds-buy-candidates
 description: "Скринер кандидатов на покупку и инкремент денежного потока."
-version: 0.2.1
-author: jedi (jedi108), Hermes Agent
+version: 0.2.2
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, Screener, Buy, Yield, Cashflow]
-    related_skills: [finbonds-ops, finbonds-data-refresh, finbonds-rebalance-advisor, finbonds-portfolio-export]
+  tags: "FinBonds, Screener, Buy, Yield, Cashflow"
+  related_skills: "finbonds-ops, finbonds-data-refresh, finbonds-rebalance-advisor, finbonds-portfolio-export"
 ---
 
 # FinBonds Buy Candidates Screener Skill
@@ -83,16 +82,16 @@ Don't use for: подачи заявок или торговых поручен�
 
 ```bash
 # Топ-30 фиксов с низким риском (risk <= 1), без ОФЗ
-/opt/data/profiles/fin_bonds/bin/pg.sh -v max_risk=1 -v coupon_freq=0 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-buy-candidates/scripts/buy_candidates.sql
+"${FIN_BONDS_PSQL:-psql}" -v max_risk=1 -v coupon_freq=0 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f "$FIN_BONDS_SKILLS_DIR/finbonds-buy-candidates/scripts/buy_candidates.sql"
 
 # То же, но с докупаемыми позициями портфеля (бейдж held (N%)) — обязательный режим для ребалансировки
-/opt/data/profiles/fin_bonds/bin/pg.sh -v max_risk=1 -v coupon_freq=0 -v coupon_type=FIX -v ofz_mode=exclude -v include_held=true -v limit=500 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-buy-candidates/scripts/buy_candidates.sql
+"${FIN_BONDS_PSQL:-psql}" -v max_risk=1 -v coupon_freq=0 -v coupon_type=FIX -v ofz_mode=exclude -v include_held=true -v limit=500 -f "$FIN_BONDS_SKILLS_DIR/finbonds-buy-candidates/scripts/buy_candidates.sql"
 
 # Режим ежемесячного купона (12 выплат в год)
-/opt/data/profiles/fin_bonds/bin/pg.sh -v max_risk=1 -v coupon_freq=12 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-buy-candidates/scripts/buy_candidates.sql
+"${FIN_BONDS_PSQL:-psql}" -v max_risk=1 -v coupon_freq=12 -v coupon_type=FIX -v ofz_mode=exclude -v limit=30 -f "$FIN_BONDS_SKILLS_DIR/finbonds-buy-candidates/scripts/buy_candidates.sql"
 
 # Режим флоатеров (топ по расчетной ставке и спреду)
-/opt/data/profiles/fin_bonds/bin/pg.sh -v max_risk=1 -v coupon_freq=0 -v coupon_type=FLOAT -v ofz_mode=all -v limit=20 -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-buy-candidates/scripts/buy_candidates.sql
+"${FIN_BONDS_PSQL:-psql}" -v max_risk=1 -v coupon_freq=0 -v coupon_type=FLOAT -v ofz_mode=all -v limit=20 -f "$FIN_BONDS_SKILLS_DIR/finbonds-buy-candidates/scripts/buy_candidates.sql"
 ```
 
 Параметры `psql`:
@@ -144,7 +143,7 @@ CLI-эквиваленты того же контракта: `analyze-buy-candid
 `--include-held`, `--include-ku`, `--max-risk`, `--max-listlevel`,
 `--max-ytm`, `--min-maturity`/`--max-maturity`, `--screener-limit`):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py rebalance-report --format json --freq-max 4 --exclude-sovereign --include-held --max-risk 1'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py rebalance-report --format json --freq-max 4 --exclude-sovereign --include-held --max-risk 1'`
 
 Полный SOP — скилл `finbonds-rebalance-advisor` (скринер приходит в одном
 JSON вместе со свежестью, портфелем, концентрациями и погашениями).

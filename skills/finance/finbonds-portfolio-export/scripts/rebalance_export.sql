@@ -1,7 +1,7 @@
 -- FinBonds portfolio rebalance export for LLM / external advisor (read-only).
 -- Output contains all crucial columns for allocation, duration, credit risk and exit loss analysis.
--- Usage (table/markdown): /opt/data/profiles/fin_bonds/bin/pg.sh -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-portfolio-export/scripts/rebalance_export.sql
--- Usage (CSV):            /opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-portfolio-export/scripts/rebalance_export.sql > rebalance.csv
+-- Usage (table/markdown): "${FIN_BONDS_PSQL:-psql}" -f "$FIN_BONDS_SKILLS_DIR/finbonds-portfolio-export/scripts/rebalance_export.sql"
+-- Usage (CSV):            "${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-portfolio-export/scripts/rebalance_export.sql" > rebalance.csv
 
 WITH latest_ratings AS (
     SELECT DISTINCT ON (isin) isin, rating_code, rating_score

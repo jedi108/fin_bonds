@@ -445,7 +445,7 @@ class AnalysisSnapshotUseCase(UseCase):
 
     @staticmethod
     def _capabilities_payload() -> Dict[str, Any]:
-        """Machine-readable capabilities: Hermes по ним знает, какие виды
+        """Machine-readable capabilities: агент по ним знает, какие виды
         анализа данными поддерживаются."""
         return {
             'read_only': True,

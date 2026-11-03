@@ -9,10 +9,10 @@
 --   q      - обязательный, эмитент (companies.name/full_name) или бумага
 --            каталога (имя/тикер/ISIN) - подстрока для ILIKE '%...%';
 --   status - необязательный, default 'active'; 'all' - без фильтра (аудит).
--- Латиницу можно передавать инлайном: pg.sh --csv -v q='RU000A10XYD1' -f <этот файл>
+-- Латиницу можно передавать инлайном: "${FIN_BONDS_PSQL:-psql}" --csv -v q='RU000A10XYD1' -f <этот файл>
 -- Кириллические значения q - только через файл-обёртку (см. issuer_lookup.sql):
 --   \set q 'Глобал'
---   \ir /opt/data/profiles/fin_bonds/skills/finance/finbonds-sql-recipes/scripts/positions_by_issuer.sql
+--   \ir <абсолютный путь: $FIN_BONDS_SKILLS_DIR/finbonds-sql-recipes/scripts/positions_by_issuer.sql>
 -- Вывод: блок 1 - сводка по найденным эмитентам (живая оценка, доля
 -- портфеля), блок 2 - позиции (брокер/счёт/статус/valuation_source).
 -- Строка CREATE VIEW в stdout - служебный тег psql, блоки различаются по

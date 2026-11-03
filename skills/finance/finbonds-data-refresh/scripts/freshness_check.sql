@@ -1,5 +1,5 @@
 -- FinBonds instant in-container freshness gate (v2: зомби-строки = WARN, не CRITICAL).
--- Usage: /opt/data/profiles/fin_bonds/bin/pg.sh --csv -f /opt/data/profiles/fin_bonds/skills/finance/finbonds-data-refresh/scripts/freshness_check.sql
+-- Usage: "${FIN_BONDS_PSQL:-psql}" --csv -f "$FIN_BONDS_SKILLS_DIR/finbonds-data-refresh/scripts/freshness_check.sql"
 --   (--csv даёт строку заголовков — фикс P9.3; прежний -t -A -F'|' тоже допустим)
 -- Контракт статусов:
 --   OK                        — данные свежие, zero-строк нет

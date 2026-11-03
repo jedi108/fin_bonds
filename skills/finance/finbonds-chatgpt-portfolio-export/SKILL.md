@@ -1,14 +1,13 @@
 ---
 name: finbonds-chatgpt-portfolio-export
 description: "Обновляет контекст для ChatGPT в Google Sheets (v4)."
-version: 0.4.0
-author: jedi (jedi108), Hermes Agent
+version: 0.4.1
+author: jedi (jedi108)
 license: MIT
 platforms: [linux, macos]
 metadata:
-  hermes:
-    tags: [FinBonds, ChatGPT, GoogleSheets, Export, Rebalance]
-    related_skills: [finbonds-ops, finbonds-data-refresh, finbonds-portfolio-summary, finbonds-rebalance-advisor]
+  tags: "FinBonds, ChatGPT, GoogleSheets, Export, Rebalance"
+  related_skills: "finbonds-ops, finbonds-data-refresh, finbonds-portfolio-summary, finbonds-rebalance-advisor"
 ---
 
 # FinBonds ChatGPT Portfolio Export Skill
@@ -42,7 +41,7 @@ transport-skill: он не заменяет статистику, risk assessmen
 
 Don't use for: ВЫПОЛНЕНИЯ анализа или ребалансировки вместо
 `finbonds-rebalance-advisor` (этот скилл — только транспорт, не второй
-аналитический контур), обычного просмотра статистики в Hermes
+аналитический контур), обычного просмотра статистики в агенте
 (`finbonds-portfolio-summary`), анализа риска (`finbonds-risk-assessment`).
 Формулировка «выгрузи кандидатов ChatGPT под эту ребалансировку» — это
 transport follow-up, а не выполнение ребалансировки: routing rules её
@@ -137,14 +136,14 @@ canonical candidate-filter context последнего comparative rebalance ru
 
 1. **Direct export** (backward-compatible, без candidate-фильтров):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py sync-chatgpt-portfolio'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py sync-chatgpt-portfolio'`
 
 2. **Filtered follow-up export** (parameterized comparative export —
    normalized candidate-filter context ребалансировки; значения — из
    execution context задачи, полный список флагов — раздел «Shared
    execution filter context»):
 
-`terminal(command="ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py sync-chatgpt-portfolio --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --screener-limit 30'")`
+`ssh ${FIN_BONDS_HOST} 'cd ${FIN_BONDS_APP_DIR:-$HOME/work/bonds} && venv/bin/python main.py sync-chatgpt-portfolio --freq-min 4 --freq-max 12 --min-credit-rating AA- --exclude-sovereign --screener-limit 30'`
 
 Команда сама проверяет freshness gate, строит кандидатов из канонического
 отчёта `rebalance-report` с переданным filter context и публикует
@@ -246,7 +245,7 @@ Google Sheet (schema v4) содержит ровно четыре вкладки
   `rebalance-report` (FIX и FLOAT одним набором, rank внутри типа) с
   canonical `credit_rating`, текущей долей эмитента и бейджем уже держимых
   бумаг. При filtered follow-up выборка строится с перенесённым
-  candidate-filter context; post-filtering строк exporter'ом/Hermes не
+  candidate-filter context; post-filtering строк exporter'ом/агентом не
   выполняется.
 
 ## Safety
