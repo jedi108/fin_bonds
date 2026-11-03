@@ -2329,12 +2329,17 @@ class PortfolioStorage:
 
     def get_portfolio_comparison_candidates(self, max_risk: int = 1, limit: int = 25,
                                             include_held: bool = False) -> List[Dict[str, Any]]:
-        """Бумаги с потенциальной доходностью против средней доходности
-        портфеля (режим compare команды analyze-buy-candidates).
+        """Справочный diff FIX-бумаг против средней YTM портфеля
+        (режим compare команды analyze-buy-candidates, issue #5).
 
-        include_held=False — позиции портфеля исключены (прежнее поведение);
-        include_held=True — докупаемые позиции остаются в выдаче с бейджем
-        held (доля N%) (задача 002.2).
+        Сравнивается канонический bc.ytm (проценты годовых, горизонт — ytm_to
+        по ytm_horizon_date в use-case'е), а НЕ купон/цена. Флоатеры из diff
+        исключены (YTM не определена), бумаги без YTM — тоже: неизвестное
+        нулём не подменяется. Вердикта покупки колонки не несут. Средняя
+        YTM портфеля — взвешенная по оценке позиций (view) по FIX-позициям.
+
+        include_held=False — позиции портфеля исключены; include_held=True —
+        докупаемые позиции остаются в выдаче с бейджем held (доля N%) (002.2).
         """
         cursor = self._cursor()
         held_join, not_held_condition, held_select = _portfolio_exclusion_fragments(include_held)
@@ -2343,58 +2348,97 @@ class PortfolioStorage:
         else:
             not_held_sql = "-- Исключение портфеля снято (include_held, 002.2)"
         query = f"""
-            WITH portfolio_avg_yield AS (
-                SELECT
-                    AVG((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / pp.average_price * 100) as avg_portfolio_yield
-                FROM bonds_catalog bc
-                JOIN portfolio_positions pp ON bc.isin = pp.isin
-                {_LATEST_FLOATER_RATE_JOIN}
-                WHERE bc.currency = 'rub'
-                    AND pp.current_price > 0
-                    AND pp.quantity > 0
+            WITH portfolio_ytm AS (
+                SELECT SUM(pbc.ytm * v.position_value_rub)
+                           / NULLIF(SUM(v.position_value_rub), 0) AS avg_portfolio_ytm
+                FROM v_portfolio_positions_valuation v
+                JOIN bonds_catalog pbc ON pbc.isin = v.isin
+                WHERE pbc.floating_coupon_flag IS NOT TRUE
+                    AND pbc.ytm IS NOT NULL
+                    AND v.position_value_rub > 0
             )
             SELECT
                 bc.isin,
                 bc.ticker,
                 bc.name,
-                COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) as coupon_rate_percent,
                 bc.risk_level,
-
-                -- Потенциальная годовая доходность (если купить по рыночной цене)
-                ROUND(
-                    (COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100,
-                    2
-                ) as potential_yield_percent,
-
-                -- Сравнение с портфелем
-                ROUND(
-                    ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) - pavg.avg_portfolio_yield,
-                    2
-                ) as yield_vs_portfolio,
-
-                -- Рекомендация
-                CASE
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield + 2 THEN 'ПОКУПАТЬ'
-                    WHEN ((COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) * bc.nominal / 100) / bc.market_price * 100) > pavg.avg_portfolio_yield THEN 'РАССМОТРЕТЬ'
-                    ELSE 'НЕ РЕКОМЕНДУЕТСЯ'
-                END as recommendation
+                bc.ytm AS ytm_percent,
+                bc.ytm_updated_at,
+                bc.maturity_date,
+                bc.offer_date,
+                pytm.avg_portfolio_ytm,
+                ROUND(bc.ytm - pytm.avg_portfolio_ytm, 2) AS ytm_vs_portfolio
                 {held_select}
 
             FROM bonds_catalog bc
             {held_join}
-            {_LATEST_FLOATER_RATE_JOIN}
-            CROSS JOIN portfolio_avg_yield pavg
+            CROSS JOIN portfolio_ytm pytm
             WHERE bc.currency = 'rub'
                 AND (bc.is_trade_available IS TRUE OR bc.is_trade_available IS NULL)
                 AND bc.perpetual_flag IS NOT TRUE
+                AND bc.floating_coupon_flag IS NOT TRUE  -- флоатеры вне YTM-diff
                 {not_held_sql}
-                AND COALESCE(bc.coupon_rate_percent, mc_floater.metric_value::numeric) IS NOT NULL
+                AND bc.ytm IS NOT NULL
+                AND pytm.avg_portfolio_ytm IS NOT NULL
                 AND bc.market_price IS NOT NULL  -- Есть рыночная цена
                 AND bc.risk_level <= %s  -- Только низкорисковые
-            ORDER BY yield_vs_portfolio DESC
+            ORDER BY ytm_vs_portfolio DESC, bc.isin
             LIMIT %s
         """
         cursor.execute(query, (max_risk, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_comparison_catalog_rows(self, isins: List[str]) -> List[Dict[str, Any]]:
+        """Строки каталога для compare-external (issue #5): по одной на ISIN.
+
+        Несёт всё, что нужно строке контракта: идентичность (name/ticker/
+        погашение), эмитент (company_id), цену + её время, сохранённую YTM,
+        последний кредитный рейтинг с датой (rating_history), рейтинг другой
+        серии того же эмитента (issuer_rating — НЕ подтверждает рейтинг
+        выпуска) и ставку флоатера с датой расчёта (floater_rate_date).
+        Ставка флоатера берётся по самой свежей записи именно этого ISIN
+        (общий _LATEST_FLOATER_RATE_JOIN даты не несёт).
+        """
+        if not isins:
+            return []
+        cursor = self._cursor()
+        cursor.execute("""
+            SELECT
+                bc.isin, bc.ticker, bc.name, bc.currency, bc.nominal,
+                bc.coupon_rate_percent, bc.coupon_quantity_per_year, bc.coupon_spread,
+                bc.maturity_date, bc.offer_date, bc.risk_level, bc.list_level,
+                bc.amortization_flag, bc.floating_coupon_flag, bc.perpetual_flag,
+                bc.market_price, bc.market_price_updated_at,
+                bc.ytm, bc.ytm_null_reason, bc.ytm_updated_at,
+                bc.company_id, co.name AS issuer, co.entity_type,
+                lr.credit_rating, lr.rating_score, lr.rating_date,
+                ir.credit_rating AS issuer_rating,
+                fr.metric_value::numeric AS floater_rate,
+                fr.check_date AS floater_rate_date
+            FROM bonds_catalog bc
+            LEFT JOIN companies co ON co.id = bc.company_id
+            LEFT JOIN LATERAL (
+                SELECT rh.rating_code AS credit_rating, rh.rating_score, rh.rating_date
+                FROM rating_history rh
+                WHERE rh.isin = bc.isin AND rh.rating_code IS NOT NULL
+                ORDER BY rh.rating_date DESC, rh.id DESC LIMIT 1
+            ) lr ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT rh.rating_code AS credit_rating
+                FROM rating_history rh
+                JOIN bonds_catalog b2 ON b2.isin = rh.isin
+                WHERE bc.company_id IS NOT NULL AND b2.company_id = bc.company_id
+                    AND rh.isin <> bc.isin AND rh.rating_code IS NOT NULL
+                ORDER BY rh.rating_date DESC, rh.id DESC LIMIT 1
+            ) ir ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT mc.metric_value, mc.check_date
+                FROM monitoring_checks mc
+                WHERE mc.isin = bc.isin AND mc.metric_name = 'floater_coupon_calculator'
+                ORDER BY mc.check_date DESC LIMIT 1
+            ) fr ON TRUE
+            WHERE bc.isin = ANY(%s)
+        """, (list(isins),))
         return [dict(row) for row in cursor.fetchall()]
 
     def get_monthly_profit_candidates(self, min_profit: float, limit: int) -> List[Dict[str, Any]]:

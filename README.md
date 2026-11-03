@@ -972,7 +972,7 @@ python3 main.py calculate-monthly-profit --mode by-risk
 **Режимы:**
 - `top` - Топ бумаг по доходности
 - `floaters` - Анализ флоатеров для покупки  
-- `compare` - Сравнение с текущим портфелем
+- `compare` - Справочный diff канонической YTM (`ytm_pct` + `ytm_to`) FIX-бумаг со средней YTM портфеля; без вердикта покупки, флоатеры и бумаги без YTM не входят (issue #5)
 
 **Примеры:**
 ```bash
@@ -988,10 +988,26 @@ python3 main.py analyze-buy-candidates compare --limit 10 --min-risk 2
 
 **Особенности:**
 - Учитывает как обычные облигации, так и флоатеры
-- Показывает потенциальную доходность и рекомендации
+- Показывает купонную доходность (режимы `top`/`floaters`); `compare` вердикта покупки не выдаёт
 - Фильтрует по уровню риска и времени до погашения
-- Сравнивает с средней доходностью текущего портфеля
+- `compare` сравнивает YTM со средней YTM FIX-позиций портфеля (горизонты могут отличаться — см. колонку `ytm_to`)
 - Поддерживает вечные облигации (бессрочные без даты погашения)
+
+### `compare-external` - Безопасное сравнение внешней подборки с портфелем
+
+Advisory-only (заявок не создаёт, вердикта покупки не выдаёт): сопоставляет внешний список облигаций (JSON/CSV) с каталогом и портфелем, не превращая неизвестное в сигнал (issue #5).
+
+```bash
+python3 main.py compare-external --file picks.json [--format json|table] [--min-credit-rating A+] [--max-source-skew-days 3]
+```
+
+- Вход: на строку обязательны `isin` (полный ISIN — единственный ключ), `source`, `source_as_of`; опционально `name`/`series`, `price` (% номинала), `yield` (%), `ytm_to` (`offer|maturity`), `rating`, `maturity`, `source_snapshot_id`, `qty` (гипотетическая покупка, шт — для экспозиции эмитента «после»).
+- Статусы сопоставления: `UNMATCHED_EXTERNAL` (нет ISIN в каталоге/в строке), `IDENTITY_CONFLICT` (имя/серия/погашение не совпали), `STALE_CROSS_SOURCE` (даты источников расходятся более `--max-source-skew-days`). Fuzzy-match не делается; такие строки в intent/plan не идут (`decision.plan_input_allowed=false`).
+- Контракт строки (`contract_version`): `identity / external / market / yield / credit / portfolio / decision`; `decision.eligibility` ∈ `comparable | not_comparable | blocked`, `decision.blockers[]`/`warnings[]` есть всегда (коды `PRICE_STALE`, `FLOATER_RATE_STALE`, `RATING_MISSING`, `RATING_STALE`, `YTM_MISSING`, `YTM_NOT_COMPARABLE`, `EXTERNAL_DATE_UNKNOWN`, `ISSUER_LINK_MISSING`, `IDENTITY_CONFLICT`, `HELD_SAME_ISSUER`, `ISSUER_LIMIT`, ...).
+- FIX сравнивается по каноническому `ytm_pct` и горизонту `ytm_to`; разные горизонты/цены/даты → `YTM_NOT_COMPARABLE`. FLOAT: `ytm_pct=null`, `ytm_reason=floating_coupon`, поля `current_coupon_rate/coupon_spread_bps/reference_rate/rate_as_of`; устаревшая ставка — blocker `FLOATER_RATE_STALE`; в общий FIX-рейтинг (`rankings.fix_ytm`) не попадает (`rankings.float` отдельно).
+- `credit.rating_status`: `confirmed | missing | stale | invalid | issuer_only | proxy_only | conflicting`; `risk_level/list_level` и внешний рейтинг рейтинг не подтверждают. С `--min-credit-rating` неподтверждённый рейтинг (`RATING_MISSING`/`RATING_STALE`/`RATING_CONFLICT`) и рейтинг ниже порога (`CREDIT_RATING_BELOW_MIN`) — разные blockers.
+- Экспозиция эмитента до/после считается по агрегату позиций (один ISIN на двух счетах суммируется), `HELD_SAME_ISSUER` — серия того же эмитента уже в портфеле; превышение лимита 15% — blocker; `issuer_matrix` — сводка по эмитентам.
+- Ответ несёт `context_fingerprint` того же `PlanningContext`, что строит `rebalance-plan`; stale/critical data gate блокирует каждую строку (`DATA_GATE_BLOCKED`).
 
 ### `set-spread` - Установка спреда для флоатеров
 

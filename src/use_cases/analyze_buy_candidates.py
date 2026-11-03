@@ -6,6 +6,7 @@ import argparse
 import logging
 from typing import Any, Dict, List
 
+from src.services.cashflow import ytm_horizon_date
 from src.use_cases.base import UseCase
 from src.storage import PortfolioStorage
 
@@ -110,7 +111,11 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         cls._add_include_held_argument(floater_parser)
 
         # Режим: сравнение с портфелем
-        compare_parser = subparsers.add_parser('compare', help='Сравнение с текущим портфелем')
+        compare_parser = subparsers.add_parser(
+            'compare',
+            help='Справочный diff YTM FIX-бумаг с портфелем (без вердикта покупки; '
+                 'внешние списки — команда compare-external)',
+        )
         compare_parser.add_argument('--limit', type=int, default=25, help='Количество бумаг (по умолчанию: 25)')
         cls._add_risk_arguments(compare_parser, default=1)
         cls._add_include_held_argument(compare_parser)
@@ -300,34 +305,34 @@ class AnalyzeBuyCandidatesUseCase(UseCase):
         print(f"{'='*155}")
 
     def _print_comparison_table(self, rows: List[Dict[str, Any]]):
-        """Выводит таблицу сравнения с портфелем."""
-        print(f"\n{'='*120}")
-        print(f"📊 Сравнение с текущим портфелем")
-        print(f"{'='*120}")
-        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<25} | {'Купон %':<6} | {'Риск':<4} | {'Доходн. %':<9} | {'Разница':<7} | {'Рекомендация':<15} | {'Портфель':<15}")
-        print("-" * 138)
+        """Справочный diff канонической YTM FIX-бумаг с портфелем (issue #5).
+
+        Без вердикта покупки: купонная доходность не сравнивается, флоатеры и
+        бумаги без YTM в diff не входят. Горизонт каждой строки (ytm_to) —
+        из ytm_horizon_date; средняя YTM портфеля смешанного горизонта.
+        """
+        print(f"\n{'='*110}")
+        print(f"📊 Справочный diff YTM FIX-бумаг с портфелем (не рекомендация к покупке)")
+        print(f"{'='*110}")
+        print(f"{'ISIN':<12} | {'Тикер':<8} | {'Название':<25} | {'YTM %':<7} | {'ytm_to':<8} | {'Δ к портф., п.п.':<16} | {'Риск':<4} | {'Портфель':<15}")
+        print("-" * 118)
 
         for row in rows:
             try:
-                coupon_rate = float(row['coupon_rate_percent']) if row['coupon_rate_percent'] else 0
-                potential_yield = float(row['potential_yield_percent']) if row['potential_yield_percent'] else 0
-                yield_diff = float(row['yield_vs_portfolio']) if row['yield_vs_portfolio'] else 0
-
-                # Отладочная информация для RU000A10B7T7
-                if row['isin'] == 'RU000A10B7T7':
-                    logger.debug(f"DEBUG: {row['isin']} - coupon_rate: {coupon_rate}, potential_yield: {potential_yield}")
-
+                _, ytm_to = ytm_horizon_date(row.get('maturity_date'), row.get('offer_date'))
                 print(f"{row['isin']:<12} | "
                       f"{row['ticker'] or 'N/A':<8} | "
                       f"{row['name'][:25] if row['name'] else 'N/A':<25} | "
-                      f"{coupon_rate:<6.1f} | "
+                      f"{float(row['ytm_percent']):<7.2f} | "
+                      f"{ytm_to or 'N/A':<8} | "
+                      f"{float(row['ytm_vs_portfolio']):<16.2f} | "
                       f"{row['risk_level'] or 'N/A':<4} | "
-                      f"{potential_yield:<9.1f} | "
-                      f"{yield_diff:<7.1f} | "
-                      f"{row['recommendation']:<15} | "
                       f"{row.get('held_badge') or '':<15}")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при выводе строки: {e}")
                 continue
-        
-        print(f"{'='*120}")
+
+        avg = rows[0].get('avg_portfolio_ytm') if rows else None
+        if avg is not None:
+            print(f"Средняя YTM FIX-позиций портфеля (смешанный горизонт): {float(avg):.2f}%")
+        print(f"{'='*110}")

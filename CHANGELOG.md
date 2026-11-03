@@ -2,6 +2,30 @@
 
 Все заметные изменения проекта. Стиль — по коммитам: `feat(scope): ... (task NNN)`.
 
+## 2026-11-03
+
+- feat(compare): безопасное сравнение внешних подборок с портфелем (issue #5,
+  P0+P1). Новая команда `compare-external --file <json|csv> [--format
+  json|table] [--min-credit-rating A+] [--max-source-skew-days 3]`: ключ —
+  только полный ISIN (`UNMATCHED_EXTERNAL`/`IDENTITY_CONFLICT`/
+  `STALE_CROSS_SOURCE`, без fuzzy-match), версионированный контракт строки
+  (identity/external/market/yield/credit/portfolio/decision, `blockers[]`/
+  `warnings[]` с reason codes), `rating_status` (confirmed/missing/stale/
+  invalid/issuer_only/proxy_only/conflicting; risk_level рейтинг не
+  подтверждает), FLOAT-контракт (`ytm_pct=null`, `ytm_reason=
+  floating_coupon`, ставка/спред/`rate_as_of`, устаревшая ставка — blocker,
+  FIX и FLOAT не ранжируются вместе), экспозиция эмитента до/после по
+  агрегату счетов + `HELD_SAME_ISSUER`, `context_fingerprint` того же
+  PlanningContext, что у rebalance-plan; stale/critical data gate блокирует
+  строки. eligibility никогда не содержит вердикта покупки. Без миграций.
+- fix(compare): legacy `analyze-buy-candidates compare` больше не выдаёт
+  ПОКУПАТЬ/РАССМОТРЕТЬ на основании купона/цены или текущей ставки
+  флоатера: теперь справочный diff канонической `ytm_pct` + `ytm_to` FIX-бумаг
+  со средней YTM портфеля (флоатеры и бумаги без YTM исключены). Колонки
+  `potential_yield_percent`/`yield_vs_portfolio`/`recommendation` заменены на
+  `ytm_percent`/`ytm_vs_portfolio`. Тесты: tests/test_compare_external.py;
+  счётчик команд в тестах factory-map 39 → 40.
+
 ## 2026-10-02
 
 - feat(planning): верхнеуровневый `context_id` в JSON-envelope

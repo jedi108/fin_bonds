@@ -443,6 +443,9 @@ class TestAnalyzeBuyCandidatesStorage:
                 market_price=Decimal('1000.0'),
                 market_price_updated_at=now,
                 risk_level=1,
+                # issue #5: compare сравнивает канонический ytm, не купон
+                ytm=Decimal(rate),
+                ytm_updated_at=now,
             )
         self._insert_held_position(db, 'RU000HELD001', 'HELD1', 'HELD1', Decimal('5'))
 

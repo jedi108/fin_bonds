@@ -54,6 +54,7 @@ from src.use_cases.rebalance_report import RebalanceReportUseCase
 from src.use_cases.rebalance_plan import RebalancePlanUseCase
 from src.use_cases.rebalance_compare import RebalanceCompareUseCase
 from src.use_cases.sync_chatgpt_portfolio import SyncChatgptPortfolioUseCase
+from src.use_cases.compare_external import CompareExternalUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ class UseCaseFactory:
             'rebalance-compare': RebalanceCompareUseCase,
             'rebalance-analysis-snapshot': AnalysisSnapshotUseCase,
             'sync-chatgpt-portfolio': SyncChatgptPortfolioUseCase,
+            'compare-external': CompareExternalUseCase,
         }
 
     def get_all_use_cases(self) -> List[Type[UseCase]]:
