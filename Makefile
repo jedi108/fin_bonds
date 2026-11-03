@@ -13,7 +13,13 @@ DEPLOY_ENC_FILE ?= $(ENV_DIR)/.env.prod.enc
 # задаётся в .env.deploy, пусто — шаг пропускается)
 DEPLOY_GIT_SAFE_DIR ?=
 DEPLOY_CONF_DIR ?= ./workspace/fin_bonds/deploy
-SKILLS_DIR ?= ./workspace/fin_bonds/skills_hermes
+SKILLS_DIR ?= ./skills_hermes
+# Hermes-хост и копия скиллов на нём — по умолчанию из .env.deploy
+# (скиллы rsync-ятся в рабочий экземпляр, как и `make deploy`).
+HERMES_HOST ?= $(DEPLOY_USER)@$(DEPLOY_HOST)
+FIN_BONDS_DIR ?= $(DEPLOY_DIR)
+HERMES_SKILLS_SRC ?= $(FIN_BONDS_DIR)/skills_hermes
+export HERMES_HOST FIN_BONDS_DIR HERMES_SKILLS_SRC SKILLS_DIR
 VENV_PY ?= $(shell test -x ./venv/bin/python && echo ./venv/bin/python || echo python3)
 
 .PHONY: help deploy deploy-init env-push sops-edit sops-decrypt sops-encrypt run-remote logs status ssh timer-install timer-status check-deploy-env validate-skills deploy-skills check-skills-profile hooks-install migrate-remote migrate test
@@ -44,7 +50,7 @@ help:
 	@echo "  make validate-skills - Валидация frontmatter скиллов HERMES (skills_hermes)"
 	@echo "  make deploy-skills  - Синхронизация скиллов на хост Hermes + синк профиля + проверка"
 	@echo "  make check-skills-profile - Проверка профиля Hermes против манифеста скиллов (005.6)"
-	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов в сабмодуль workspace"
+	@echo "  make hooks-install  - Установить pre-commit hook валидации скиллов (skills_hermes/hooks)"
 
 # Первичная инициализация на сервере
 deploy-init:
@@ -136,17 +142,17 @@ test:
 
 # Валидация frontmatter скиллов HERMES перед коммитом/деплоем
 validate-skills:
-	@test -d $(SKILLS_DIR) || { echo "Ошибка: нет $(SKILLS_DIR) (инициализируйте сабмодуль: git submodule update --init workspace)"; exit 1; }
+	@test -d $(SKILLS_DIR) || { echo "Ошибка: нет $(SKILLS_DIR)"; exit 1; }
 	$(VENV_PY) $(SKILLS_DIR)/scripts/validate_skills.py
 
-# Синхронизация скиллов на хост Hermes (yum4) + синк профиля агента + проверка
+# Синхронизация скиллов на хост Hermes + синк профиля агента + проверка
 # целостности (005.6). Синк профиля идемпотентен: без изменений в
-# каноническом дереве повторный запуск — no-op. Пути/хост/контейнер берутся
-# из манифеста skills_manifest.yaml в приватном сабмодуле workspace.
+# каноническом дереве повторный запуск — no-op. Скиллы — публичный
+# $(SKILLS_DIR); деплой-скрипт (хост, пути, compose) — приватный $(DEPLOY_CONF_DIR).
 deploy-skills: validate-skills
-	@test -f $(SKILLS_DIR)/deploy/sync_skills_yum4.sh || { echo "Ошибка: нет $(SKILLS_DIR)/deploy/sync_skills_yum4.sh"; exit 1; }
+	@test -f $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh || { echo "Ошибка: нет $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh (инициализируйте сабмодуль: git submodule update --init workspace)"; exit 1; }
 	@test -f $(SKILLS_DIR)/scripts/sync_profile_skills.py || { echo "Ошибка: нет $(SKILLS_DIR)/scripts/sync_profile_skills.py"; exit 1; }
-	bash $(SKILLS_DIR)/deploy/sync_skills_yum4.sh
+	bash $(DEPLOY_CONF_DIR)/sync_skills_yum4.sh
 	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py sync
 	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py check
 
@@ -154,11 +160,11 @@ deploy-skills: validate-skills
 check-skills-profile:
 	$(VENV_PY) $(SKILLS_DIR)/scripts/sync_profile_skills.py check
 
-# Однократная установка pre-commit hook валидации скиллов в сабмодуль fin_tasks
+# Однократная установка pre-commit hook валидации скиллов
 hooks-install:
-	@test -d workspace/.git -o -f workspace/.git || { echo "Ошибка: сабмодуль workspace не инициализирован"; exit 1; }
-	git -C workspace config core.hooksPath fin_bonds/skills_hermes/hooks
-	@echo "==> pre-commit hook установлен (git -C workspace config core.hooksPath)"
+	git config core.hooksPath skills_hermes/hooks
+	-@git -C workspace config --unset core.hooksPath 2>/dev/null
+	@echo "==> pre-commit hook установлен (git config core.hooksPath)"
 
 # Ручной запуск обновления на сервере
 run-remote:
