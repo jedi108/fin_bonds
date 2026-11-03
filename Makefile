@@ -103,6 +103,7 @@ deploy: deploy-init env-push
 		--exclude '.vscode/' \
 		--exclude '.cursor/' \
 		--exclude '.crush/' \
+		--exclude '.claude/' \
 		--exclude '_output_/' \
 		./ $(DEPLOY_USER)@$(DEPLOY_HOST):$(DEPLOY_DIR)/
 	@echo "==> Обновление зависимостей pip..."
