@@ -398,7 +398,7 @@ python3 main.py check-offers
 **Назначение:** Добавляет одну конкретную облигацию в ваш локальный каталог по её ISIN. Полезно, если какой-то редкой бумаги не оказалось в общей выгрузке.
 
 ```bash
-python3 main.py add-bond RU000A109SP5
+python3 main.py add-bond RU000A10XX04
 ```
 
 ---
@@ -1019,7 +1019,7 @@ python3 main.py compare-external --file picks.json [--format json|table] [--min-
 
 ```bash
 # Установить спред для конкретной облигации
-python3 main.py set-spread --isin RU000A108Y86 --spread 2.5
+python3 main.py set-spread --isin RU000A10XX05 --spread 2.5
 
 # Установить спред для всех флоатеров в портфеле
 python3 main.py set-spread --all --default-spread 2.0

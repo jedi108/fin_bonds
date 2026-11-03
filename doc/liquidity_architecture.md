@@ -67,7 +67,7 @@
 
 ### Анализ ликвидности для конкретной бумаги
 ```bash
-python3 main.py analyze-liquidity --isin RU000A10ASC6
+python3 main.py analyze-liquidity --isin RU000A10XX06
 ```
 
 ### Обновление метрик ликвидности для всего портфеля

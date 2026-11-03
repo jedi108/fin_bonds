@@ -3,7 +3,7 @@
 --
 -- Свободные деньги становятся частью того же canonical snapshot, что и
 -- позиции: TBank API -> sync-portfolio -> PostgreSQL -> rebalance-report.
--- Прямые вызовы broker API из rebalance-report/Hermes/ChatGPT запрещены.
+-- Прямые вызовы broker API из rebalance-report/агента/ChatGPT запрещены.
 --
 -- Ключ: broker_name + account_id + currency. Идемпотентный upsert пишет
 -- только sync-portfolio при УСПЕШНОМ ответе API; ошибка API строки не

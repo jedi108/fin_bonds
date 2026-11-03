@@ -322,28 +322,28 @@ def _make_fresh_catalog(db, isin: str, maturity: date):
 
 
 def test_zombie_rows_are_warning_not_critical(db, capsys):
-    """002.1, кейс сессии 2026-09-29: погашенная МОНОП (zero-строка) +
-    ГлобалФ (цена 0 от брокера) → WARN_ZOMBIE_ROWS, is_fresh=true,
+    """002.1, кейс сессии 2026-09-29: погашенная ЭМИТ-А (zero-строка) +
+    ЭМИТ-Б (цена 0 от брокера) → WARN_ZOMBIE_ROWS, is_fresh=true,
     ручной разбор не требуется."""
     now = datetime.now(timezone.utc)
-    # Погашенная бумага с zero-оценкой (МОНОП 1P02)
+    # Погашенная бумага с zero-оценкой (ЭМИТ-А 1P02)
     db.add_bonds_to_catalog([Bond(
-        isin='RU000A10AA02', name='МОНОП 1P02', nominal=Decimal(1000),
+        isin='RU000A10XX02', name='ЭМИТ-А 1P02', nominal=Decimal(1000),
         maturity_date=date(2025, 12, 4), currency='RUB',
     )])
-    # Живая бумага, брокер дал цену 0 (ГлобалФ 1P5)
-    _make_fresh_catalog(db, 'RU000A108VZ0', maturity=date(2028, 3, 14))
+    # Живая бумага, брокер дал цену 0 (ЭМИТ-Б 1P5)
+    _make_fresh_catalog(db, 'RU000A10XX01', maturity=date(2028, 3, 14))
     with db.conn.cursor() as cursor:
         cursor.execute(
-            "UPDATE bonds_catalog SET market_price = 0 WHERE isin = 'RU000A108VZ0'"
+            "UPDATE bonds_catalog SET market_price = 0 WHERE isin = 'RU000A10XX01'"
         )
         cursor.execute(
             """
             INSERT INTO portfolio_positions (isin, broker_name, account_id, quantity, current_price, current_value, updated_at)
             VALUES
-              ('RU000A10AA02', 'TBank', 't1', 35, 0, 0, %s),
-              ('RU000A108VZ0', 'TBank', 't1', 5, 0, 0, %s),
-              ('RU000A108VZ0', 'Fake', 'a1', 2, 0, 0, %s)
+              ('RU000A10XX02', 'TBank', 't1', 35, 0, 0, %s),
+              ('RU000A10XX01', 'TBank', 't1', 5, 0, 0, %s),
+              ('RU000A10XX01', 'Fake', 'a1', 2, 0, 0, %s)
             """,
             (now, now, now),
         )
@@ -363,9 +363,9 @@ def test_zombie_rows_are_warning_not_critical(db, capsys):
 
     assert data['portfolio_positions_rows'] == 3
     assert data['portfolio_zero_value_positions'] == 3
-    # Погашенная МОНОП не подозрительная, ГлобалФ (2 строки) — подозрительные
+    # Погашенная ЭМИТ-А не подозрительная, ЭМИТ-Б (2 строки) — подозрительные
     assert data['portfolio_zero_rows_suspicious'] == 2
-    assert data['portfolio_zero_rows_isins'] == 'RU000A108VZ0;RU000A10AA02'
+    assert data['portfolio_zero_rows_isins'] == 'RU000A10XX01;RU000A10XX02'
     # Главное: зомби-строки не дают ложного CRITICAL и не ломают is_fresh
     assert data['gate_status'] == 'WARN_ZOMBIE_ROWS'
     assert data['status'] == 'WARNING'

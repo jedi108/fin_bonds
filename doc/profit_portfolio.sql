@@ -100,4 +100,4 @@ WHERE metric_name = 'floater_coupon_calculator'
 AND metric_value is NOT NULL;
 
 
-SELECT coupon_rate_percent FROM bonds_catalog WHERE isin = 'RU000A10ASC6';
+SELECT coupon_rate_percent FROM bonds_catalog WHERE isin = 'RU000A10XX06';

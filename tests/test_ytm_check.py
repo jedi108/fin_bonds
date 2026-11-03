@@ -15,7 +15,7 @@ MATURITY = TODAY + timedelta(days=1290)
 
 def bond(**overrides):
     row = {
-        'isin': 'RU000A10BP79', 'name': 'МТС 002Р-11',
+        'isin': 'RU000A10XX03', 'name': 'Эмитент 002Р-11',
         'ytm_percent': 13.71, 'coupon_rate_percent': Decimal('19.0'),
         'maturity_date': MATURITY, 'offer_date': OFFER,
         'moex_yield': Decimal('14.46'), 'moex_yield_date': OFFER,
@@ -63,12 +63,12 @@ def test_json_row_ytm_is_not_coupon_and_has_horizon():
 
 ISS_BOARD = {
     'securities': {'columns': ['SECID', 'ISIN', 'OFFERDATE'],
-                   'data': [['RU000A10BP79', 'RU000A10BP79', '2026-11-23'],
+                   'data': [['RU000A10XX03', 'RU000A10XX03', '2026-11-23'],
                             ['RU000NOTRADE', 'RU000NOTRADE', None]]},
     'marketdata': {'columns': ['SECID', 'YIELD'],
-                   'data': [['RU000A10BP79', 14.46], ['RU000NOTRADE', 0]]},
+                   'data': [['RU000A10XX03', 14.46], ['RU000NOTRADE', 0]]},
     'marketdata_yields': {'columns': ['SECID', 'YIELDDATE', 'YIELDDATETYPE'],
-                          'data': [['RU000A10BP79', '2026-11-23', 'OFFER'],
+                          'data': [['RU000A10XX03', '2026-11-23', 'OFFER'],
                                    ['RU000NOTRADE', '0000-00-00', None]]},
 }
 
@@ -77,5 +77,5 @@ def test_fetch_all_bonds_parses_yield_without_network():
     with patch.object(MoexApiClient, '_make_request', return_value=ISS_BOARD) as req:
         bonds = MoexApiClient().fetch_all_bonds_data()
     assert 'marketdata_yields' in req.call_args[0][1]['iss.only']
-    assert _parse_moex_yield(bonds['RU000A10BP79']) == (Decimal('14.46'), date(2026, 11, 23), 'OFFER')
+    assert _parse_moex_yield(bonds['RU000A10XX03']) == (Decimal('14.46'), date(2026, 11, 23), 'OFFER')
     assert _parse_moex_yield(bonds['RU000NOTRADE']) == (None, None, None)

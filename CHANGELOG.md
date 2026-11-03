@@ -201,7 +201,7 @@
   fitted целевой портфель одной командой (030.8) — новая команда
   `rebalance-plan` (`src/use_cases/rebalance_plan.py::RebalancePlanUseCase`,
   строка в карте factory; main.py изменений не требует — регистрация через
-  use_case_map): standard Hermes workflow вместо цикла «создать scenario.json
+  use_case_map): standard agent workflow вместо цикла «создать scenario.json
   → прогнать → вручную уменьшить qty → повторить» (baseline: обычная
   ребалансировка = report → plan, 2 domain-вызова, 0 ad-hoc кода). Use case —
   тонкая композиция canonical домена (правило 030 №1, собственной арифметики

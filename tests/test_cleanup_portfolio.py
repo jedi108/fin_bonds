@@ -83,7 +83,7 @@ class TestViewValuationGuard:
                 "SELECT position_value_rub FROM v_portfolio_positions_valuation "
                 "WHERE isin = 'RU000A0MTRD01'"
             )
-            # Кейс МОНОП 1P02: 35 шт * 1000 номинал = 35000 фантомной стоимости
+            # Кейс ЭМИТ-А 1P02: 35 шт * 1000 номинал = 35000 фантомной стоимости
             assert cursor.fetchone()[0] == Decimal('0.00')
 
     def test_unmatured_position_keeps_nominal_fallback(self, db):
@@ -161,9 +161,9 @@ class TestStorageZombieMethods:
         assert [row['isin'] for row in closed] == ['RU000A0ZERO02']
 
     def test_find_zombies_categories(self, db):
-        # matured: погашенная бумага с ненулевым qty (кейс МОНОП)
+        # matured: погашенная бумага с ненулевым qty (кейс ЭМИТ-А)
         add_catalog_row(db, 'RU000A0ZMB01', date(2025, 12, 4))
-        # zero_value_live: живая бумага, цена 0 от брокера (кейс ГлобалФ)
+        # zero_value_live: живая бумага, цена 0 от брокера (кейс ЭМИТ-Б)
         add_catalog_row(db, 'RU000A0ZMB02', date(2028, 3, 14))
         # ничего подозрительного
         add_catalog_row(db, 'RU000A0OK001', date(2030, 1, 1))
@@ -226,7 +226,7 @@ class TestCleanupPortfolioUseCase:
         add_catalog_row(db, 'RU000A0CLN01', date(2025, 1, 1))
         insert_position(db, 'RU000A0CLN01', 'TBank', 't1', '35', '0')
         insert_position(db, 'RU000A0CLN02', 'TBank', 't1', '0', '0')
-        # Живая позиция с нулевой оценкой (ГлобалФ) — не зомби, не трогается
+        # Живая позиция с нулевой оценкой (ЭМИТ-Б) — не зомби, не трогается
         add_catalog_row(db, 'RU000A0CLN03', date(2028, 3, 14))
         insert_position(db, 'RU000A0CLN03', 'TBank', 't1', '5', '0')
 
