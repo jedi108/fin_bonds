@@ -36,7 +36,7 @@ def plot_ratings_history(
     fig = go.Figure()
 
     # Инвертируем шкалу для меток оси Y (текст: значение)
-    y_tick_labels = {v: k for k, v in rating_scale.items() if v >= 0}
+    y_tick_labels = {v: k for k, v in rating_scale.items()}
 
     for bond_name, data_points in history_data.items():
         if not data_points:

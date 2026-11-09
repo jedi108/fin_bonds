@@ -35,28 +35,35 @@ def round_coupon_rate(value: Any) -> Optional[Decimal]:
 
 
 # Суффиксы национальной шкалы в кодах рейтингов провайдеров (002.6):
-# АКРА/НКР пишут 'A-(RU)', MOEX отдаёт 'AAA.ru'/'AAA.RU' (rating_value_code).
-# Приводятся к базовому коду шкалы rating_scale из конфига ('A-', 'AAA').
-_RATING_CODE_SUFFIX_RE = re.compile(r'(?:\(RU\)|\.RU)\s*$')
+# АКРА/НКР пишут 'A-(RU)', MOEX отдаёт 'AAA.ru', 'AAA(ru.sf)' (структурное
+# финансирование), НРА — 'A-|ru|', Эксперт РА — префикс 'ruA-'.
+# Приводятся к базовому коду шкалы rating_scale из конфига ('A-', 'AAA');
+# sf-рейтинги для мониторинга приравниваются к базовой букве.
+_RATING_CODE_SUFFIX_RE = re.compile(r'(?:\(RU(?:\.SF)?\)|\(SF\)|\.RU(?:\.SF)?|\.SF|\|RU\|)$')
+_RATING_BASE_RE = re.compile(r'^(?:AAA|AA|A|BBB|BB|B|CCC|CC|C)[+-]?$|^(?:RD|SD|D)$')
 
 
 def normalize_rating_code(code: Any) -> str:
     """Нормализует код кредитного рейтинга к базовому виду шкалы (002.6).
 
-    'A-(RU)' -> 'A-', 'AAA.ru' -> 'AAA', 'aa+(ru)' -> 'AA+'.
-    Пробелы обрезаются, регистр — верхний; None/пустота дают ''.
+    'A-(RU)' -> 'A-', 'AAA.ru' -> 'AAA', 'AAA(ru.sf)' -> 'AAA',
+    'A-|ru|' -> 'A-', 'ruA-' -> 'A-', 'AA- (RU)' -> 'AA-'.
+    Пробелы удаляются, регистр — верхний; None/пустота дают ''.
+    Нераспознанные строки возвращаются как есть (в верхнем регистре).
     """
     if code is None:
         return ''
-    return _RATING_CODE_SUFFIX_RE.sub('', str(code).strip().upper())
+    normalized = _RATING_CODE_SUFFIX_RE.sub('', re.sub(r'\s+', '', str(code)).upper())
+    if normalized.startswith('RU') and _RATING_BASE_RE.match(normalized[2:]):
+        normalized = normalized[2:]
+    return normalized
 
 
 def rating_code_to_score(code: Any, rating_scale: Optional[Dict[str, int]]) -> Optional[int]:
     """Маппинг кода рейтинга -> балл по шкале rating_scale из конфига (002.6).
 
     Ключи шкалы нормализуются так же, как код (normalize_rating_code),
-    поэтому 'A-(RU)' и 'AAA.ru' матчатся на 'A-' и 'AAA'. Для кодов вида
-    'RUAAA' (без точки/скобок) пробуется отбрасывание префикса 'RU'.
+    поэтому 'A-(RU)', 'ruA-' и 'AAA.ru' матчатся на 'A-' и 'AAA'.
 
     Возвращает None для 'N/A', пустых и вне шкалы кодов: в rating_history
     пишутся только строки с числовым баллом — потребители (check-changes,
@@ -70,11 +77,7 @@ def rating_code_to_score(code: Any, rating_scale: Optional[Dict[str, int]]) -> O
         for key, score in (rating_scale or {}).items()
         if isinstance(score, int)
     }
-    if normalized in lookup:
-        return lookup[normalized]
-    if normalized.startswith('RU') and normalized[2:] in lookup:
-        return lookup[normalized[2:]]
-    return None
+    return lookup.get(normalized)
 
 
 def setup_logging(level=logging.INFO):

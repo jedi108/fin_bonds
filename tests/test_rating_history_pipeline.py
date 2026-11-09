@@ -74,6 +74,45 @@ class TestRatingCodeMapping:
         assert rating_code_to_score('AAA', {}) is None
         assert rating_code_to_score('AAA', None) is None
 
+    def test_agency_and_moex_formats(self):
+        # MOEX /cci (sf), НРА (|ru|), Эксперт РА (префикс ru), лишние пробелы
+        assert normalize_rating_code('AAA(ru.sf)') == 'AAA'
+        assert normalize_rating_code('ruA-(sf)') == 'A-'
+        assert normalize_rating_code('A-|ru|') == 'A-'
+        assert normalize_rating_code('ruBBB+ ') == 'BBB+'
+        assert normalize_rating_code('AA- (RU)') == 'AA-'
+        assert normalize_rating_code('ruD') == 'D'
+        # 'RD' — не префикс ru + 'D'; нераспознанное не калечится
+        assert normalize_rating_code('RD') == 'RD'
+        assert normalize_rating_code('Отозван') == 'ОТОЗВАН'
+
+
+class TestProductionRatingScale:
+    """Шкала из config.yaml покрывает спекулятивный уровень и дефолт."""
+
+    @staticmethod
+    def scale():
+        import pytest
+        import yaml
+        from pathlib import Path
+        path = Path(__file__).parent.parent / 'config.yaml'
+        if not path.exists():  # config.yaml не в git (*.yaml) — локальный/деплойный файл
+            pytest.skip('config.yaml отсутствует')
+        return yaml.safe_load(path.read_text())['rating_scale']
+
+    def test_junk_and_default_are_scored_and_ordered(self):
+        scale = self.scale()
+        codes = ['BB-(RU)', 'B+', 'B-.ru', 'CCC', 'C', 'RD', 'D']
+        scores = [rating_code_to_score(c, scale) for c in codes]
+        assert None not in scores, dict(zip(codes, scores))
+        assert scores == sorted(scores, reverse=True)
+        # прежние баллы не сдвинуты — история в rating_history сравнима
+        assert rating_code_to_score('AAA', scale) == 13
+        assert rating_code_to_score('BB-', scale) == 1
+
+    def test_structured_finance_maps_to_base_letter(self):
+        assert rating_code_to_score('AAA(ru.sf)', self.scale()) == 13
+
 
 class TestCreditRatingAdapterDualWrite:
     """Адаптер пишет и monitoring_checks, и rating_history (002.6, вариант 1)."""
