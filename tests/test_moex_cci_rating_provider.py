@@ -79,6 +79,45 @@ class TestMoexCciProvider:
         assert get_rating_from_moex(self.ISIN, client) is None
 
 
+class TestMoexWorstOf:
+    """Worst-of по действующим рейтингам агентств (последняя запись каждого)."""
+
+    ISIN = 'RU000A10XX02'
+    SCALE = {'AAA': 13, 'AA': 11, 'A': 8, 'A-': 7, 'BBB+': 6}
+
+    def test_worst_active_agency_rating_wins(self):
+        client = FakeMoexClient([
+            record('AA(RU)', '2026-06-01', agency='АКРА'),
+            record('ruA-', '2026-03-01', agency='Эксперт РА'),
+            record('A.ru', '2026-07-01', agency='НКР'),
+        ])
+        result = get_rating_from_moex(self.ISIN, client, rating_scale=self.SCALE)
+        assert (result['rating'], result['agency']) == ('ruA-', 'Эксперт РА')
+
+    def test_agency_withdrawal_drops_its_older_rating(self):
+        client = FakeMoexClient([
+            record('BBB+(RU)', '2025-01-01', agency='НКР'),
+            record('Отозван', '2026-02-01', agency='НКР'),
+            record('AA(RU)', '2026-01-01', agency='АКРА'),
+        ])
+        result = get_rating_from_moex(self.ISIN, client, rating_scale=self.SCALE)
+        assert result['rating'] == 'AA(RU)'
+
+    def test_agency_latest_record_replaces_its_history(self):
+        client = FakeMoexClient([
+            record('BBB+(RU)', '2024-01-01', agency='АКРА'),
+            record('AA(RU)', '2026-01-01', agency='АКРА'),
+        ])
+        assert get_rating_from_moex(self.ISIN, client, rating_scale=self.SCALE)['rating'] == 'AA(RU)'
+
+    def test_unknown_codes_only_fall_back_to_latest(self):
+        client = FakeMoexClient([
+            record('ZZ1', '2026-01-01', agency='АКРА'),
+            record('ZZ2', '2026-05-01', agency='НКР'),
+        ])
+        assert get_rating_from_moex(self.ISIN, client, rating_scale=self.SCALE)['rating'] == 'ZZ2'
+
+
 class TestLoadRatingProviders:
     """Внешние провайдеры подключаются опциональным модулем private_plugins."""
 

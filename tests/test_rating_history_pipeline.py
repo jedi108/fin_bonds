@@ -36,8 +36,8 @@ def add_catalog_row(db, isin: str):
 
 def make_adapter(db, rating: str):
     """Адаптер с одним фейковым провайдером, всегда возвращающим rating."""
-    provider = (lambda isin, client=None: {'rating': rating, 'name': isin, 'ticker': isin}) \
-        if rating is not None else (lambda isin, client=None: None)
+    provider = (lambda isin, **kw: {'rating': rating, 'name': isin, 'ticker': isin}) \
+        if rating is not None else (lambda isin, **kw: None)
     return CreditRatingAdapter(
         db=db,
         config={'rating_scale': RATING_SCALE},
@@ -182,3 +182,74 @@ class TestCreditRatingAdapterDualWrite:
         assert sorted(history[self.ISIN]) == [
             (date(2026, 9, 28), 4), (date.today(), 2), (date.today(), 4)
         ]
+
+
+class FakeRatingDb:
+    """In-memory подмножество PortfolioStorage, которое трогает адаптер."""
+
+    def __init__(self):
+        self.checks = {}   # (isin, metric) -> value (последнее)
+        self.history = []  # (isin, score)
+
+    def get_rating_history_for_bonds(self, isins):
+        return {i: [(None, sc) for isin, sc in self.history if isin == i] for i in isins}
+
+    def get_last_monitoring_check(self, isin, metric):
+        value = self.checks.get((isin, metric))
+        return (None, value) if value is not None else None
+
+    def add_monitoring_check(self, isin, metric, value):
+        self.checks[(isin, metric)] = value
+
+    def add_rating(self, isin, rating_date, rating_code, rating_score):
+        self.history.append((isin, rating_score))
+
+
+class TestCreditRatingAdapterSignals:
+    """Значимость результата: смена источника, нераспознанный код (без БД)."""
+
+    ISIN = 'RU000A10XX01'
+
+    @staticmethod
+    def run(db, provider_name, rating):
+        adapter = CreditRatingAdapter(
+            db=db,
+            config={'rating_scale': RATING_SCALE},
+            moex_client=object(),
+            rating_providers={provider_name: lambda isin, **kw: {'rating': rating, 'agency': 'АКРА'}},
+        )
+        return adapter.fetch(SimpleNamespace(isin=TestCreditRatingAdapterSignals.ISIN))
+
+    def test_downgrade_same_source_is_significant(self):
+        db = FakeRatingDb()
+        self.run(db, 'moex', 'AAA')
+        result = self.run(db, 'moex', 'A')
+        assert result.status == 'changed' and result.is_significant
+        assert 'moex, АКРА' in result.message
+
+    def test_change_with_source_switch_is_not_significant(self):
+        db = FakeRatingDb()
+        self.run(db, 'moex', 'AAA')
+        result = self.run(db, 'extra', 'A')
+        assert result.status == 'changed' and not result.is_significant
+        assert 'смене источника' in result.message
+        assert db.checks[(self.ISIN, 'credit_rating_source')] == 'extra'
+
+    def test_unrecognized_code_alerts_once(self):
+        db = FakeRatingDb()
+        first = self.run(db, 'moex', 'ZZ+')
+        again = self.run(db, 'moex', 'ZZ+')
+        assert first.is_significant and 'Нераспознанный' in first.message
+        assert not again.is_significant
+        assert db.history == []  # вне шкалы — в rating_history не пишется
+
+    def test_not_found_is_not_significant(self):
+        db = FakeRatingDb()
+        adapter = CreditRatingAdapter(
+            db=db, config={'rating_scale': RATING_SCALE}, moex_client=object(),
+            rating_providers={'moex': lambda isin, **kw: None},
+        )
+        result = adapter.fetch(SimpleNamespace(isin=self.ISIN))
+        assert result.value == 'N/A' and not result.is_significant
+        assert (self.ISIN, 'credit_rating_source') not in db.checks
+

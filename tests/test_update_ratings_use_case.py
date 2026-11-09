@@ -142,3 +142,18 @@ class TestSummary:
     def test_format_single_line(self, db):
         summary = make_use_case(db)._format_summary('missing', checked=10, rated=7, na=2, errors=1)
         assert summary == 'Итог: scope=missing; checked=10; rated=7; na=2; errors=1'
+
+
+class TestNaCanary:
+    """Тревога при подозрительно высокой доле N/A (без БД)."""
+
+    def test_high_na_share_alerts(self):
+        assert 'ВНИМАНИЕ' in UpdateRatingsUseCase._na_alert('portfolio', 20, 11)
+
+    def test_threshold_and_small_sample_do_not_alert(self):
+        assert UpdateRatingsUseCase._na_alert('portfolio', 20, 10) is None
+        assert UpdateRatingsUseCase._na_alert('portfolio', 9, 9) is None
+
+    def test_missing_scope_never_alerts(self):
+        assert UpdateRatingsUseCase._na_alert('missing', 100, 100) is None
+

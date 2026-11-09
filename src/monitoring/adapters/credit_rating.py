@@ -7,6 +7,9 @@ from src.utils import normalize_rating_code, rating_code_to_score
 
 logger = logging.getLogger(__name__)
 
+# Метрика monitoring_checks с именем провайдера последнего рейтинга
+SOURCE_METRIC = 'credit_rating_source'
+
 
 class CreditRatingAdapter(BaseAdapter):
     """
@@ -29,15 +32,18 @@ class CreditRatingAdapter(BaseAdapter):
         Пробует разные провайдеры, пока не найдет рейтинг.
         """
         isin = bond_data.isin
+        rating_scale = self.config.get('rating_scale', {})
         current_rating_value = None
         used_provider = None
+        agency = ''
         for provider_name, provider in self.rating_providers.items():
             try:
                 # Передаем и ISIN, и активный клиент moex
-                result = provider(isin, client=self.moex_client)
+                result = provider(isin, client=self.moex_client, rating_scale=rating_scale)
                 if result and result.get('rating'):
                     current_rating_value = result['rating']
                     used_provider = provider_name
+                    agency = result.get('agency') or ''
                     logger.info(f"Рейтинг '{current_rating_value}' успешно получен от '{provider_name}' для {isin}.")
                     break  # Рейтинг найден, выходим из цикла
             except Exception as e:
@@ -53,9 +59,16 @@ class CreditRatingAdapter(BaseAdapter):
         # Это позволяет классифицировать downgrade в том же прогоне.
         previous_history = self.db.get_rating_history_for_bonds([isin]).get(isin, [])
         previous_score = previous_history[-1][1] if previous_history else None
+        # Прошлое сырое значение и источник — до записи текущих: смена одного
+        # лишь источника не должна выглядеть как изменение рейтинга, а
+        # нераспознанный код алертится один раз, а не каждый прогон.
+        previous_check = self.db.get_last_monitoring_check(isin, self.name)
+        previous_source = self.db.get_last_monitoring_check(isin, SOURCE_METRIC)
 
         # Сохраняем результат в базу
         self.db.add_monitoring_check(isin, self.name, str(current_rating_value))
+        if used_provider:
+            self.db.add_monitoring_check(isin, SOURCE_METRIC, used_provider)
 
         # Дублируем рейтинг в rating_history (002.6, вариант 1 — согласован
         # с 003 задача 4.2, их критерий: count(*) FROM rating_history > 0 и
@@ -66,7 +79,7 @@ class CreditRatingAdapter(BaseAdapter):
         # числовой балл, потребители сравнивают его как int. Запись
         # идемпотентна (уникальный индекс isin+rating_date+rating_code,
         # миграция 012): повторный прогон за тот же день не плодит дублей.
-        rating_score = rating_code_to_score(current_rating_value, self.config.get('rating_scale', {}))
+        rating_score = rating_code_to_score(current_rating_value, rating_scale)
         if rating_score is not None:
             rating_code = normalize_rating_code(current_rating_value)
             self.db.add_rating(
@@ -88,23 +101,42 @@ class CreditRatingAdapter(BaseAdapter):
         )
         is_downgrade = rating_changed and rating_score < previous_score
         is_upgrade = rating_changed and rating_score > previous_score
-        is_significant = is_downgrade or (
-            is_upgrade and self.config.get('send_alerts_for_upgrades', True)
+        source_changed = bool(
+            previous_source and used_provider and previous_source[1] != used_provider
         )
+        unrecognized = current_rating_value != 'N/A' and rating_score is None
+        newly_unrecognized = unrecognized and (
+            previous_check is None or previous_check[1] != str(current_rating_value)
+        )
+        is_significant = newly_unrecognized or (not source_changed and (
+            is_downgrade or (is_upgrade and self.config.get('send_alerts_for_upgrades', True))
+        ))
+        source = f"{used_provider}, {agency}" if agency else used_provider
         if current_rating_value == 'N/A':
             message = "Рейтинг не найден ни одним провайдером"
+        elif unrecognized:
+            message = (
+                f"Нераспознанный код рейтинга '{current_rating_value}' ({source}) — "
+                "нет в rating_scale (config.yaml), изменение не отслеживается"
+            )
+        elif rating_changed and source_changed:
+            message = (
+                f"Рейтинг {normalize_rating_code(current_rating_value)} "
+                f"({previous_score} -> {rating_score}) при смене источника "
+                f"{previous_source[1]} -> {source} — вероятно, не изменение рейтинга"
+            )
         elif rating_changed:
             message = (
                 f"Рейтинг изменился: {normalize_rating_code(current_rating_value)} "
-                f"({previous_score} -> {rating_score}, {used_provider})"
+                f"({previous_score} -> {rating_score}, {source})"
             )
         else:
-            message = f"Рейтинг: {current_rating_value} ({used_provider})"
+            message = f"Рейтинг: {current_rating_value} ({source})"
 
         return MonitoringResult(
             adapter_name=self.name,
             isin=isin,
-            status='changed' if rating_changed else 'success',
+            status='changed' if rating_changed or newly_unrecognized else 'success',
             message=message,
             value=current_rating_value,
             is_significant=is_significant

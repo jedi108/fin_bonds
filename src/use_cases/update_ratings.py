@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 # (Р5 оценивает catalog-прогон как 2-3 внешних запроса на бумагу).
 SCOPES = ('portfolio', 'missing', 'catalog')
 RATINGS_ONLY_SCOPES = ('missing', 'catalog')
+# Canary: доля N/A выше порога при достаточной выборке — вероятно, сломан
+# источник (вёрстка, антибот, недоступность), а не «у бумаг нет рейтинга».
+# Скоуп missing исключён: он по определению набран из бумаг с N/A.
+NA_ALERT_MIN_CHECKED = 10
+NA_ALERT_SHARE = 0.5
 
 
 class UpdateRatingsUseCase(UseCase):
@@ -112,6 +117,16 @@ class UpdateRatingsUseCase(UseCase):
         """Итоговая сводка одной строкой (002.9, Р7) — её читает скилл finbonds-ratings."""
         return f"Итог: scope={scope_label}; checked={checked}; rated={rated}; na={na}; errors={errors}"
 
+    @staticmethod
+    def _na_alert(scope_label: str, checked: int, na: int) -> Optional[str]:
+        """Текст тревоги, если доля N/A подозрительно высока (иначе None)."""
+        if scope_label == 'missing' or checked < NA_ALERT_MIN_CHECKED or na <= checked * NA_ALERT_SHARE:
+            return None
+        return (
+            f"ВНИМАНИЕ: рейтинг не получен для {na} из {checked} бумаг "
+            f"(> {NA_ALERT_SHARE:.0%}) — проверьте доступность провайдеров рейтингов"
+        )
+
     def execute(self, args: argparse.Namespace):
         logger.info("🚀 Запуск use case: Обновление отслеживаемых метрик...")
 
@@ -183,6 +198,9 @@ class UpdateRatingsUseCase(UseCase):
         rated = sum(1 for r in rating_results if r.value and r.value != 'N/A')
         na = sum(1 for r in rating_results if r.value == 'N/A')
         logger.info(self._format_summary(scope_label, len(bonds), rated, na, errors))
+        na_alert = self._na_alert(scope_label, len(rating_results), na)
+        if na_alert:
+            logger.error(na_alert)
 
         # 4. Отправляем уведомления о значительных изменениях — только для
         # портфельного скоупа и --isin (Р6): missing/catalog пишут в БД без
