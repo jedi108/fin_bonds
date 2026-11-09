@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Pre-commit hook: валидация frontmatter скиллов skills.
+# Установка — `make hooks-install` (git config core.hooksPath skills/hooks).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Стоп-слова публичного репо (приватный список, если сабмодуль workspace есть):
+# по одному ERE-паттерну на строку; проверяются добавляемые строки диффа.
+DENY="$ROOT/workspace/fin_bonds/deploy/public_denylist.txt"
+if [ -f "$DENY" ]; then
+  hits="$(git diff --cached -U0 --diff-filter=ACMR -- . ':!workspace' \
+    | grep '^+' | grep -v '^+++' | grep -inEf <(grep -v '^#' "$DENY" | grep .) || true)"
+  if [ -n "$hits" ]; then
+    echo "pre-commit: в коммите стоп-слова публичного репо ($DENY):" >&2
+    echo "$hits" | head -20 >&2
+    exit 1
+  fi
+fi
+
+git diff --cached --name-only | grep -q '^skills/' || exit 0
+
+PY=python3
+[ -x "$ROOT/venv/bin/python" ] && PY="$ROOT/venv/bin/python"
+exec "$PY" "$ROOT/skills/scripts/validate_skills.py"

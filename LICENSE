@@ -1,0 +1,34 @@
+Copyright (c) 2026 jedi108. All rights reserved.
+
+Исходный код этого репозитория опубликован только для ознакомления.
+Он не распространяется под открытой лицензией: права на копирование,
+повторное использование, изменение, распространение, сублицензирование
+и коммерческое использование без письменного разрешения правообладателя
+не предоставляются.
+
+Исключение: каталог skills/ (agent skills finbonds-*) распространяется под
+лицензией MIT, как указано в поле `license` каждого SKILL.md.
+
+Просмотр кода на GitHub и создание форка средствами GitHub допускаются
+в объёме, предусмотренном GitHub Terms of Service.
+
+ПРОГРАММНОЕ ОБЕСПЕЧЕНИЕ ПРЕДОСТАВЛЯЕТСЯ «КАК ЕСТЬ», БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ.
+Программа не является инвестиционной рекомендацией. Правообладатель не
+отвечает за любые убытки, возникшие в результате её использования.
+
+---
+
+The source code in this repository is published for viewing only. It is not
+offered under an open-source license: no rights to copy, reuse, modify,
+distribute, sublicense or use it commercially are granted without the
+copyright holder's written permission.
+
+Exception: the skills/ directory (finbonds-* agent skills) is licensed under
+the MIT License, as stated in the `license` field of each SKILL.md.
+
+Viewing the code on GitHub and forking it through GitHub are permitted to the
+extent provided by the GitHub Terms of Service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. It is not
+investment advice. The copyright holder is not liable for any losses arising
+from its use.
